@@ -30,6 +30,7 @@ export interface FireProviderConfig {
   maxUpdatesThreshold?: number; // default 50
   maxWaitTime?: number; // default 500ms
   compactionProbability?: number; // default 0.01 (1%)
+  depth?: number;
 }
 
 export class FireProvider extends ObservableV2<any> {
@@ -52,9 +53,12 @@ export class FireProvider extends ObservableV2<any> {
   maxUpdatesThreshold: number = 50;
   maxWaitTime: number = 500;
   compactionProbability: number = 0.01;
+  depth: number;
 
   private _unsubscribeUpdates: Unsubscribe | null = null;
   private _debouncedSave: () => void;
+
+  private _isDestroyed = false;
 
   constructor({
     firebaseApp,
@@ -63,6 +67,7 @@ export class FireProvider extends ObservableV2<any> {
     maxUpdatesThreshold = 50,
     maxWaitTime = 500,
     compactionProbability = 0.01,
+    depth = 0,
   }: FireProviderConfig) {
     super();
     this.firebaseApp = firebaseApp;
@@ -72,6 +77,7 @@ export class FireProvider extends ObservableV2<any> {
     this.maxUpdatesThreshold = maxUpdatesThreshold;
     this.maxWaitTime = maxWaitTime;
     this.compactionProbability = compactionProbability;
+    this.depth = depth;
 
     // Generate a unique ID for this session/provider instance
     this.uid = Math.random().toString(36).substring(2) + Date.now().toString(36);
@@ -122,6 +128,7 @@ export class FireProvider extends ObservableV2<any> {
         // we will get them in step 3 when we read the new snapshot.
         const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
         const updatesSnap = await getDocs(updatesQ);
+        if (this._isDestroyed) return;
 
         updatesSnap.forEach(snap => {
           const data = snap.data();
@@ -141,6 +148,7 @@ export class FireProvider extends ObservableV2<any> {
         // 2. Fetch History Segments (Tier 2)
         const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
         const historySnaps = await getDocs(historyQ);
+        if (this._isDestroyed) return;
 
         historySnaps.forEach(snap => {
           const data = snap.data();
@@ -158,6 +166,7 @@ export class FireProvider extends ObservableV2<any> {
         // 3. Fetch Base Snapshot (Tier 1)
         const mainRef = doc(this.db, this.path);
         const mainSnap = await getDoc(mainRef);
+        if (this._isDestroyed) return;
 
         if (mainSnap.exists()) {
           const data = mainSnap.data();
@@ -186,6 +195,7 @@ export class FireProvider extends ObservableV2<any> {
             createdBy: this.uid
           };
           await addDoc(collection(this.db, this.path, 'updates'), pkg);
+          if (this._isDestroyed) return;
         }
 
       } finally {
@@ -224,6 +234,9 @@ export class FireProvider extends ObservableV2<any> {
 
       // Re-query for listener to be safe / clean
       const liveUpdatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+
+      if (this._isDestroyed) return;
+
       this._unsubscribeUpdates = onSnapshot(liveUpdatesQ, listenerFn, (error) => {
         console.error("onSnapshot listener failed", error);
         // If the listener fails (e.g. Grpc error in emulator), we might want to trigger a re-sync
@@ -288,15 +301,15 @@ export class FireProvider extends ObservableV2<any> {
 
       // We also check for History segments to merge them back if possible
       const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
-      const historySnap = await getDocs(historyQ);
+      const historySnaps = await getDocs(historyQ);
 
-      if (updatesSnap.empty && historySnap.empty) {
+      if (updatesSnap.empty && historySnaps.empty) {
         this.isCompacting = false;
         return;
       }
 
       const updateDocs = updatesSnap.docs;
-      const historyDocs = historySnap.docs;
+      const historyDocs = historySnaps.docs;
 
       await runTransaction(this.db, async (transaction) => {
         // 2. Read Base Snapshot (Tier 1) inside transaction
@@ -506,18 +519,26 @@ export class FireProvider extends ObservableV2<any> {
     const guid = subdoc.guid;
     if (this.subProviders.has(guid)) return;
 
+    // Firestore path limit is 100. Safety limit at 50.
+    if (this.depth >= 50) {
+      console.warn(`Max subdocument depth exceeded at ${this.path}`);
+      return;
+    }
+
     const subPath = `${this.path}/subdocs/${guid}`;
     const provider = new FireProvider({
       firebaseApp: this.firebaseApp,
       ydoc: subdoc,
       path: subPath,
       maxUpdatesThreshold: this.maxUpdatesThreshold,
-      maxWaitTime: this.maxWaitTime
+      maxWaitTime: this.maxWaitTime,
+      depth: this.depth + 1
     });
     this.subProviders.set(guid, provider);
   }
 
   destroy() {
+    this._isDestroyed = true;
     if (this._unsubscribeUpdates) this._unsubscribeUpdates();
 
     this.doc.off('update', this.handleUpdate);

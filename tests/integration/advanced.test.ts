@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
-import { setupEmulator } from '../utils/emulator';
+import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { waitForCondition } from '../utils/wait';
 
 describe('FireProvider Advanced Integration (Emulator)', () => {
@@ -22,6 +22,7 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
+        await clearFirestore(db);
     });
 
     it('should sync subdocuments recursively', async () => {

@@ -22,7 +22,7 @@ describe('FireProvider Integration (Emulator)', () => {
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
-        // await clearFirestore(db); // Clear before each test
+        await clearFirestore(db); // Clear before each test
     });
 
     afterEach(async () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
-import { setupEmulator } from '../utils/emulator';
+import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { waitForCondition } from '../utils/wait';
 
 describe('FireProvider Fuzz Testing (Emulator)', () => {
@@ -21,6 +21,7 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
+        await clearFirestore(db);
     });
 
     it('should converge after random operations', async () => {

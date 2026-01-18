@@ -29,6 +29,7 @@ export interface FireProviderConfig {
   path: string;
   maxUpdatesThreshold?: number; // default 50
   maxWaitTime?: number; // default 500ms
+  compactionProbability?: number; // default 0.01 (1%)
 }
 
 export class FireProvider extends ObservableV2<any> {
@@ -50,6 +51,7 @@ export class FireProvider extends ObservableV2<any> {
   // Configuration
   maxUpdatesThreshold: number = 50;
   maxWaitTime: number = 500;
+  compactionProbability: number = 0.01;
 
   private _unsubscribeUpdates: Unsubscribe | null = null;
   private _debouncedSave: () => void;
@@ -60,6 +62,7 @@ export class FireProvider extends ObservableV2<any> {
     path,
     maxUpdatesThreshold = 50,
     maxWaitTime = 500,
+    compactionProbability = 0.01,
   }: FireProviderConfig) {
     super();
     this.firebaseApp = firebaseApp;
@@ -68,6 +71,7 @@ export class FireProvider extends ObservableV2<any> {
     this.path = path;
     this.maxUpdatesThreshold = maxUpdatesThreshold;
     this.maxWaitTime = maxWaitTime;
+    this.compactionProbability = compactionProbability;
 
     // Generate a unique ID for this session/provider instance
     this.uid = Math.random().toString(36).substring(2) + Date.now().toString(36);
@@ -193,7 +197,9 @@ export class FireProvider extends ObservableV2<any> {
       const listenerFn = (snapshot: any) => {
         // Check for compaction trigger
         if (snapshot.size > this.maxUpdatesThreshold && !this.isCompacting) {
-          this.compact();
+          if (Math.random() < this.compactionProbability) {
+            this.compact();
+          }
         }
 
         snapshot.docChanges().forEach((change: any) => {

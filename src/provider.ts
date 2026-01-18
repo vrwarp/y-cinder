@@ -427,6 +427,11 @@ export class FireProvider extends ObservableV2<any> {
     this.subProviders.forEach(p => p.destroy());
     this.subProviders.clear();
 
+    // Flush any pending updates
+    if (this.updateCache) {
+      this.saveToFirestore();
+    }
+
     super.destroy();
   }
 }

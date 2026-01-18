@@ -3,6 +3,7 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { doc, setDoc, collection, addDoc, serverTimestamp, Bytes } from 'firebase/firestore';
+import { waitForCondition } from '../utils/wait';
 
 describe('FireProvider Comprehensive Integration (Emulator)', () => {
     let app: any;
@@ -159,18 +160,31 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
         // Wait for initial load
         await new Promise(r => setTimeout(r, 3000));
 
-        const child2 = doc2.getMap('subdocs').get('child-1') as Y.Doc;
+        let child2: Y.Doc | undefined;
+        await waitForCondition(() => {
+            child2 = doc2.getMap('subdocs').get('child-1') as Y.Doc;
+            return !!child2;
+        }, 5000, 100, 'Child document should be synced');
+
         expect(child2).toBeDefined();
 
         // Wait for Child Provider to load AND Grandchild provider to instantiate
-        await new Promise(r => setTimeout(r, 4000));
+        // await new Promise(r => setTimeout(r, 4000));
 
-        const grandChild2 = child2.getMap('subdocs').get('grandchild-1') as Y.Doc;
+        let grandChild2: Y.Doc | undefined;
+        await waitForCondition(() => {
+            grandChild2 = child2!.getMap('subdocs').get('grandchild-1') as Y.Doc;
+            return !!grandChild2;
+        }, 8000, 100, 'Grandchild document should be synced');
+
         expect(grandChild2).toBeDefined();
 
         // Wait for Grandchild content sync
-        await new Promise(r => setTimeout(r, 4000));
-        expect(grandChild2.getText('deep').toString()).toBe('Deep Secret');
+        await waitForCondition(() => {
+            return grandChild2!.getText('deep').toString() === 'Deep Secret';
+        }, 5000, 100, 'Grandchild content should be synced');
+
+        expect(grandChild2!.getText('deep').toString()).toBe('Deep Secret');
 
         provider1.destroy();
         provider2.destroy();

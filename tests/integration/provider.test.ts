@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { waitForCondition } from '../utils/wait';
 
 describe('FireProvider Integration (Emulator)', () => {
     let app: any;
@@ -40,9 +41,10 @@ describe('FireProvider Integration (Emulator)', () => {
         // Client 1 makes a change
         doc1.getText('content').insert(0, 'Hello World');
 
-        // Wait for sync (debounce + network + polling)
-        // Emulator cold start might be slow
-        await new Promise(r => setTimeout(r, 2500));
+        // Wait for sync
+        await waitForCondition(() => {
+            return doc2.getText('content').toString() === 'Hello World';
+        }, 5000, 100, 'Doc2 should receive content');
 
         expect(doc2.getText('content').toString()).toBe('Hello World');
 
@@ -58,15 +60,18 @@ describe('FireProvider Integration (Emulator)', () => {
 
         doc1.getText('content').insert(0, 'Persisted Data');
 
-        await new Promise(r => setTimeout(r, 1000));
+        // Wait for it to verify local update is processed locally? No, waiting for nothing.
+        // We wait a bit for save to firestore.
+        await new Promise(r => setTimeout(r, 500));
         provider1.destroy();
 
         // Restart
         const doc2 = new Y.Doc();
         const provider2 = createProvider(doc2, path);
 
-        // Wait for load
-        await new Promise(r => setTimeout(r, 1500));
+        await waitForCondition(() => {
+            return doc2.getText('content').toString() === 'Persisted Data';
+        }, 5000, 100, 'Doc2 should load persisted data');
 
         expect(doc2.getText('content').toString()).toBe('Persisted Data');
 
@@ -84,13 +89,18 @@ describe('FireProvider Integration (Emulator)', () => {
         doc.getText('content').insert(1, 'B');
         await new Promise(r => setTimeout(r, 20));
         doc.getText('content').insert(2, 'C');
-        await new Promise(r => setTimeout(r, 500)); // Wait for compaction
+
+        // Wait for compaction? Hard to detect from outside without checking logs or DB.
+        // But verifying a fresh client joins correctly is the goal.
+        await new Promise(r => setTimeout(r, 500));
 
         // Verify via a fresh client
         const doc2 = new Y.Doc();
         const provider2 = createProvider(doc2, path);
 
-        await new Promise(r => setTimeout(r, 500));
+        await waitForCondition(() => {
+            return doc2.getText('content').toString() === 'ABC';
+        }, 5000, 100, 'Doc2 should receive compacted data');
 
         expect(doc2.getText('content').toString()).toBe('ABC');
 

@@ -59,7 +59,7 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
                 }
             }
             // Small jitter
-            await new Promise(r => setTimeout(r, Math.random() * 10));
+            await new Promise(r => setTimeout(r, Math.random() * 20 + 5)); // Increased jitter to avoid emulator contention
         }
 
         // Allow settling (increased for emulator load)

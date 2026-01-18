@@ -106,22 +106,28 @@ export class FireProvider extends ObservableV2<any> {
       const remoteShadow = new Y.Doc();
 
       try {
-        // 1. Fetch Base Snapshot (Tier 1)
-        const mainRef = doc(this.db, this.path);
-        const mainSnap = await getDoc(mainRef);
+        // 1. Fetch Updates (Tier 3)
+        // We fetch updates FIRST to avoid the "staggered read" race condition.
+        // If compaction happens while reading, we might miss updates if we read them last.
+        // By reading them first, we either get them here, OR if they are compacted into the snapshot,
+        // we will get them in step 3 when we read the new snapshot.
+        const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+        const updatesSnap = await getDocs(updatesQ);
 
-        if (mainSnap.exists()) {
-          const data = mainSnap.data();
-          if (data && data.content) {
+        updatesSnap.forEach(snap => {
+          const data = snap.data();
+          if (data && data.update) {
             try {
-              const content = (data.content as Bytes).toUint8Array();
-              Y.applyUpdate(this.doc, content, 'origin:firebase/snapshot');
-              Y.applyUpdate(remoteShadow, content);
+              const update = (data.update as Bytes).toUint8Array();
+              // We DO NOT apply to this.doc here, we let the onSnapshot listener handle it 
+              // (or we could, but standardizing on onSnapshot is cleaner for the live path).
+              // However, for the shadow doc, we MUST apply it.
+              Y.applyUpdate(remoteShadow, update);
             } catch (e) {
-              console.error("Failed to apply snapshot", e);
+              console.error("Failed to apply update to shadow", e);
             }
           }
-        }
+        });
 
         // 2. Fetch History Segments (Tier 2)
         const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
@@ -140,25 +146,22 @@ export class FireProvider extends ObservableV2<any> {
           }
         });
 
-        // 3. Fetch Updates (Tier 3) for Shadow Construction
-        // We need all existing updates to build the shadow state correctly.
-        const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
-        const updatesSnap = await getDocs(updatesQ);
+        // 3. Fetch Base Snapshot (Tier 1)
+        const mainRef = doc(this.db, this.path);
+        const mainSnap = await getDoc(mainRef);
 
-        updatesSnap.forEach(snap => {
-          const data = snap.data();
-          if (data && data.update) {
+        if (mainSnap.exists()) {
+          const data = mainSnap.data();
+          if (data && data.content) {
             try {
-              const update = (data.update as Bytes).toUint8Array();
-              // We DO NOT apply to this.doc here, we let the onSnapshot listener handle it 
-              // (or we could, but standardizing on onSnapshot is cleaner for the live path).
-              // However, for the shadow doc, we MUST apply it.
-              Y.applyUpdate(remoteShadow, update);
+              const content = (data.content as Bytes).toUint8Array();
+              Y.applyUpdate(this.doc, content, 'origin:firebase/snapshot');
+              Y.applyUpdate(remoteShadow, content);
             } catch (e) {
-              console.error("Failed to apply update to shadow", e);
+              console.error("Failed to apply snapshot", e);
             }
           }
-        });
+        }
 
         // 4. Calculate Missing Local Updates
         const shadowSv = Y.encodeStateVector(remoteShadow);

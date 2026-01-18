@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "build": "npm run version-bump && tsc",
-    "test": "firebase emulators:exec --project demo-test-project 'npx vitest run --environment node --no-file-parallelism'",
+    "test": "./scripts/test.sh",
     "version-bump": "node scripts/bump-version.js"
   },
   "repository": {

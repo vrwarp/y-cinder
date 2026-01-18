@@ -16,29 +16,11 @@ y-cinder is a Firestore (Firebase) provider, built especially for serverless inf
 
 # Installation
 
-#### Prerequisites:
-
-Make sure you have the following dependencies already installed in your project (skip the following steps if you already have these installed):
+Install the package directly from GitHub:
 
 ```bash
-npm install yjs firebase --save
+npm install git+https://github.com/vrwarp/y-cinder.git#HEAD
 ```
-
-Some editor bindings, including `y-prosemirror`, `TipTap`, and `y-quill`, have an explicit dependency on the `y-protocols` module. If you are using one of these bindings, you must install `y-protocols` separately (y-cinder does not require it directly).
-
-```bash
-npm install y-protocols --save
-```
-
-#### Install y-cinder
-
-Once you have installed all the dependencies, you can install the `y-cinder` library:
-
-```bash
-npm install y-cinder --save
-```
-
-[![npm version](https://badge.fury.io/js/y-cinder.svg)](https://npmjs.org/y-cinder)
 
 # Usage
 

@@ -271,12 +271,17 @@ export class FireProvider extends ObservableV2<any> {
       const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
       const updatesSnap = await getDocs(updatesQ);
 
-      if (updatesSnap.empty) {
+      // We also check for History segments to merge them back if possible
+      const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
+      const historySnap = await getDocs(historyQ);
+
+      if (updatesSnap.empty && historySnap.empty) {
         this.isCompacting = false;
         return;
       }
 
       const updateDocs = updatesSnap.docs;
+      const historyDocs = historySnap.docs;
 
       await runTransaction(this.db, async (transaction) => {
         // 2. Read Base Snapshot (Tier 1) inside transaction
@@ -304,62 +309,72 @@ export class FireProvider extends ObservableV2<any> {
           }
         }
 
-        if (updatesToMerge.length === 0) return;
+        // 3b. Read History Segments to attempt full merge
+        const historyToMerge: { ref: DocumentReference, val: Uint8Array }[] = [];
+        for (const hDoc of historyDocs) {
+          const freshSnap = await transaction.get(hDoc.ref);
+          if (freshSnap.exists()) {
+            const data = freshSnap.data();
+            if (data && data.segment) {
+              historyToMerge.push({
+                ref: hDoc.ref,
+                val: (data.segment as Bytes).toUint8Array()
+              });
+            }
+          }
+        }
+
+        if (updatesToMerge.length === 0 && historyToMerge.length === 0) return;
 
         // 4. Merge Logic
 
-        // Strategy: Try Level 1 Merge (Base + Updates)
-        // Note: We are ignoring History segments in this compaction step for simplicity 
-        // unless we want to merge History segments into Base too.
-        // Design says: "Attempt Level 1 Merge (Snapshot): Combine S + H[] + U[]".
-        // To do that, we'd need to read ALL History segments too.
-        // That might be too many reads for a transaction if History is large.
-        // Simplified approach: Compact U[] -> New H Segment. 
-        // OR checks size of Base + U[].
+        // Strategy: Try Level 1 Merge (Base + History + Updates)
+        const allContent: Uint8Array[] = [];
+        if (baseSnapshot) allContent.push(baseSnapshot);
+        historyToMerge.forEach(h => allContent.push(h.val));
+        updatesToMerge.forEach(u => allContent.push(u));
 
-        const updatesMerged = Y.mergeUpdates(updatesToMerge);
-
-        // Calc Candidate Snapshot Size
-        // If we have base, merge base + updates.
-        let candidate: Uint8Array;
-        if (baseSnapshot) {
-          candidate = Y.mergeUpdates([baseSnapshot, updatesMerged]);
-        } else {
-          candidate = updatesMerged;
-        }
+        const candidate = Y.mergeUpdates(allContent);
 
         const sizeInBytes = candidate.byteLength;
-        const LIMIT_1MB = 1000000;
         const TARGET_LIMIT = 900000; // 900KB
 
         // Decide Level 1 (Snapshot) vs Level 2 (History)
         if (sizeInBytes < TARGET_LIMIT) {
-          // write to Snapshot
+          // Success: Everything fits in Base Snapshot
+          console.log(`Compacted to Snapshot (Size: ${sizeInBytes})`);
           transaction.set(mainRef, { content: Bytes.fromUint8Array(candidate) }, { merge: true });
 
-          // write to Snapshot
-          transaction.set(mainRef, { content: Bytes.fromUint8Array(candidate) }, { merge: true });
-
-          // Note: We currently do not merge existing History segments into the Snapshot
-          // to avoid excessive reads in a single transaction. History segments remain parallel.
+          // Delete all utilized segments
+          for (const uDoc of updateDocs) {
+            transaction.delete(uDoc.ref);
+          }
+          for (const hItem of historyToMerge) {
+            transaction.delete(hItem.ref);
+          }
 
         } else {
-          // Level 2: Write to History Segment
-          // We leave Base as is. We take `updatesMerged` and write as new History Segment.
+          // Level 2: Write to History Segment (Fallback)
+          // We can't fit everything into Base. 
+          // Goal: Merge just the UPDATES into a new History Segment.
+          // We leave the existing History segments alone (they remain parallel).
 
-          const segmentId = Math.random().toString(36).substring(2);
-          const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
+          if (updatesToMerge.length > 0) {
+            const updatesMerged = Y.mergeUpdates(updatesToMerge);
+            const segmentId = Math.random().toString(36).substring(2);
+            const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
 
-          transaction.set(historyRef, {
-            segment: Bytes.fromUint8Array(updatesMerged),
-            startTime: updateDocs[0].data().createdAt,
-            endTime: updateDocs[updateDocs.length - 1].data().createdAt
-          });
-        }
+            transaction.set(historyRef, {
+              segment: Bytes.fromUint8Array(updatesMerged),
+              startTime: updateDocs[0].data().createdAt,
+              endTime: updateDocs[updateDocs.length - 1].data().createdAt
+            });
 
-        // 5. Delete processed updates
-        for (const uDoc of updateDocs) {
-          transaction.delete(uDoc.ref);
+            // Delete processed updates
+            for (const uDoc of updateDocs) {
+              transaction.delete(uDoc.ref);
+            }
+          }
         }
       });
 

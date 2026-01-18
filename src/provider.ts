@@ -370,24 +370,90 @@ export class FireProvider extends ObservableV2<any> {
 
         } else {
           // Level 2: Write to History Segment (Fallback)
-          // We can't fit everything into Base. 
-          // Goal: Merge just the UPDATES into a new History Segment.
-          // We leave the existing History segments alone (they remain parallel).
+          // We can't fit everything into Base.
+          // Goal: Merge updates into History Segments.
 
           if (updatesToMerge.length > 0) {
-            const updatesMerged = Y.mergeUpdates(updatesToMerge);
-            const segmentId = Math.random().toString(36).substring(2);
-            const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
+            // FIX: Handle updates that are too large for a single History Segment
+            const MAX_SEGMENT_SIZE = 900000; // Safe limit (900KB)
 
-            transaction.set(historyRef, {
-              segment: Bytes.fromUint8Array(updatesMerged),
-              startTime: updateDocs[0].data().createdAt,
-              endTime: updateDocs[updateDocs.length - 1].data().createdAt
-            });
+            // 1. Try merging all first (Optimistic)
+            let pendingMerge = Y.mergeUpdates(updatesToMerge);
 
-            // Delete processed updates
-            for (const uDoc of updateDocs) {
-              transaction.delete(uDoc.ref);
+            if (pendingMerge.byteLength < MAX_SEGMENT_SIZE) {
+              // Fast path: It fits in one segment
+              const segmentId = Math.random().toString(36).substring(2);
+              const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
+
+              transaction.set(historyRef, {
+                segment: Bytes.fromUint8Array(pendingMerge),
+                startTime: updateDocs[0].data().createdAt,
+                endTime: updateDocs[updateDocs.length - 1].data().createdAt
+              });
+
+              // Delete all utilized updates
+              for (const uDoc of updateDocs) {
+                transaction.delete(uDoc.ref);
+              }
+            } else {
+              // Slow path: The updates are too big. We must split them.
+              // We iterate through updates and create multiple History Segments.
+
+              let currentBatch: Uint8Array[] = [];
+              let currentBatchSize = 0;
+              let batchStartIndex = 0;
+
+              for (let i = 0; i < updatesToMerge.length; i++) {
+                const update = updatesToMerge[i];
+                const updateSize = update.byteLength;
+
+                // If a SINGLE update is > 1MB, we might still have issues, 
+                // but usually Yjs updates are granular.
+
+                // Check if adding this update would likely exceed limit
+                if (currentBatchSize + updateSize > MAX_SEGMENT_SIZE && currentBatch.length > 0) {
+                  // Flush current batch to a new Segment
+                  const mergedBatch = Y.mergeUpdates(currentBatch);
+                  const segmentId = Math.random().toString(36).substring(2);
+                  const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
+
+                  transaction.set(historyRef, {
+                    segment: Bytes.fromUint8Array(mergedBatch),
+                    startTime: updateDocs[batchStartIndex].data().createdAt,
+                    endTime: updateDocs[i - 1].data().createdAt
+                  });
+
+                  // Delete updates in this batch
+                  for (let j = batchStartIndex; j < i; j++) {
+                    transaction.delete(updateDocs[j].ref);
+                  }
+
+                  // Reset
+                  currentBatch = [];
+                  currentBatchSize = 0;
+                  batchStartIndex = i;
+                }
+
+                currentBatch.push(update);
+                currentBatchSize += updateSize;
+              }
+
+              // Flush remaining batch
+              if (currentBatch.length > 0) {
+                const mergedBatch = Y.mergeUpdates(currentBatch);
+                const segmentId = Math.random().toString(36).substring(2);
+                const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
+
+                transaction.set(historyRef, {
+                  segment: Bytes.fromUint8Array(mergedBatch),
+                  startTime: updateDocs[batchStartIndex].data().createdAt,
+                  endTime: updateDocs[updatesToMerge.length - 1].data().createdAt
+                });
+
+                for (let j = batchStartIndex; j < updatesToMerge.length; j++) {
+                  transaction.delete(updateDocs[j].ref);
+                }
+              }
             }
           }
         }

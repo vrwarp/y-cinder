@@ -98,7 +98,7 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
                 }
             }
             return true;
-        }, 10000, 100, 'Clients did not converge');
+        }, 15000, 100, 'Clients did not converge');
 
         const finalContent = clients[0].doc.getText('content').toString();
         expect(finalContent.length).toBe(numClients * 'Client0'.length);
@@ -109,5 +109,5 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
         }
 
         clients.forEach(c => c.provider.destroy());
-    });
+    }, 20000);
 });

@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
-import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { setupEmulator } from '../utils/emulator';
+import { waitForCondition } from '../utils/wait';
 
 describe('FireProvider Fuzz Testing (Emulator)', () => {
     let app: any;
@@ -62,21 +63,19 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
             await new Promise(r => setTimeout(r, Math.random() * 20 + 5)); // Increased jitter to avoid emulator contention
         }
 
-        // Allow settling (increased for emulator load)
-        await new Promise(r => setTimeout(r, 8000));
-
-        // Validation
-        const state0 = clients[0].doc.getText('content').toString();
-
-        for (let i = 1; i < numClients; i++) {
-            const stateI = clients[i].doc.getText('content').toString();
-            if (stateI !== state0) {
-                console.error(`Divergence detected!\nClient 0: ${state0}\nClient ${i}: ${stateI}`);
+        // Allow settling using waitForCondition
+        await waitForCondition(async () => {
+            const state0 = clients[0].doc.getText('content').toString();
+            for (let i = 1; i < numClients; i++) {
+                if (clients[i].doc.getText('content').toString() !== state0) {
+                    return false;
+                }
             }
-            expect(stateI).toBe(state0);
-        }
+            return true;
+        }, 15000, 500, 'Fuzz test did not converge');
 
-        console.log(`Fuzz test converged to length: ${state0.length}`);
+        const finalState = clients[0].doc.getText('content').toString();
+        console.log(`Fuzz test converged to length: ${finalState.length}`);
 
         clients.forEach(c => c.provider.destroy());
     }, 60000);

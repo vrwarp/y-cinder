@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
-import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { setupEmulator } from '../utils/emulator';
+import { waitForCondition } from '../utils/wait';
 
 describe('FireProvider Advanced Integration (Emulator)', () => {
     let app: any;
@@ -86,17 +87,26 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
             c.doc.getText('content').insert(0, `Client${idx}`);
         });
 
-        // Wait for sync
-        await new Promise(r => setTimeout(r, 3000));
+        // Wait for convergence using waitForCondition
+        await waitForCondition(async () => {
+            const firstContent = clients[0].doc.getText('content').toString();
+            if (firstContent.length < numClients * 'Client0'.length) return false;
 
-        // All docs should converge to same string (order determined by clientID/Lamport)
-        const expected = clients[0].doc.getText('content').toString();
+            for (let i = 1; i < numClients; i++) {
+                if (clients[i].doc.getText('content').toString() !== firstContent) {
+                    return false;
+                }
+            }
+            return true;
+        }, 10000, 100, 'Clients did not converge');
 
+        const finalContent = clients[0].doc.getText('content').toString();
+        expect(finalContent.length).toBe(numClients * 'Client0'.length);
+
+        // Verify they all have the same content (redundant but explicit)
         for (let i = 1; i < numClients; i++) {
-            expect(clients[i].doc.getText('content').toString()).toBe(expected);
+            expect(clients[i].doc.getText('content').toString()).toBe(finalContent);
         }
-
-        expect(expected.length).toBe('Client0Client1Client2'.length);
 
         clients.forEach(c => c.provider.destroy());
     });

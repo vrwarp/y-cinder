@@ -92,6 +92,11 @@ export class FireProvider extends ObservableV2<any> {
     };
   }
 
+  // helper for delay
+  private wait(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   /**
    * Sync Mechanism
    * 1. Load Base Snapshot
@@ -213,7 +218,11 @@ export class FireProvider extends ObservableV2<any> {
 
       // Re-query for listener to be safe / clean
       const liveUpdatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
-      this._unsubscribeUpdates = onSnapshot(liveUpdatesQ, listenerFn);
+      this._unsubscribeUpdates = onSnapshot(liveUpdatesQ, listenerFn, (error) => {
+        console.error("onSnapshot listener failed", error);
+        // If the listener fails (e.g. Grpc error in emulator), we might want to trigger a re-sync
+        // but for now we at least log it so it's visible in tests.
+      });
 
     } catch (err) {
       console.error("Sync failed", err);
@@ -258,12 +267,12 @@ export class FireProvider extends ObservableV2<any> {
    * Compaction Logic (Tiered)
    * Merges updates into History Segments or Base Snapshot
    */
-  async compact() {
-    if (this.isCompacting) return;
+  async compact(attempt = 1) {
+    if (this.isCompacting && attempt === 1) return;
     this.isCompacting = true;
 
     try {
-      console.log("Starting compaction...");
+      console.log(`Starting compaction (attempt ${attempt})...`);
 
       // 1. Get all updates to compact
       // We query them first to get references. 
@@ -378,10 +387,29 @@ export class FireProvider extends ObservableV2<any> {
         }
       });
 
-    } catch (e) {
-      console.error("Compaction execution failed", e);
-    } finally {
+      // On Success:
       this.isCompacting = false;
+
+    } catch (e: any) {
+      const MAX_RETRIES = 5;
+
+      // Filter for retryable errors (Contention, Unavailable, Deadline Exceeded)
+      // Firestore code 'aborted' is commonly used for transaction contention
+      const isRetryable = e.code === 'aborted' || e.code === 'unavailable' || e.code === 'deadline-exceeded';
+
+      if (attempt <= MAX_RETRIES && isRetryable) {
+        // Exponential Backoff: 2^attempt * 100ms
+        // Jitter: Randomize to prevent "thundering herd" if multiple clients fail simultaneously
+        const backoff = (Math.pow(2, attempt) * 100) + (Math.random() * 100);
+
+        console.warn(`Compaction failed (attempt ${attempt}). Retrying in ${Math.floor(backoff)}ms...`, e);
+
+        await this.wait(backoff);
+        await this.compact(attempt + 1); // Recursive retry
+      } else {
+        console.error("Compaction failed permanently or reached max retries.", e);
+        this.isCompacting = false; // Give up
+      }
     }
   }
 

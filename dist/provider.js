@@ -84,48 +84,88 @@ export class FireProvider extends ObservableV2 {
     sync() {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                // 1. Fetch Base Snapshot (Tier 1)
-                // The base snapshot is stored in the 'content' field of the main document
-                const mainRef = doc(this.db, this.path);
-                const mainSnap = yield getDoc(mainRef);
-                if (mainSnap.exists()) {
-                    const data = mainSnap.data();
-                    if (data && data.content) {
-                        try {
-                            const content = data.content.toUint8Array();
-                            Y.applyUpdate(this.doc, content, 'origin:firebase/snapshot');
+                // SHADOW SYNC STRATEGY
+                // We reconstruct the server state in a temporary "shadow" doc to determine
+                // exactly what local changes are missing from the server.
+                const remoteShadow = new Y.Doc();
+                try {
+                    // 1. Fetch Base Snapshot (Tier 1)
+                    const mainRef = doc(this.db, this.path);
+                    const mainSnap = yield getDoc(mainRef);
+                    if (mainSnap.exists()) {
+                        const data = mainSnap.data();
+                        if (data && data.content) {
+                            try {
+                                const content = data.content.toUint8Array();
+                                Y.applyUpdate(this.doc, content, 'origin:firebase/snapshot');
+                                Y.applyUpdate(remoteShadow, content);
+                            }
+                            catch (e) {
+                                console.error("Failed to apply snapshot", e);
+                            }
                         }
-                        catch (e) {
-                            console.error("Failed to apply snapshot", e);
+                    }
+                    // 2. Fetch History Segments (Tier 2)
+                    const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
+                    const historySnaps = yield getDocs(historyQ);
+                    historySnaps.forEach(snap => {
+                        const data = snap.data();
+                        if (data && data.segment) {
+                            try {
+                                const segment = data.segment.toUint8Array();
+                                Y.applyUpdate(this.doc, segment, 'origin:firebase/history');
+                                Y.applyUpdate(remoteShadow, segment);
+                            }
+                            catch (e) {
+                                console.error("Failed to apply history segment", e);
+                            }
                         }
+                    });
+                    // 3. Fetch Updates (Tier 3) for Shadow Construction
+                    // We need all existing updates to build the shadow state correctly.
+                    const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+                    const updatesSnap = yield getDocs(updatesQ);
+                    updatesSnap.forEach(snap => {
+                        const data = snap.data();
+                        if (data && data.update) {
+                            try {
+                                const update = data.update.toUint8Array();
+                                // We DO NOT apply to this.doc here, we let the onSnapshot listener handle it 
+                                // (or we could, but standardizing on onSnapshot is cleaner for the live path).
+                                // However, for the shadow doc, we MUST apply it.
+                                Y.applyUpdate(remoteShadow, update);
+                            }
+                            catch (e) {
+                                console.error("Failed to apply update to shadow", e);
+                            }
+                        }
+                    });
+                    // 4. Calculate Missing Local Updates
+                    const shadowSv = Y.encodeStateVector(remoteShadow);
+                    const localDiff = Y.encodeStateAsUpdate(this.doc, shadowSv);
+                    // 5. Push if needed
+                    // Yjs empty update is 2 bytes.
+                    if (localDiff.byteLength > 2) {
+                        console.log("Pushing missing local updates to Firestore.");
+                        const pkg = {
+                            update: Bytes.fromUint8Array(localDiff),
+                            createdAt: serverTimestamp(),
+                            createdBy: this.uid
+                        };
+                        yield addDoc(collection(this.db, this.path, 'updates'), pkg);
                     }
                 }
-                // 2. Fetch History Segments (Tier 2)
-                // Ordered by startTime (asc)
-                const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
-                const historySnaps = yield getDocs(historyQ);
-                historySnaps.forEach(snap => {
-                    const data = snap.data();
-                    if (data && data.segment) {
-                        try {
-                            const segment = data.segment.toUint8Array();
-                            Y.applyUpdate(this.doc, segment, 'origin:firebase/history');
-                        }
-                        catch (e) {
-                            console.error("Failed to apply history segment", e);
-                        }
-                    }
-                });
-                // 3. Subscribe to Live Updates (Tier 3)
-                const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+                finally {
+                    remoteShadow.destroy();
+                }
                 if (this._unsubscribeUpdates)
                     this._unsubscribeUpdates();
-                this._unsubscribeUpdates = onSnapshot(updatesQ, (snapshot) => {
+                const listenerFn = (snapshot) => {
                     // Check for compaction trigger
                     if (snapshot.size > this.maxUpdatesThreshold && !this.isCompacting) {
                         this.compact();
                     }
-                    snapshot.docChanges().forEach(change => {
+                    snapshot.docChanges().forEach((change) => {
                         if (change.type === 'added') {
                             const data = change.doc.data();
                             // Check if this update was created by us
@@ -143,7 +183,10 @@ export class FireProvider extends ObservableV2 {
                             }
                         }
                     });
-                });
+                };
+                // Re-query for listener to be safe / clean
+                const liveUpdatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+                this._unsubscribeUpdates = onSnapshot(liveUpdatesQ, listenerFn);
             }
             catch (err) {
                 console.error("Sync failed", err);

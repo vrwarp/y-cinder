@@ -5,17 +5,14 @@
 
 A database and connection provider for Yjs based on Firestore.
 
-y-cinder is a Firestore (Firebase) and WebRTC-based provider, built especially for serverless infrastructure, that offers real-time capabilities to your Yjs-based applications. y-cinder is built with efficiency in mind to reduce the number of calls that the application makes to and from Firestore. With y-cinder, Firestore will act as both 1. persistent storage and 2. a peer discovery platform for WebRTC connections. This means that real-time updates are shared through a peer-to-peer network, thus reducing connections to Firestore. y-cinder was inspired by [yjs-firestore-provider](https://github.com/gmcfall/yjs-firestore-provider) but implements few things differently.
-
-https://github.com/podraven/y-fire/assets/2324523/3aa27a40-6cfb-4b93-b043-4e0fa57c96d4
+y-cinder is a Firestore (Firebase) provider, built especially for serverless infrastructure, that offers real-time capabilities to your Yjs-based applications. y-cinder is built with efficiency in mind to reduce the number of calls that the application makes to and from Firestore. With y-cinder, Firestore acts as persistent storage using a granular, tiered architecture (Snapshots, History Segments, and Updates) to optimize write costs and query performance.
 
 # Features
 
-1. Utilizes a peer-to-peer network to exchange real-time data and awareness.
-2. Utilizes Firestore as persistent storage and syncs with Firestore periodically to maintain persistent data state.
-3. Utilizes Firestore as a peer discovery platform. Once peers are connected to each other, real-time updates are shared without accessing Firestore, thus reducing costs.
-4. Instead of connecting all peers to each other, y-cinder creates clusters of clients. Clients within a cluster are connected to each other, and clusters are connected to each other through one common client. If clients leave or new clients join, clusters are recreated. Limiting client connections to limited number of peers thus improves performance. (Discussion: [WebRTC: peer connections limit](https://stackoverflow.com/questions/16015304/webrtc-peer-connections-limit))
-5. You can set wait times and thresholds.
+1. **Tiered Storage Architecture**: Uses a smart combination of base snapshots, history segments, and incremental updates to efficiently store and retrieve data.
+2. **Automatic Compaction**: Periodically merges incremental updates into history segments or base snapshots to keep read costs low and performance high.
+3. **Optimized for Cost**: Debounces writes and compacts data to minimize Firestore writes and reads.
+4. **Subdocument Support**: Automatically handles subdocuments within the same provider logic.
 
 # Installation
 
@@ -45,7 +42,7 @@ npm install y-cinder --save
 
 # Usage
 
-```
+```typescript
 import * as Y from "yjs";
 import { FireProvider } from "y-cinder";
 import { app } from "path-to-firebase-client";  // ex. app = initializeApp(config)
@@ -59,20 +56,10 @@ export const yProvider = (documentPath) => {
 
 Tiptap example:
 
-```
+```typescript
 const provider = yProvider("path/to/your/firestore/document");
 
-provider.onReady = () => {
-  // do something
-};
-provider.onDeleted = () => {
-  // do something
-};
-provider.onSaving = (status) => {
-  // do something
-};
-
-...
+// ...
 
 const editor = new Editor({
   extensions: [
@@ -84,21 +71,15 @@ const editor = new Editor({
     Collaboration.configure({
       document: provider.doc,
     })
-    // Register the collaboration cursor extension
-    CollaborationCursor.configure({
-        provider,
-        user: {
-            name: "username",
-            color: "some color"	// color implementation based on username?
-        }
-    })
+    // CollaborationCursor is not directly supported by this provider 
+    // without an awareness protocol (which is currently not exported)
   ],
 })
 ```
 
 # Firestore rules
 
-You need to grant **read and write** permissions to the document `/path/to/your/document` and its children `/path/to/your/document/{document=**}` for this module to function properly. y-cinder will write (merge) to the `content` field of your document, which corresponds to your Yjs data. Additionally, y-cinder creates collections and documents within the specified document path for peer discovery purposes.
+You need to grant **read and write** permissions to the document `/path/to/your/document` and its children `/path/to/your/document/{document=**}` for this module to function properly. y-cinder will write to the `updates`, `history`, and `subdocs` collections within your document path.
 
 # APIs
 
@@ -107,56 +88,24 @@ You need to grant **read and write** permissions to the document `/path/to/your/
 - **firebaseApp**: FirebaseApp (required)
 - **ydoc**: Y.Doc (required)
 - **path**: path to your **document** (required) ex. users/username/tasks/task-1
-- **docMapper**: Custom structure for your document (saves to the `content` field by default)
-- **maxUpdatesThreshold**: Number of updates before triggering real-time data share, defaults to 20
-- **maxWaitTime**: Time in milliseconds before triggering real-time data share, defaults to 100
-- **maxWaitFirestoreTime**: Time in milliseconds before triggering persistent data sync to Firestore, defaults to 3000
+- **maxUpdatesThreshold**: Number of updates before triggering compaction, defaults to 50
+- **maxWaitTime**: Time in milliseconds to debounce writes to Firestore, defaults to 500
 
 Example:
 
-```
+```typescript
 new FireProvider({
   firebaseApp,
   ydoc,
   path: "username/tasks/taskuid",
   maxUpdatesThreshold: 10,
-  maxWaitTime: 90,
-  maxWaitFirestoreTime: 500
-});
-```
-
-docMapper example with custom document structure
-
-```
-new FireProvider({
-  firebaseApp,
-  ydoc,
-  path: "username/tasks/taskuid",
-  docMapper: (bytes) => ({
-    title: "Custom title",
-    file: { filename: "file.docx", content: bytes },  // "bytes" contains your yjs data
-  }),
+  maxWaitTime: 90
 });
 ```
 
 #### Methods
 
 - **destroy**: Destroys the y-cinder instance. You may want to destroy the y-cinder instance when navigating out of the page to avoid the initialization of duplicate instances. Use `provider.destroy();` to destroy the instance.
-- ~~**destroyHandler**: Destroys the y-cinder instance. You may want to destroy the y-cinder instance when navigating out of the page to avoid the initialization of duplicate instances. Use `provider.destroyHandler();` to destroy the instance.~~ (Replaced with **destroy**)
-
-#### Events
-
-- **onReady**: Triggered after the first connection has been established to Firestore (initial data fetch).
-- **onDeleted**: Triggered if the instance was deleted (e.g., no permission to read/write the document).
-- **onSaving**: Triggered when the sync to Firestore is in process (e.g., you may want to alert users not to close the window).
-
-Example:
-
-```
-provider.onReady = () => {
-  // do something
-};
-```
 
 [1.1]: http://i.imgur.com/wWzX9uB.png "twitter icon without padding"
 

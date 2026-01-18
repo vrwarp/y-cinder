@@ -1,6 +1,11 @@
 {
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"],
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ],
   "compilerOptions": {
     "allowJs": false,
     // Generate d.ts files
@@ -10,7 +15,8 @@
     "declarationMap": true,
     "strict": false,
     "esModuleInterop": true,
-    "moduleResolution":"Node",
-    "target": "ES6"
+    "moduleResolution": "Node",
+    "target": "ES6",
+    "skipLibCheck": true
   },
 }

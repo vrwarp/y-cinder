@@ -7,392 +7,298 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-import { getFirestore, onSnapshot, doc, setDoc, Bytes, } from "@firebase/firestore";
-import { collection } from "firebase/firestore";
+import { getFirestore, onSnapshot, doc, collection, addDoc, Bytes, runTransaction, query, orderBy, getDocs, getDoc, serverTimestamp } from "@firebase/firestore";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
-import * as awarenessProtocol from "y-protocols/awareness";
-import { get as getLocal, set as setLocal, del as delLocal } from "idb-keyval";
-import { deleteInstance, initiateInstance, refreshPeers } from "./utils";
-import { WebRtc } from "./webrtc";
-import { createGraph } from "./graph";
-/**
- * FireProvider class that handles firestore data sync and awareness
- * based on webRTC.
- * @param firebaseApp Firestore instance
- * @param ydoc ydoc
- * @param path path to the firestore document (ex. collection/documentuid)
- * @param maxUpdatesThreshold maximum number of updates to wait for before sending updates to peers
- * @param maxWaitTime maximum miliseconds to wait before sending updates to peers
- * @param maxWaitFirestoreTime miliseconds to wait before syncing this client's update to firestore
- */
 export class FireProvider extends ObservableV2 {
-    get clientTimeOffset() {
-        return this.timeOffset;
-    }
-    constructor({ firebaseApp, ydoc, path, docMapper, maxUpdatesThreshold, maxWaitTime, maxWaitFirestoreTime, }) {
+    constructor({ firebaseApp, ydoc, path, maxUpdatesThreshold = 50, maxWaitTime = 500, }) {
         super();
-        this.timeOffset = 0; // offset to server time in mili seconds
-        this.clients = [];
-        this.peersReceivers = new Set([]);
-        this.peersSenders = new Set([]);
-        this.peersRTC = {
-            receivers: {},
-            senders: {},
+        // Recursion
+        this.subProviders = new Map();
+        // Compaction State
+        this.isCompacting = false;
+        // Debounce Cache
+        this.updateCache = null;
+        // Configuration
+        this.maxUpdatesThreshold = 50;
+        this.maxWaitTime = 500;
+        this._unsubscribeUpdates = null;
+        this.handleUpdate = (update, origin) => {
+            // Prevent loops
+            if (origin === 'origin:firebase/snapshot' ||
+                origin === 'origin:firebase/history' ||
+                origin === 'origin:firebase/update') {
+                return;
+            }
+            // Merge into cache
+            this.updateCache = this.updateCache ? Y.mergeUpdates([this.updateCache, update]) : update;
+            // Trigger Debounced Write
+            this._debouncedSave();
         };
-        this.documentMapper = (bytes) => ({ content: bytes });
-        this.maxCacheUpdates = 20;
-        this.cacheUpdateCount = 0;
-        this.maxRTCWait = 100;
-        this.maxFirestoreWait = 3000;
-        this.firebaseDataLastUpdatedAt = new Date().getTime();
-        this.instanceConnection = new ObservableV2();
-        this.ready = false;
-        this.init = () => __awaiter(this, void 0, void 0, function* () {
-            this.trackData(); // initiate this before creating instance, so that users with read permissions can also view the document
-            try {
-                const data = yield initiateInstance(this.db, this.documentPath);
-                this.instanceConnection.on("closed", this.trackConnections);
-                this.uid = data.uid;
-                this.timeOffset = data.offset;
-                this.initiateHandler();
-                addEventListener("beforeunload", this.destroy); // destroy instance on window close
-            }
-            catch (error) {
-                this.consoleHandler("Could not connect to a peer network.");
-                this.kill(true); // destroy provider but keep the read-only stream alive
-            }
-        });
-        this.syncLocal = () => __awaiter(this, void 0, void 0, function* () {
-            try {
-                const local = yield getLocal(this.documentPath);
-                if (local)
-                    Y.applyUpdate(this.doc, local, { key: "local-sync" });
-            }
-            catch (e) {
-                this.consoleHandler("get local error", e);
-            }
-        });
-        this.saveToLocal = () => __awaiter(this, void 0, void 0, function* () {
-            try {
-                const currentDoc = Y.encodeStateAsUpdate(this.doc);
-                setLocal(this.documentPath, currentDoc);
-            }
-            catch (e) {
-                this.consoleHandler("set local error", e);
-            }
-        });
-        this.deleteLocal = () => __awaiter(this, void 0, void 0, function* () {
-            try {
-                delLocal(this.documentPath);
-            }
-            catch (e) {
-                this.consoleHandler("del local error", e);
-            }
-        });
-        this.initiateHandler = () => {
-            this.consoleHandler("FireProvider initiated!");
-            this.awareness.on("update", this.awarenessUpdateHandler);
-            // We will track the mesh document on Firestore to
-            // keep track of selected peers
-            this.trackMesh();
-            this.doc.on("update", this.updateHandler);
-            this.syncLocal(); // if there's any data in indexedDb, get and apply
+        this.handleSubdocs = ({ added, removed, loaded }) => {
+            added.forEach(subdoc => {
+                this.startSubdocProvider(subdoc);
+            });
+            loaded.forEach(subdoc => {
+                this.startSubdocProvider(subdoc);
+            });
+            removed.forEach(subdoc => {
+                const guid = subdoc.guid;
+                const provider = this.subProviders.get(guid);
+                if (provider) {
+                    provider.destroy();
+                    this.subProviders.delete(guid);
+                }
+            });
         };
-        this.trackData = () => {
-            // Whenever there are changes to the firebase document
-            // pull the changes and merge them to the current
-            // yjs document
-            if (this.unsubscribeData)
-                this.unsubscribeData();
-            this.unsubscribeData = onSnapshot(doc(this.db, this.documentPath), (doc) => {
-                if (doc.exists()) {
-                    const data = doc.data();
+        this.firebaseApp = firebaseApp;
+        this.db = getFirestore(firebaseApp);
+        this.doc = ydoc;
+        this.path = path;
+        this.maxUpdatesThreshold = maxUpdatesThreshold;
+        this.maxWaitTime = maxWaitTime;
+        // Generate a unique ID for this session/provider instance
+        this.uid = Math.random().toString(36).substring(2) + Date.now().toString(36);
+        // Setup Debounced Save
+        this._debouncedSave = this.debounce(this.saveToFirestore.bind(this), this.maxWaitTime);
+        // Start Lifecycle
+        this.doc.on('update', this.handleUpdate);
+        this.doc.on('subdocs', this.handleSubdocs);
+        // Start Sync
+        this.sync();
+    }
+    // Simple debounce implementation
+    debounce(func, wait) {
+        let timeout;
+        return (...args) => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func(...args), wait);
+        };
+    }
+    /**
+     * Sync Mechanism
+     * 1. Load Base Snapshot
+     * 2. Load History Segments
+     * 3. Subscribe to Live Updates
+     */
+    sync() {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // 1. Fetch Base Snapshot (Tier 1)
+                // The base snapshot is stored in the 'content' field of the main document
+                const mainRef = doc(this.db, this.path);
+                const mainSnap = yield getDoc(mainRef);
+                if (mainSnap.exists()) {
+                    const data = mainSnap.data();
                     if (data && data.content) {
-                        this.firebaseDataLastUpdatedAt = new Date().getTime();
-                        const content = data.content.toUint8Array();
-                        const origin = "origin:firebase/update"; // make sure this does not coincide with UID
-                        Y.applyUpdate(this.doc, content, origin);
-                    }
-                    if (!this.ready) {
-                        if (this.onReady) {
-                            this.onReady();
-                            this.ready = true;
+                        try {
+                            const content = data.content.toUint8Array();
+                            Y.applyUpdate(this.doc, content, 'origin:firebase/snapshot');
+                        }
+                        catch (e) {
+                            console.error("Failed to apply snapshot", e);
                         }
                     }
                 }
-            }, (error) => {
-                this.consoleHandler("Firestore sync error", error);
-                if (error.code === "permission-denied") {
-                    if (this.onDeleted)
-                        this.onDeleted();
-                }
-            });
-        };
-        this.trackMesh = () => {
-            if (this.unsubscribeMesh)
-                this.unsubscribeMesh();
-            this.unsubscribeMesh = onSnapshot(collection(this.db, `${this.documentPath}/instances`), (snapshot) => {
-                this.clients = [];
-                snapshot.forEach((doc) => {
-                    this.clients.push(doc.id);
+                // 2. Fetch History Segments (Tier 2)
+                // Ordered by startTime (asc)
+                const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
+                const historySnaps = yield getDocs(historyQ);
+                historySnaps.forEach(snap => {
+                    const data = snap.data();
+                    if (data && data.segment) {
+                        try {
+                            const segment = data.segment.toUint8Array();
+                            Y.applyUpdate(this.doc, segment, 'origin:firebase/history');
+                        }
+                        catch (e) {
+                            console.error("Failed to apply history segment", e);
+                        }
+                    }
                 });
-                const mesh = createGraph(this.clients);
-                // a -> b, c; a is the sender and b, c are receivers
-                const receivers = mesh[this.uid]; // this user's receivers
-                const senders = Object.keys(mesh).filter((v, i) => mesh[v] && mesh[v].length && mesh[v].includes(this.uid)); // this user's senders
-                this.peersReceivers = this.connectToPeers(receivers, this.peersReceivers, true);
-                this.peersSenders = this.connectToPeers(senders, this.peersSenders, false);
-            }, (error) => {
-                this.consoleHandler("Creating peer mesh error", error);
-            });
-        };
-        this.reconnect = () => {
-            if (this.recreateTimeout)
-                clearTimeout(this.recreateTimeout);
-            this.recreateTimeout = setTimeout(() => __awaiter(this, void 0, void 0, function* () {
-                this.consoleHandler("triggering reconnect", this.uid);
-                this.destroy();
-                this.init();
-            }), 200);
-        };
-        this.trackConnections = () => __awaiter(this, void 0, void 0, function* () {
-            const clients = this.clients.length;
-            let connected = 0;
-            Object.values(this.peersRTC.receivers).forEach((receiver) => {
-                if (receiver.connection !== "closed")
-                    connected++;
-            });
-            Object.values(this.peersRTC.senders).forEach((sender) => {
-                if (sender.connection !== "closed")
-                    connected++;
-            });
-            if (clients > 1 && connected <= 0) {
-                // we have lost connection with all peers
-                // trigger re-generation of the graph/mesh
-                this.reconnect();
+                // 3. Subscribe to Live Updates (Tier 3)
+                const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+                if (this._unsubscribeUpdates)
+                    this._unsubscribeUpdates();
+                this._unsubscribeUpdates = onSnapshot(updatesQ, (snapshot) => {
+                    // Check for compaction trigger
+                    if (snapshot.size > this.maxUpdatesThreshold && !this.isCompacting) {
+                        this.compact();
+                    }
+                    snapshot.docChanges().forEach(change => {
+                        if (change.type === 'added') {
+                            const data = change.doc.data();
+                            // Check if this update was created by us
+                            if (data.createdBy === this.uid) {
+                                return;
+                            }
+                            if (data.update) {
+                                try {
+                                    const update = data.update.toUint8Array();
+                                    Y.applyUpdate(this.doc, update, 'origin:firebase/update');
+                                }
+                                catch (e) {
+                                    console.error("Failed to apply update", e);
+                                }
+                            }
+                        }
+                    });
+                });
+            }
+            catch (err) {
+                console.error("Sync failed", err);
             }
         });
-        this.connectToPeers = (newPeers, oldPeers, isCaller) => {
-            if (!newPeers)
-                return new Set([]);
-            // We must:
-            // 1. remove obselete peers
-            // 2. add new peers
-            // 3. no change to same peers
-            const getNewPeers = refreshPeers(newPeers, oldPeers);
-            const peersType = isCaller ? "receivers" : "senders";
-            if (!this.peersRTC[peersType])
-                this.peersRTC[peersType] = {};
-            if (getNewPeers.obselete && getNewPeers.obselete.length) {
-                // Old peers, remove them
-                getNewPeers.obselete.forEach((peerUid) => __awaiter(this, void 0, void 0, function* () {
-                    if (this.peersRTC[peersType][peerUid]) {
-                        yield this.peersRTC[peersType][peerUid].destroy();
-                        delete this.peersRTC[peersType][peerUid];
-                    }
-                }));
-            }
-            if (getNewPeers.new && getNewPeers.new.length) {
-                // New peers, initiate new connection to them
-                getNewPeers.new.forEach((peerUid) => __awaiter(this, void 0, void 0, function* () {
-                    if (this.peersRTC[peersType][peerUid]) {
-                        yield this.peersRTC[peersType][peerUid].destroy();
-                        delete this.peersRTC[peersType][peerUid];
-                    }
-                    this.peersRTC[peersType][peerUid] = new WebRtc({
-                        firebaseApp: this.firebaseApp,
-                        ydoc: this.doc,
-                        awareness: this.awareness,
-                        instanceConnection: this.instanceConnection,
-                        documentPath: this.documentPath,
-                        uid: this.uid,
-                        peerUid,
-                        isCaller,
-                    });
-                }));
-            }
-            return new Set(newPeers);
-        };
-        this.sendDataToPeers = ({ from, message, data, }) => {
-            if (this.peersRTC) {
-                if (this.peersRTC.receivers) {
-                    Object.keys(this.peersRTC.receivers).forEach((receiver) => {
-                        if (receiver !== from) {
-                            const rtc = this.peersRTC.receivers[receiver];
-                            rtc.sendData({ message, data });
-                        }
-                    });
-                }
-                if (this.peersRTC.senders) {
-                    Object.keys(this.peersRTC.senders).forEach((sender) => {
-                        if (sender !== from) {
-                            const rtc = this.peersRTC.senders[sender];
-                            rtc.sendData({ message, data });
-                        }
-                    });
-                }
-            }
-        };
-        this.saveToFirestore = () => __awaiter(this, void 0, void 0, function* () {
+    }
+    saveToFirestore() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.updateCache)
+                return;
+            const update = this.updateCache;
+            this.updateCache = null;
             try {
-                // current document to firestore
-                const ref = doc(this.db, this.documentPath);
-                yield setDoc(ref, this.documentMapper(Bytes.fromUint8Array(Y.encodeStateAsUpdate(this.doc))), { merge: true });
-                this.deleteLocal(); // We have successfully saved to Firestore, empty indexedDb for now
+                yield addDoc(collection(this.db, this.path, 'updates'), {
+                    update: Bytes.fromUint8Array(update),
+                    createdAt: serverTimestamp(),
+                    createdBy: this.uid
+                });
             }
-            catch (error) {
-                this.consoleHandler("error saving to firestore", error);
+            catch (err) {
+                console.error("Failed to save update", err);
+                // If failed, we might want to preserve the cache, but strictly we could lose data here on network fail.
+                // For this implementation, we log error.
+            }
+        });
+    }
+    /**
+     * Compaction Logic (Tiered)
+     * Merges updates into History Segments or Base Snapshot
+     */
+    compact() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.isCompacting)
+                return;
+            this.isCompacting = true;
+            try {
+                console.log("Starting compaction...");
+                // 1. Get all updates to compact
+                // We query them first to get references. 
+                // Note: In highly concurrent env, we should verify existence in transaction.
+                const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+                const updatesSnap = yield getDocs(updatesQ);
+                if (updatesSnap.empty) {
+                    this.isCompacting = false;
+                    return;
+                }
+                const updateDocs = updatesSnap.docs;
+                yield runTransaction(this.db, (transaction) => __awaiter(this, void 0, void 0, function* () {
+                    // 2. Read Base Snapshot (Tier 1) inside transaction
+                    const mainRef = doc(this.db, this.path);
+                    const mainSnap = yield transaction.get(mainRef);
+                    let baseSnapshot = null;
+                    if (mainSnap.exists()) {
+                        const data = mainSnap.data();
+                        if (data && data.content) {
+                            baseSnapshot = data.content.toUint8Array();
+                        }
+                    }
+                    // 3. Read specific updates to ensure they exist
+                    // (Firestore transactions need read-before-write)
+                    const updatesToMerge = [];
+                    for (const uDoc of updateDocs) {
+                        const freshSnap = yield transaction.get(uDoc.ref);
+                        if (freshSnap.exists()) {
+                            const data = freshSnap.data();
+                            if (data && data.update) {
+                                updatesToMerge.push(data.update.toUint8Array());
+                            }
+                        }
+                    }
+                    if (updatesToMerge.length === 0)
+                        return;
+                    // 4. Merge Logic
+                    // Strategy: Try Level 1 Merge (Base + Updates)
+                    // Note: We are ignoring History segments in this compaction step for simplicity 
+                    // unless we want to merge History segments into Base too.
+                    // Design says: "Attempt Level 1 Merge (Snapshot): Combine S + H[] + U[]".
+                    // To do that, we'd need to read ALL History segments too.
+                    // That might be too many reads for a transaction if History is large.
+                    // Simplified approach: Compact U[] -> New H Segment. 
+                    // OR checks size of Base + U[].
+                    const updatesMerged = Y.mergeUpdates(updatesToMerge);
+                    // Calc Candidate Snapshot Size
+                    // If we have base, merge base + updates.
+                    let candidate;
+                    if (baseSnapshot) {
+                        candidate = Y.mergeUpdates([baseSnapshot, updatesMerged]);
+                    }
+                    else {
+                        candidate = updatesMerged;
+                    }
+                    const sizeInBytes = candidate.byteLength;
+                    const LIMIT_1MB = 1000000;
+                    const TARGET_LIMIT = 900000; // 900KB
+                    // Decide Level 1 (Snapshot) vs Level 2 (History)
+                    if (sizeInBytes < TARGET_LIMIT) {
+                        // write to Snapshot
+                        transaction.set(mainRef, { content: Bytes.fromUint8Array(candidate) }, { merge: true });
+                        // We should also delete history segments if we merged them? 
+                        // But we didn't read history segments here, so we only merged Base + Updates.
+                        // So History Segments remain parallel? 
+                        // That's fine, but inefficient eventually.
+                        // Design says "Combine S + H + U". 
+                        // For now, let's just do Level 2 (Append to History) if Base is full, 
+                        // or Update Base if Base + Updates is small.
+                        // If we Update Base, we delete Updates.
+                        // If Base is small, we update Base.
+                    }
+                    else {
+                        // Level 2: Write to History Segment
+                        // We leave Base as is. We take `updatesMerged` and write as new History Segment.
+                        const segmentId = Math.random().toString(36).substring(2);
+                        const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
+                        transaction.set(historyRef, {
+                            segment: Bytes.fromUint8Array(updatesMerged),
+                            startTime: updateDocs[0].data().createdAt,
+                            endTime: updateDocs[updateDocs.length - 1].data().createdAt
+                        });
+                    }
+                    // 5. Delete processed updates
+                    for (const uDoc of updateDocs) {
+                        transaction.delete(uDoc.ref);
+                    }
+                }));
+            }
+            catch (e) {
+                console.error("Compaction execution failed", e);
             }
             finally {
-                if (this.onSaving)
-                    this.onSaving(false);
+                this.isCompacting = false;
             }
         });
-        this.sendToFirestoreQueue = () => {
-            // if cache settles down, save document to firebase
-            if (this.firestoreTimeout)
-                clearTimeout(this.firestoreTimeout); // kill other save processes first
-            if (this.onSaving)
-                this.onSaving(true);
-            this.firestoreTimeout = setTimeout(() => {
-                if (new Date().getTime() - this.firebaseDataLastUpdatedAt >
-                    this.maxFirestoreWait) {
-                    this.saveToFirestore();
-                }
-                else {
-                    // A peer recently saved to firebase, let's wait a bit
-                    this.sendToFirestoreQueue();
-                }
-            }, this.maxFirestoreWait);
-        };
-        this.sendCache = (from) => {
-            this.sendDataToPeers({
-                from,
-                message: null,
-                data: this.cache,
-            });
-            this.cache = null;
-            this.cacheUpdateCount = 0;
-            this.sendToFirestoreQueue(); // save to firestore
-        };
-        this.sendToQueue = ({ from, update }) => {
-            if (from === this.uid) {
-                // this update was from this user
-                if (this.cacheTimeout)
-                    clearTimeout(this.cacheTimeout);
-                this.cache = this.cache ? Y.mergeUpdates([this.cache, update]) : update;
-                this.cacheUpdateCount++;
-                if (this.cacheUpdateCount >= this.maxCacheUpdates) {
-                    // if the cache was already merged 20 times (this.maxCacheUpdates), send
-                    // the updates in cache to the peers
-                    this.sendCache(from);
-                }
-                else {
-                    // Wait to see if the user make other changes
-                    // if the user does not make changes for the next 500ms
-                    // send updates in cache to the peers
-                    this.cacheTimeout = setTimeout(() => {
-                        this.sendCache(from);
-                    }, this.maxRTCWait);
-                }
-            }
-            else {
-                // this update was from a peer, not this user
-                this.sendDataToPeers({
-                    from,
-                    message: null,
-                    data: update,
-                });
-            }
-        };
-        this.updateHandler = (update, origin) => {
-            // Origin can be of the following types
-            // 1. User typed something -> origin: object
-            // 2. User loaded something from local store -> origin: object
-            // 3. User received update from a peer -> origin: string = peer uid
-            // 4. User received update from Firestore -> origin: string = 'origin:firebase/update'
-            // 5. Update triggered because user applied updates from the above sources -> origin: string = uid
-            if (origin !== this.uid) {
-                // We will not allow no. 5. to propagate any further
-                // Apply updates received from no. 1 to 4. -> triggers no. 5
-                Y.applyUpdate(this.doc, update, this.uid); // the third parameter sets the transaction-origin
-                // Convert no. 1 and 2 to uid, because we want these to eventually trigger 'save' to Firestore
-                // sendToQueue method will either:
-                // 1. save origin:uid to Firestore (and send to peers through WebRtc)
-                // 2. send updates from other origins through WebRtc only
-                this.sendToQueue({
-                    from: typeof origin === "string" ? origin : this.uid,
-                    update,
-                });
-                this.saveToLocal(); // save data to local indexedDb
-            }
-        };
-        this.awarenessUpdateHandler = ({ added, updated, removed, }, origin) => {
-            const changedClients = added.concat(updated).concat(removed);
-            this.sendDataToPeers({
-                from: origin !== "local" ? origin : this.uid,
-                message: "awareness",
-                data: awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients),
-            });
-        };
-        this.consoleHandler = (message, data = null) => {
-            console.log("Provider:", this.documentPath, `this client: ${this.uid}`, message, data);
-        };
-        // use destroy directly if you don't need arguements
-        // otherwise use kill
-        this.destroy = () => {
-            // we have to create a separate function here
-            // because beforeunload only takes this.destroy
-            // and not this.destroy() or with this.destroy(args)
-            this.kill();
-        };
-        this.kill = (keepReadOnly = false) => {
-            this.instanceConnection.destroy();
-            removeEventListener("beforeunload", this.destroy);
-            if (this.recreateTimeout)
-                clearTimeout(this.recreateTimeout);
-            if (this.cacheTimeout)
-                clearTimeout(this.cacheTimeout);
-            if (this.firestoreTimeout)
-                clearTimeout(this.firestoreTimeout);
-            this.doc.off("update", this.updateHandler);
-            this.awareness.off("update", this.awarenessUpdateHandler);
-            deleteInstance(this.db, this.documentPath, this.uid);
-            if (this.unsubscribeData && !keepReadOnly) {
-                this.unsubscribeData();
-                delete this.unsubscribeData;
-            }
-            if (this.unsubscribeMesh) {
-                this.unsubscribeMesh();
-                delete this.unsubscribeMesh;
-            }
-            if (this.peersRTC) {
-                if (this.peersRTC.receivers) {
-                    Object.values(this.peersRTC.receivers).forEach((receiver) => receiver.destroy());
-                }
-                if (this.peersRTC.senders) {
-                    Object.values(this.peersRTC.senders).forEach((sender) => sender.destroy());
-                }
-            }
-            this.ready = false;
-            super.destroy();
-        };
-        // Initializing values
-        this.firebaseApp = firebaseApp;
-        this.db = getFirestore(this.firebaseApp);
-        this.doc = ydoc;
-        this.documentPath = path;
-        if (docMapper)
-            this.documentMapper = docMapper;
-        if (maxUpdatesThreshold)
-            this.maxCacheUpdates = maxUpdatesThreshold;
-        if (maxWaitTime)
-            this.maxRTCWait = maxWaitTime;
-        if (maxWaitFirestoreTime)
-            this.maxFirestoreWait = maxWaitFirestoreTime;
-        this.awareness = new awarenessProtocol.Awareness(this.doc);
-        // Initialize the provider
-        const init = this.init();
+    }
+    startSubdocProvider(subdoc) {
+        const guid = subdoc.guid;
+        if (this.subProviders.has(guid))
+            return;
+        const subPath = `${this.path}/subdocs/${guid}`;
+        const provider = new FireProvider({
+            firebaseApp: this.firebaseApp,
+            ydoc: subdoc,
+            path: subPath,
+            maxUpdatesThreshold: this.maxUpdatesThreshold,
+            maxWaitTime: this.maxWaitTime
+        });
+        this.subProviders.set(guid, provider);
+    }
+    destroy() {
+        if (this._unsubscribeUpdates)
+            this._unsubscribeUpdates();
+        this.doc.off('update', this.handleUpdate);
+        this.doc.off('subdocs', this.handleSubdocs);
+        // Destroy children
+        this.subProviders.forEach(p => p.destroy());
+        this.subProviders.clear();
+        super.destroy();
     }
 }

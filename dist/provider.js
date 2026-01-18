@@ -285,15 +285,10 @@ export class FireProvider extends ObservableV2 {
                     if (sizeInBytes < TARGET_LIMIT) {
                         // write to Snapshot
                         transaction.set(mainRef, { content: Bytes.fromUint8Array(candidate) }, { merge: true });
-                        // We should also delete history segments if we merged them? 
-                        // But we didn't read history segments here, so we only merged Base + Updates.
-                        // So History Segments remain parallel? 
-                        // That's fine, but inefficient eventually.
-                        // Design says "Combine S + H + U". 
-                        // For now, let's just do Level 2 (Append to History) if Base is full, 
-                        // or Update Base if Base + Updates is small.
-                        // If we Update Base, we delete Updates.
-                        // If Base is small, we update Base.
+                        // write to Snapshot
+                        transaction.set(mainRef, { content: Bytes.fromUint8Array(candidate) }, { merge: true });
+                        // Note: We currently do not merge existing History segments into the Snapshot
+                        // to avoid excessive reads in a single transaction. History segments remain parallel.
                     }
                     else {
                         // Level 2: Write to History Segment

@@ -1,6 +1,6 @@
 {
   "name": "y-cinder",
-  "version": "3.0.202601172156",
+  "version": "3.0.2601172212",
   "description": "A firebase (firestore) provider for Yjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,8 +8,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
-    "test": "firebase emulators:exec --project demo-test-project 'npx vitest run --environment node --no-file-parallelism'"
+    "build": "npm run version-bump && tsc",
+    "test": "firebase emulators:exec --project demo-test-project 'npx vitest run --environment node --no-file-parallelism'",
+    "version-bump": "node scripts/bump-version.js"
   },
   "repository": {
     "type": "git",

@@ -1,8 +1,11 @@
-# y-fire
+# y-cinder
+
+> [!NOTE]
+> This is a fork of `y-fire` by [podraven](https://github.com/podraven/y-fire).
 
 A database and connection provider for Yjs based on Firestore.
 
-y-fire is a Firestore (Firebase) and WebRTC-based provider, built especially for serverless infrastructure, that offers real-time capabilities to your Yjs-based applications. y-fire is built with efficiency in mind to reduce the number of calls that the application makes to and from Firestore. With y-fire, Firestore will act as both 1. persistent storage and 2. a peer discovery platform for WebRTC connections. This means that real-time updates are shared through a peer-to-peer network, thus reducing connections to Firestore. y-fire was inspired by [yjs-firestore-provider](https://github.com/gmcfall/yjs-firestore-provider) but implements few things differently.
+y-cinder is a Firestore (Firebase) and WebRTC-based provider, built especially for serverless infrastructure, that offers real-time capabilities to your Yjs-based applications. y-cinder is built with efficiency in mind to reduce the number of calls that the application makes to and from Firestore. With y-cinder, Firestore will act as both 1. persistent storage and 2. a peer discovery platform for WebRTC connections. This means that real-time updates are shared through a peer-to-peer network, thus reducing connections to Firestore. y-cinder was inspired by [yjs-firestore-provider](https://github.com/gmcfall/yjs-firestore-provider) but implements few things differently.
 
 https://github.com/podraven/y-fire/assets/2324523/3aa27a40-6cfb-4b93-b043-4e0fa57c96d4
 
@@ -11,7 +14,7 @@ https://github.com/podraven/y-fire/assets/2324523/3aa27a40-6cfb-4b93-b043-4e0fa5
 1. Utilizes a peer-to-peer network to exchange real-time data and awareness.
 2. Utilizes Firestore as persistent storage and syncs with Firestore periodically to maintain persistent data state.
 3. Utilizes Firestore as a peer discovery platform. Once peers are connected to each other, real-time updates are shared without accessing Firestore, thus reducing costs.
-4. Instead of connecting all peers to each other, y-fire creates clusters of clients. Clients within a cluster are connected to each other, and clusters are connected to each other through one common client. If clients leave or new clients join, clusters are recreated. Limiting client connections to limited number of peers thus improves performance. (Discussion: [WebRTC: peer connections limit](https://stackoverflow.com/questions/16015304/webrtc-peer-connections-limit))
+4. Instead of connecting all peers to each other, y-cinder creates clusters of clients. Clients within a cluster are connected to each other, and clusters are connected to each other through one common client. If clients leave or new clients join, clusters are recreated. Limiting client connections to limited number of peers thus improves performance. (Discussion: [WebRTC: peer connections limit](https://stackoverflow.com/questions/16015304/webrtc-peer-connections-limit))
 5. You can set wait times and thresholds.
 
 # Installation
@@ -30,21 +33,21 @@ Some editor bindings, including `y-prosemirror`, `TipTap`, and `y-quill`, have a
 npm install y-protocols --save
 ```
 
-#### Install y-fire
+#### Install y-cinder
 
-Once you have installed all the dependencies, you can install the `y-fire` library:
+Once you have installed all the dependencies, you can install the `y-cinder` library:
 
 ```
-npm install y-fire --save
+npm install y-cinder --save
 ```
 
-[![npm version](https://badge.fury.io/js/y-fire.svg)](https://npmjs.org/y-fire)
+[![npm version](https://badge.fury.io/js/y-cinder.svg)](https://npmjs.org/y-cinder)
 
 # Usage
 
 ```
 import * as Y from "yjs";
-import { FireProvider } from "y-fire";
+import { FireProvider } from "y-cinder";
 import { app } from "path-to-firebase-client";  // ex. app = initializeApp(config)
 
 export const yProvider = (documentPath) => {
@@ -95,7 +98,7 @@ const editor = new Editor({
 
 # Firestore rules
 
-You need to grant **read and write** permissions to the document `/path/to/your/document` and its children `/path/to/your/document/{document=**}` for this module to function properly. y-fire will write (merge) to the `content` field of your document, which corresponds to your Yjs data. Additionally, y-fire creates collections and documents within the specified document path for peer discovery purposes.
+You need to grant **read and write** permissions to the document `/path/to/your/document` and its children `/path/to/your/document/{document=**}` for this module to function properly. y-cinder will write (merge) to the `content` field of your document, which corresponds to your Yjs data. Additionally, y-cinder creates collections and documents within the specified document path for peer discovery purposes.
 
 # APIs
 
@@ -138,8 +141,8 @@ new FireProvider({
 
 #### Methods
 
-- **destroy**: Destroys the y-fire instance. You may want to destroy the y-fire instance when navigating out of the page to avoid the initialization of duplicate instances. Use `provider.destroy();` to destroy the instance.
-- ~~**destroyHandler**: Destroys the y-fire instance. You may want to destroy the y-fire instance when navigating out of the page to avoid the initialization of duplicate instances. Use `provider.destroyHandler();` to destroy the instance.~~ (Replaced with **destroy**)
+- **destroy**: Destroys the y-cinder instance. You may want to destroy the y-cinder instance when navigating out of the page to avoid the initialization of duplicate instances. Use `provider.destroy();` to destroy the instance.
+- ~~**destroyHandler**: Destroys the y-cinder instance. You may want to destroy the y-cinder instance when navigating out of the page to avoid the initialization of duplicate instances. Use `provider.destroyHandler();` to destroy the instance.~~ (Replaced with **destroy**)
 
 #### Events
 
@@ -159,12 +162,13 @@ provider.onReady = () => {
 
 # Contributors
 
-Made possible by **[Pod Raven](https://podraven.com)**, with special contributions from: **[deathg0d](https://github.com/deathg0d)**, **[dorkysamurai](https://github.com/lachana)**, **[arbitraryvector](https://x.com/arbitraryvector)**
+Made possible by **[Pod Raven](https://podraven.com)**, with special contributions from: **[deathg0d](https://github.com/deathg0d)**, **[dorkysamurai](https://github.com/lachana)**, **[arbitraryvector](https://x.com/arbitraryvector)**, **[Benson Tsai](https://github.com/vrwarp)**
 
 ##### Follow Us
 
 - [![alt text][1.1] @pod_raven](https://x.com/pod_raven)
 - [![alt text][1.1] @arbitraryvector](https://x.com/arbitraryvector)
+
 
 # Licensing and Attribution
 

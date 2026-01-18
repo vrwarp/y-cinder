@@ -1,5 +1,5 @@
 {
-  "name": "y-fire",
+  "name": "y-cinder",
   "version": "2.1.1",
   "description": "A firebase (firestore) provider for Yjs",
   "main": "dist/index.js",
@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/podraven/y-fire.git"
+    "url": "git+https://github.com/vrwarp/y-cinder.git"
   },
   "keywords": [
     "y-fire",
@@ -22,11 +22,14 @@
     "crdt"
   ],
   "author": "podraven",
+  "contributors": [
+    "vrwarp"
+  ],
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/podraven/y-fire/issues"
+    "url": "https://github.com/vrwarp/y-cinder/issues"
   },
-  "homepage": "https://github.com/podraven/y-fire#readme",
+  "homepage": "https://github.com/vrwarp/y-cinder#readme",
   "devDependencies": {
     "@types/simple-peer": "^9.11.8",
     "typescript": "^5.3.3"

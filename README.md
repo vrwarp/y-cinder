@@ -12,7 +12,7 @@ y-cinder is a Firestore (Firebase) provider, built especially for serverless inf
 1. **Tiered Storage Architecture**: Uses a smart combination of base snapshots, history segments, and incremental updates to efficiently store and retrieve data.
 2. **Automatic Compaction**: Periodically merges incremental updates into history segments or base snapshots to keep read costs low and performance high.
 3. **Optimized for Cost**: Debounces writes and compacts data to minimize Firestore writes and reads.
-4. **Subdocument Support**: Automatically handles subdocuments within the same provider logic.
+4. **Subdocument Support**: Automatically handles subdocuments recursively within the same provider logic.
 
 # Installation
 
@@ -20,13 +20,13 @@ y-cinder is a Firestore (Firebase) provider, built especially for serverless inf
 
 Make sure you have the following dependencies already installed in your project (skip the following steps if you already have these installed):
 
-```
+```bash
 npm install yjs firebase --save
 ```
 
-Some editor bindings, including `y-prosemirror`, `TipTap`, and `y-quill`, have an explicit dependency on the `y-protocols` module. If you are using one of these bindings, you don't need to install `y-protocols` separately.
+Some editor bindings, including `y-prosemirror`, `TipTap`, and `y-quill`, have an explicit dependency on the `y-protocols` module. If you are using one of these bindings, you must install `y-protocols` separately (y-cinder does not require it directly).
 
-```
+```bash
 npm install y-protocols --save
 ```
 
@@ -34,7 +34,7 @@ npm install y-protocols --save
 
 Once you have installed all the dependencies, you can install the `y-cinder` library:
 
-```
+```bash
 npm install y-cinder --save
 ```
 
@@ -72,7 +72,7 @@ const editor = new Editor({
       document: provider.doc,
     })
     // CollaborationCursor is not directly supported by this provider 
-    // without an awareness protocol (which is currently not exported)
+    // as it does not implement the awareness protocol.
   ],
 })
 ```

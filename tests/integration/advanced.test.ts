@@ -1,0 +1,103 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { FireProvider } from '../../src/provider';
+import * as Y from 'yjs';
+import { setupEmulator, clearFirestore } from '../utils/emulator';
+
+describe('FireProvider Advanced Integration (Emulator)', () => {
+    let app: any;
+    let db: any;
+
+    // Helper to create provider connected to emulator
+    const createProvider = (doc: Y.Doc, path: string, config: any = {}) => {
+        return new FireProvider({
+            firebaseApp: app,
+            ydoc: doc,
+            path,
+            ...config
+        });
+    }
+
+    beforeEach(async () => {
+        const setup = await setupEmulator();
+        app = setup.app;
+        db = setup.db;
+    });
+
+    it('should sync subdocuments recursively', async () => {
+        const path = `integration-tests/subdocs-${Date.now()}`;
+
+        // Client 1 setup
+        const doc1 = new Y.Doc();
+        const provider1 = createProvider(doc1, path);
+        const subdocs1 = doc1.getMap('my-subdocs');
+
+        // Client 2 setup
+        const doc2 = new Y.Doc();
+        const provider2 = createProvider(doc2, path);
+        const subdocs2 = doc2.getMap('my-subdocs');
+
+        // Add subdoc on Client 1
+        const subdoc1 = new Y.Doc();
+        subdocs1.set('child', subdoc1);
+
+        // Wait for subdoc provider to attach (it's sync in handleSubdocs, but good to be safe)
+        await new Promise(r => setTimeout(r, 100));
+
+        subdoc1.getText('inner').insert(0, 'Nested Content');
+
+        // Wait for propagation
+        // 1. Main doc update -> Client 2
+        // 2. Client 2 sees new subdoc -> instantiates child provider
+        // 3. Child provider syncs 'subdocs/guid'
+        await new Promise(r => setTimeout(r, 4000));
+
+        const subdoc2Candidate = subdocs2.get('child');
+        expect(subdoc2Candidate).toBeDefined();
+
+        // Load subdoc on Client 2 by "requesting" it (Yjs lazy loading)
+        // Note: Yjs map.get() returns the subdoc instance if available.
+        // We verify that its content eventually syncs.
+        const subdoc2 = subdoc2Candidate as Y.Doc;
+
+        // Need to wait for subdoc provider to sync content
+        // Child provider initialization + sync takes time
+        await new Promise(r => setTimeout(r, 6000));
+
+        expect(subdoc2.getText('inner').toString()).toBe('Nested Content');
+
+        provider1.destroy();
+        provider2.destroy();
+    }, 20000);
+
+    it('should handle concurrent edits from multiple clients', async () => {
+        const path = `integration-tests/concurrency-${Date.now()}`;
+        const numClients = 3;
+        const clients = [];
+
+        for (let i = 0; i < numClients; i++) {
+            const doc = new Y.Doc();
+            doc.clientID = i + 1; // Force distinct IDs
+            const provider = createProvider(doc, path, { maxWaitTime: 10 });
+            clients.push({ doc, provider });
+        }
+
+        // All clients insert text at same position concurrently
+        clients.forEach((c, idx) => {
+            c.doc.getText('content').insert(0, `Client${idx}`);
+        });
+
+        // Wait for sync
+        await new Promise(r => setTimeout(r, 3000));
+
+        // All docs should converge to same string (order determined by clientID/Lamport)
+        const expected = clients[0].doc.getText('content').toString();
+
+        for (let i = 1; i < numClients; i++) {
+            expect(clients[i].doc.getText('content').toString()).toBe(expected);
+        }
+
+        expect(expected.length).toBe('Client0Client1Client2'.length);
+
+        clients.forEach(c => c.provider.destroy());
+    });
+});

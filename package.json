@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "firebase emulators:exec --project demo-test-project 'npx vitest run'"
+    "test": "firebase emulators:exec --project demo-test-project 'npx vitest run --environment node --no-file-parallelism'"
   },
   "repository": {
     "type": "git",

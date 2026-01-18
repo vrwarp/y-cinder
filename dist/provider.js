@@ -11,7 +11,7 @@ import { getFirestore, onSnapshot, doc, collection, addDoc, Bytes, runTransactio
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
 export class FireProvider extends ObservableV2 {
-    constructor({ firebaseApp, ydoc, path, maxUpdatesThreshold = 50, maxWaitTime = 500, }) {
+    constructor({ firebaseApp, ydoc, path, maxUpdatesThreshold = 50, maxWaitTime = 500, compactionProbability = 0.01, depth = 0, }) {
         super();
         // Recursion
         this.subProviders = new Map();
@@ -22,7 +22,9 @@ export class FireProvider extends ObservableV2 {
         // Configuration
         this.maxUpdatesThreshold = 50;
         this.maxWaitTime = 500;
+        this.compactionProbability = 0.01;
         this._unsubscribeUpdates = null;
+        this._isDestroyed = false;
         this.handleUpdate = (update, origin) => {
             // Prevent loops
             if (origin === 'origin:firebase/snapshot' ||
@@ -57,6 +59,8 @@ export class FireProvider extends ObservableV2 {
         this.path = path;
         this.maxUpdatesThreshold = maxUpdatesThreshold;
         this.maxWaitTime = maxWaitTime;
+        this.compactionProbability = compactionProbability;
+        this.depth = depth;
         // Generate a unique ID for this session/provider instance
         this.uid = Math.random().toString(36).substring(2) + Date.now().toString(36);
         // Setup Debounced Save
@@ -100,6 +104,8 @@ export class FireProvider extends ObservableV2 {
                     // we will get them in step 3 when we read the new snapshot.
                     const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
                     const updatesSnap = yield getDocs(updatesQ);
+                    if (this._isDestroyed)
+                        return;
                     updatesSnap.forEach(snap => {
                         const data = snap.data();
                         if (data && data.update) {
@@ -118,6 +124,8 @@ export class FireProvider extends ObservableV2 {
                     // 2. Fetch History Segments (Tier 2)
                     const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
                     const historySnaps = yield getDocs(historyQ);
+                    if (this._isDestroyed)
+                        return;
                     historySnaps.forEach(snap => {
                         const data = snap.data();
                         if (data && data.segment) {
@@ -134,6 +142,8 @@ export class FireProvider extends ObservableV2 {
                     // 3. Fetch Base Snapshot (Tier 1)
                     const mainRef = doc(this.db, this.path);
                     const mainSnap = yield getDoc(mainRef);
+                    if (this._isDestroyed)
+                        return;
                     if (mainSnap.exists()) {
                         const data = mainSnap.data();
                         if (data && data.content) {
@@ -160,6 +170,8 @@ export class FireProvider extends ObservableV2 {
                             createdBy: this.uid
                         };
                         yield addDoc(collection(this.db, this.path, 'updates'), pkg);
+                        if (this._isDestroyed)
+                            return;
                     }
                 }
                 finally {
@@ -170,7 +182,9 @@ export class FireProvider extends ObservableV2 {
                 const listenerFn = (snapshot) => {
                     // Check for compaction trigger
                     if (snapshot.size > this.maxUpdatesThreshold && !this.isCompacting) {
-                        this.compact();
+                        if (Math.random() < this.compactionProbability) {
+                            this.compact();
+                        }
                     }
                     snapshot.docChanges().forEach((change) => {
                         if (change.type === 'added') {
@@ -193,6 +207,8 @@ export class FireProvider extends ObservableV2 {
                 };
                 // Re-query for listener to be safe / clean
                 const liveUpdatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+                if (this._isDestroyed)
+                    return;
                 this._unsubscribeUpdates = onSnapshot(liveUpdatesQ, listenerFn, (error) => {
                     console.error("onSnapshot listener failed", error);
                     // If the listener fails (e.g. Grpc error in emulator), we might want to trigger a re-sync
@@ -242,13 +258,13 @@ export class FireProvider extends ObservableV2 {
                 const updatesSnap = yield getDocs(updatesQ);
                 // We also check for History segments to merge them back if possible
                 const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
-                const historySnap = yield getDocs(historyQ);
-                if (updatesSnap.empty && historySnap.empty) {
+                const historySnaps = yield getDocs(historyQ);
+                if (updatesSnap.empty && historySnaps.empty) {
                     this.isCompacting = false;
                     return;
                 }
                 const updateDocs = updatesSnap.docs;
-                const historyDocs = historySnap.docs;
+                const historyDocs = historySnaps.docs;
                 yield runTransaction(this.db, (transaction) => __awaiter(this, void 0, void 0, function* () {
                     // 2. Read Base Snapshot (Tier 1) inside transaction
                     const mainRef = doc(this.db, this.path);
@@ -313,21 +329,75 @@ export class FireProvider extends ObservableV2 {
                     }
                     else {
                         // Level 2: Write to History Segment (Fallback)
-                        // We can't fit everything into Base. 
-                        // Goal: Merge just the UPDATES into a new History Segment.
-                        // We leave the existing History segments alone (they remain parallel).
+                        // We can't fit everything into Base.
+                        // Goal: Merge updates into History Segments.
                         if (updatesToMerge.length > 0) {
-                            const updatesMerged = Y.mergeUpdates(updatesToMerge);
-                            const segmentId = Math.random().toString(36).substring(2);
-                            const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
-                            transaction.set(historyRef, {
-                                segment: Bytes.fromUint8Array(updatesMerged),
-                                startTime: updateDocs[0].data().createdAt,
-                                endTime: updateDocs[updateDocs.length - 1].data().createdAt
-                            });
-                            // Delete processed updates
-                            for (const uDoc of updateDocs) {
-                                transaction.delete(uDoc.ref);
+                            // FIX: Handle updates that are too large for a single History Segment
+                            const MAX_SEGMENT_SIZE = 900000; // Safe limit (900KB)
+                            // 1. Try merging all first (Optimistic)
+                            let pendingMerge = Y.mergeUpdates(updatesToMerge);
+                            if (pendingMerge.byteLength < MAX_SEGMENT_SIZE) {
+                                // Fast path: It fits in one segment
+                                const segmentId = Math.random().toString(36).substring(2);
+                                const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
+                                transaction.set(historyRef, {
+                                    segment: Bytes.fromUint8Array(pendingMerge),
+                                    startTime: updateDocs[0].data().createdAt,
+                                    endTime: updateDocs[updateDocs.length - 1].data().createdAt
+                                });
+                                // Delete all utilized updates
+                                for (const uDoc of updateDocs) {
+                                    transaction.delete(uDoc.ref);
+                                }
+                            }
+                            else {
+                                // Slow path: The updates are too big. We must split them.
+                                // We iterate through updates and create multiple History Segments.
+                                let currentBatch = [];
+                                let currentBatchSize = 0;
+                                let batchStartIndex = 0;
+                                for (let i = 0; i < updatesToMerge.length; i++) {
+                                    const update = updatesToMerge[i];
+                                    const updateSize = update.byteLength;
+                                    // If a SINGLE update is > 1MB, we might still have issues, 
+                                    // but usually Yjs updates are granular.
+                                    // Check if adding this update would likely exceed limit
+                                    if (currentBatchSize + updateSize > MAX_SEGMENT_SIZE && currentBatch.length > 0) {
+                                        // Flush current batch to a new Segment
+                                        const mergedBatch = Y.mergeUpdates(currentBatch);
+                                        const segmentId = Math.random().toString(36).substring(2);
+                                        const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
+                                        transaction.set(historyRef, {
+                                            segment: Bytes.fromUint8Array(mergedBatch),
+                                            startTime: updateDocs[batchStartIndex].data().createdAt,
+                                            endTime: updateDocs[i - 1].data().createdAt
+                                        });
+                                        // Delete updates in this batch
+                                        for (let j = batchStartIndex; j < i; j++) {
+                                            transaction.delete(updateDocs[j].ref);
+                                        }
+                                        // Reset
+                                        currentBatch = [];
+                                        currentBatchSize = 0;
+                                        batchStartIndex = i;
+                                    }
+                                    currentBatch.push(update);
+                                    currentBatchSize += updateSize;
+                                }
+                                // Flush remaining batch
+                                if (currentBatch.length > 0) {
+                                    const mergedBatch = Y.mergeUpdates(currentBatch);
+                                    const segmentId = Math.random().toString(36).substring(2);
+                                    const historyRef = doc(collection(this.db, this.path, 'history'), segmentId);
+                                    transaction.set(historyRef, {
+                                        segment: Bytes.fromUint8Array(mergedBatch),
+                                        startTime: updateDocs[batchStartIndex].data().createdAt,
+                                        endTime: updateDocs[updatesToMerge.length - 1].data().createdAt
+                                    });
+                                    for (let j = batchStartIndex; j < updatesToMerge.length; j++) {
+                                        transaction.delete(updateDocs[j].ref);
+                                    }
+                                }
                             }
                         }
                     }
@@ -359,17 +429,24 @@ export class FireProvider extends ObservableV2 {
         const guid = subdoc.guid;
         if (this.subProviders.has(guid))
             return;
+        // Firestore path limit is 100. Safety limit at 50.
+        if (this.depth >= 50) {
+            console.warn(`Max subdocument depth exceeded at ${this.path}`);
+            return;
+        }
         const subPath = `${this.path}/subdocs/${guid}`;
         const provider = new FireProvider({
             firebaseApp: this.firebaseApp,
             ydoc: subdoc,
             path: subPath,
             maxUpdatesThreshold: this.maxUpdatesThreshold,
-            maxWaitTime: this.maxWaitTime
+            maxWaitTime: this.maxWaitTime,
+            depth: this.depth + 1
         });
         this.subProviders.set(guid, provider);
     }
     destroy() {
+        this._isDestroyed = true;
         if (this._unsubscribeUpdates)
             this._unsubscribeUpdates();
         this.doc.off('update', this.handleUpdate);

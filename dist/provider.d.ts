@@ -8,6 +8,8 @@ export interface FireProviderConfig {
     path: string;
     maxUpdatesThreshold?: number;
     maxWaitTime?: number;
+    compactionProbability?: number;
+    depth?: number;
 }
 export declare class FireProvider extends ObservableV2<any> {
     doc: Y.Doc;
@@ -20,9 +22,12 @@ export declare class FireProvider extends ObservableV2<any> {
     updateCache: Uint8Array | null;
     maxUpdatesThreshold: number;
     maxWaitTime: number;
+    compactionProbability: number;
+    depth: number;
     private _unsubscribeUpdates;
     private _debouncedSave;
-    constructor({ firebaseApp, ydoc, path, maxUpdatesThreshold, maxWaitTime, }: FireProviderConfig);
+    private _isDestroyed;
+    constructor({ firebaseApp, ydoc, path, maxUpdatesThreshold, maxWaitTime, compactionProbability, depth, }: FireProviderConfig);
     private debounce;
     private wait;
     /**

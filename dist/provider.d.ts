@@ -24,6 +24,7 @@ export declare class FireProvider extends ObservableV2<any> {
     private _debouncedSave;
     constructor({ firebaseApp, ydoc, path, maxUpdatesThreshold, maxWaitTime, }: FireProviderConfig);
     private debounce;
+    private wait;
     /**
      * Sync Mechanism
      * 1. Load Base Snapshot
@@ -37,7 +38,7 @@ export declare class FireProvider extends ObservableV2<any> {
      * Compaction Logic (Tiered)
      * Merges updates into History Segments or Base Snapshot
      */
-    compact(): Promise<void>;
+    compact(attempt?: number): Promise<void>;
     handleSubdocs: ({ added, removed, loaded }: {
         added: Set<Y.Doc>;
         removed: Set<Y.Doc>;

@@ -1,6 +1,6 @@
 {
   "name": "y-cinder",
-  "version": "3.0.2601172212",
+  "version": "3.0.2601172311",
   "description": "A firebase (firestore) provider for Yjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

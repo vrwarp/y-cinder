@@ -13,12 +13,13 @@ import {
   orderBy,
   getDocs,
   getDoc,
+  setDoc,
+  deleteDoc,
   limit,
   serverTimestamp,
   Timestamp,
   writeBatch,
   DocumentReference,
-  setDoc,
   QueryDocumentSnapshot
 } from "@firebase/firestore";
 import * as Y from "yjs";
@@ -526,6 +527,17 @@ export class FireProvider extends ObservableV2<any> {
    * to be more resilient to clock skew between clients.
    */
   private async acquireLock(): Promise<boolean> {
+    // 1. Calculate Server Time Offset to handle clock skew
+    let serverOffset = 0;
+    try {
+      serverOffset = await this.measureClockSkew();
+    } catch (e) {
+      console.warn("Failed to measure clock skew, defaulting to 0:", e);
+    }
+
+    // Estimated Server Time
+    const serverNow = Date.now() + serverOffset;
+
     const lockRef = doc(this.db, this.path, this.LOCK_PATH);
 
     try {
@@ -534,12 +546,16 @@ export class FireProvider extends ObservableV2<any> {
 
         if (lockSnap.exists()) {
           const data = lockSnap.data();
-          const createdAt = (data.createdAt && typeof data.createdAt.toMillis === 'function') ? data.createdAt.toMillis() : (typeof data.createdAt === 'number' ? data.createdAt : 0);
-          const lockAge = Date.now() - createdAt;
 
-          // Issue 4 Fix: Compare lock age against TTL instead of client-side expiry
-          // This is more resilient to clock skew since we're comparing duration, not absolute time
-          // If the lock is newer than TTL, it's still valid
+          // Use estimated server time for check
+          // If data.createdAt is valid timestamp (millis), use it.
+          // Fallback: If createdAt is missing/invalid, treat as 0 (valid epoch, but very old -> expired).
+          const createdAt = (data.createdAt && typeof data.createdAt.toMillis === 'function')
+            ? data.createdAt.toMillis()
+            : (typeof data.createdAt === 'number' ? data.createdAt : 0);
+
+          const lockAge = serverNow - createdAt;
+
           if (lockAge < this.lockTTL && data.owner !== this.uid) {
             return false; // Lock is busy
           }
@@ -548,9 +564,8 @@ export class FireProvider extends ObservableV2<any> {
         // Lock is free, expired, or owned by us (re-entrant). Claim it.
         transaction.set(lockRef, {
           owner: this.uid,
-          createdAt: Date.now(),
-          // Keep expiresAt for backwards compat and debugging (as number to avoid Timestamp issues)
-          expiresAt: Date.now() + this.lockTTL
+          createdAt: serverTimestamp(), // Write authoritative Server Time
+          expiresAt: serverTimestamp() // Debug only
         });
 
         return true;
@@ -558,6 +573,34 @@ export class FireProvider extends ObservableV2<any> {
     } catch (e) {
       console.warn("Failed to acquire lock (contention):", e);
       return false;
+    }
+  }
+
+  /**
+   * Helper to measure the difference between Client Clock and Server Clock.
+   * Returns (ServerTime - ClientTime).
+   */
+  private async measureClockSkew(): Promise<number> {
+    const tempId = `skew_${this.uid}_${Math.random().toString(36).substring(2)}`;
+    const ref = doc(collection(this.db, this.path, 'maintenance'), tempId);
+
+    try {
+      await setDoc(ref, { t: serverTimestamp() });
+      const snap = await getDoc(ref);
+      const data = snap.data();
+
+      if (data && data.t && typeof data.t.toMillis === 'function') {
+        const serverTime = data.t.toMillis();
+        // Cleanup (fire and forget)
+        deleteDoc(ref).catch(() => { });
+        return serverTime - Date.now();
+      }
+
+      deleteDoc(ref).catch(() => { });
+      return 0;
+    } catch (e) {
+      // If we can't write/read, assume 0 skew (best effort)
+      return 0;
     }
   }
 

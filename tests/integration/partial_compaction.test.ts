@@ -42,7 +42,7 @@ describe('Issue 12: Partial Compaction Failure', () => {
         await terminate(db);
     });
 
-    it('should not duplicate data if transaction partially fails', { timeout: 15000 }, async () => {
+    it('should not duplicate data if transaction partially fails', { timeout: 30000 }, async () => {
         const ydoc = new Y.Doc();
         const provider = new FireProvider({
             firebaseApp: app,

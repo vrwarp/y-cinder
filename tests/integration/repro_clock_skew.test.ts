@@ -104,6 +104,53 @@ describe('Issue 4: Clock Skew in Distributed Lock', () => {
         }
     });
 
+    it('should respect lock even when client clock is ahead of server', async () => {
+        const lockRef = doc(db, path, 'metadata/lock_compaction');
+        const serverNow = Date.now();
+        const lockExpiry = serverNow + 30000; // Valid for 30 more seconds
+
+        await setDoc(lockRef, {
+            owner: 'other-client-holding-lock',
+            createdAt: Timestamp.fromMillis(serverNow),
+            expiresAt: Timestamp.fromMillis(lockExpiry)
+        });
+
+        const ydoc = new Y.Doc();
+        const provider = new FireProvider({
+            firebaseApp: app,
+            ydoc,
+            path,
+            compactionProbability: 0,
+            lockTTL: 60000
+        });
+
+        await addDoc(collection(db, path, 'updates'), {
+            update: Bytes.fromUint8Array(Y.encodeStateAsUpdate(new Y.Doc())),
+            createdAt: serverTimestamp()
+        });
+
+        // MOCK: Client thinks it is 2 minutes in the FUTURE
+        // Current Code: LockAge = (Now+2m) - LockTime = 2m.
+        // 2m > TTL (1m). Client decides lock is old. Steals it.
+        const originalDateNow = Date.now;
+        const clientTimeAhead = serverNow + 120000;
+        Date.now = () => clientTimeAhead;
+
+        try {
+            await provider.compact();
+
+            const lockSnap = await getDoc(lockRef);
+            const lockData = lockSnap.data();
+
+            // FAIL CONDITION: If lockData.owner is provider.uid, we stole it.
+            // EXPECTED: owner is still 'other-client-holding-lock'
+            expect(lockData?.owner).toBe('other-client-holding-lock');
+        } finally {
+            Date.now = originalDateNow;
+            provider.destroy();
+        }
+    });
+
     it('should prevent concurrent compaction due to clock skew', async () => {
         const ydoc1 = new Y.Doc();
         const ydoc2 = new Y.Doc();

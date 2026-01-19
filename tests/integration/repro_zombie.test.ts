@@ -107,15 +107,23 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         console.log(`Target to delete (concurrently): ${docToDelete.id}`);
 
         // 2. Setup the Trap
-        // We hook into the provider right after it fetches `updateDocs` (Snapshot List)
-        // but BEFORE it opens the transaction to process them.
+        // We need to re-create the provider to inject the hook (Issue 16 Fix: DI)
+        // Since provider state is stateless regarding firestore data (it reads from DB),
+        // we can safely destroy and recreate.
+        provider.destroy();
 
-        provider._testHooks = {
-            beforeTransaction: async () => {
-                console.log("HOOK TRIGGERED: Deleting Doc A to simulate concurrent removal...");
-                await deleteDoc(docToDelete.ref);
+        provider = new FireProvider({
+            firebaseApp: app,
+            ydoc: new Y.Doc(), // Use dummy doc for compaction-only provider
+            path,
+            compactionProbability: 0,
+            testHooks: {
+                beforeTransaction: async () => {
+                    console.log("HOOK TRIGGERED: Deleting Doc A to simulate concurrent removal...");
+                    await deleteDoc(docToDelete.ref);
+                }
             }
-        };
+        });
 
         // 3. Trigger Compaction
         // This will:

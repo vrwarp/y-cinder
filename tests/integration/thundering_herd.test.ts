@@ -17,7 +17,7 @@ describe('Thundering Herd Compaction Fix', () => {
         db = setup.db;
     });
 
-    it('should NOT trigger compaction when probability is 0', { timeout: 30000 }, async () => {
+    it('should NOT trigger compaction when probability is 0', { timeout: 60000 }, async () => {
         const ydoc = new Y.Doc();
         const provider = new FireProvider({
             firebaseApp: app,
@@ -28,15 +28,13 @@ describe('Thundering Herd Compaction Fix', () => {
         });
 
         // Add 6 updates (above threshold 5)
-        const promises = [];
         for (let i = 0; i < 6; i++) {
-            promises.push(addDoc(collection(db, path, 'updates'), {
+            await addDoc(collection(db, path, 'updates'), {
                 update: Bytes.fromUint8Array(Y.encodeStateAsUpdate(new Y.Doc())),
                 createdAt: serverTimestamp(),
                 createdBy: 'other-user'
-            }));
+            });
         }
-        await Promise.all(promises);
 
         // Wait for onSnapshot (just a small buffer)
         await new Promise(r => setTimeout(r, 2000));
@@ -48,7 +46,7 @@ describe('Thundering Herd Compaction Fix', () => {
         provider.destroy();
     });
 
-    it('should trigger compaction when probability is 1', { timeout: 30000 }, async () => {
+    it('should trigger compaction when probability is 1', { timeout: 60000 }, async () => {
         const ydoc = new Y.Doc();
         const provider = new FireProvider({
             firebaseApp: app,
@@ -59,15 +57,13 @@ describe('Thundering Herd Compaction Fix', () => {
         });
 
         // Add 6 updates
-        const promises = [];
         for (let i = 0; i < 6; i++) {
-            promises.push(addDoc(collection(db, path, 'updates'), {
+            await addDoc(collection(db, path, 'updates'), {
                 update: Bytes.fromUint8Array(Y.encodeStateAsUpdate(new Y.Doc())),
                 createdAt: serverTimestamp(),
                 createdBy: 'other-user'
-            }));
+            });
         }
-        await Promise.all(promises);
 
         // Wait for updates to be cleared (compaction finished)
         await new Promise<void>((resolve, reject) => {

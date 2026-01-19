@@ -32,6 +32,13 @@ interface UpdateMetadata {
   clockEnd: number;
 }
 
+// Issue 15 Fix: Proper type declaration for internal Yjs API
+declare module 'yjs' {
+  export function decodeUpdate(update: Uint8Array): {
+    structs: Array<{ id: { client: number; clock: number }; length: number }>;
+  };
+}
+
 export interface FireProviderConfig {
   firebaseApp: FirebaseApp;
   ydoc: Y.Doc;
@@ -42,6 +49,13 @@ export interface FireProviderConfig {
   depth?: number;
   lockTTL?: number; // NEW: default 60000ms (60s)
   compactionLimit?: number; // NEW: default 500
+  /**
+   * Issue 16 Fix: Dependency Injection for test hooks
+   * @internal
+   */
+  testHooks?: {
+    beforeTransaction?: () => Promise<void>;
+  };
 }
 
 export class FireProvider extends ObservableV2<any> {
@@ -73,12 +87,15 @@ export class FireProvider extends ObservableV2<any> {
 
   private _unsubscribeUpdates: Unsubscribe | null = null;
   private _debouncedSave: () => void;
-  // Test Hooks
-  public _testHooks?: {
+  // Issue 16 Fix: Test Hooks injected via config, not public property
+  private _testHooks?: {
     beforeTransaction?: () => Promise<void>;
   };
 
   private _isDestroyed = false;
+
+  // Issue 17 Fix: Cache local clocks to avoid repeated SV decode
+  private _localClockCache: Map<number, number> | null = null;
 
   constructor({
     firebaseApp,
@@ -88,20 +105,24 @@ export class FireProvider extends ObservableV2<any> {
     maxWaitTime = 500,
     compactionProbability = 0.01,
     depth = 0,
-    lockTTL = 60000, // Default 60s safety window
+    lockTTL = 60000,
     compactionLimit = 500,
+    testHooks
   }: FireProviderConfig) {
     super();
     this.firebaseApp = firebaseApp;
-    this.db = getFirestore(firebaseApp);
-    this.doc = ydoc;
+    this.db = getFirestore(firebaseApp); // Restore missing init
     this.path = path;
+    this.doc = ydoc;
+    this.uid = Math.random().toString(36).substring(2);
+    this.depth = depth;
+
     this.maxUpdatesThreshold = maxUpdatesThreshold;
     this.maxWaitTime = maxWaitTime;
     this.compactionProbability = compactionProbability;
-    this.compactionLimit = compactionLimit;
-    this.depth = depth;
     this.lockTTL = lockTTL;
+    this.compactionLimit = compactionLimit;
+    this._testHooks = testHooks; // Injection
 
     // Generate a unique ID for this session/provider instance
     this.uid = Math.random().toString(36).substring(2) + Date.now().toString(36);
@@ -139,7 +160,6 @@ export class FireProvider extends ObservableV2<any> {
   // Helper: Extract all metadata (multi-client) 
   private extractAllMetadata(update: Uint8Array): UpdateMetadata[] {
     try {
-      // @ts-ignore
       const decoded = Y.decodeUpdate(update);
       const results: UpdateMetadata[] = [];
       if (decoded.structs) {
@@ -314,7 +334,7 @@ export class FireProvider extends ObservableV2<any> {
         let redundant = false;
 
         // Check checks
-        if (item.type === 'snapshot' || item.type === 'history') {
+        if (item.type === 'snapshot') {
           if (item.data.stateVector) {
             const sv = fromBase64(item.data.stateVector);
             const map = Y.decodeStateVector(sv);
@@ -352,18 +372,19 @@ export class FireProvider extends ObservableV2<any> {
 
       if (localDiff.byteLength > 2) {
         console.log("Pushing missing local updates to Firestore.");
-        // We apply the same logic for saving metadata
+        // Issue 3 Fix: Store all client metadata, not just the first
         const metas = this.extractAllMetadata(localDiff);
-        const meta = metas.length > 0 ? metas[0] : null;
         const pkg: any = {
           update: Bytes.fromUint8Array(localDiff),
           createdAt: serverTimestamp(),
           createdBy: this.uid
         };
-        if (meta) {
-          pkg.clientID = meta.clientID;
-          pkg.clockStart = meta.clockStart;
-          pkg.clockEnd = meta.clockEnd;
+        // Store aggregated metadata from all clients
+        if (metas.length > 0) {
+          pkg.clientIDs = metas.map(m => m.clientID);
+          pkg.clientID = metas[0].clientID; // Keep for backwards compat
+          pkg.clockStart = Math.min(...metas.map(m => m.clockStart));
+          pkg.clockEnd = Math.max(...metas.map(m => m.clockEnd));
         }
         await addDoc(collection(this.db, this.path, 'updates'), pkg);
         if (this._isDestroyed) return;
@@ -388,21 +409,23 @@ export class FireProvider extends ObservableV2<any> {
             }
 
             // FILTER: Check if we already have this update using metadata
-            // Only applicable if we have an up-to-date view of our own clocks, which we do.
-            if (typeof data.clientID === 'number' && typeof data.clockEnd === 'number') {
-              // Get our local clock for this client
-              // Note: localSVMap might be stale if we edited locally since sync start.
-              // We should get fresh vector.
+            // Issue 3 Fix: Check ALL clientIDs, not just the first one
+            const clientIDs = data.clientIDs || (typeof data.clientID === 'number' ? [data.clientID] : []);
+            if (clientIDs.length > 0 && typeof data.clockEnd === 'number') {
               const freshSV = Y.encodeStateVector(this.doc);
-              // Decoding full SV map every update might be slight overhead but better than parsing update.
-              // Actually, Yjs has efficient lookup? No.
-              // Optim: Just apply using Yjs idempotency. But wait, "CPU Waste".
-              // We can cache our own clocks?
-              // Let's decode SV for check.
               const freshMap = Y.decodeStateVector(freshSV);
-              const localClock = freshMap.get(data.clientID) || 0;
-              if (localClock >= data.clockEnd) {
-                return; // Skip
+
+              // Check if we have all the content for ALL clients in this update
+              let haveAll = true;
+              for (const cid of clientIDs) {
+                const localClock = freshMap.get(cid) || 0;
+                if (localClock < data.clockEnd) {
+                  haveAll = false;
+                  break;
+                }
+              }
+              if (haveAll) {
+                return; // Skip - we have all the data
               }
             }
 
@@ -425,6 +448,13 @@ export class FireProvider extends ObservableV2<any> {
 
       this._unsubscribeUpdates = onSnapshot(liveUpdatesQ, listenerFn, (error) => {
         console.error("onSnapshot listener failed", error);
+        // Issue 10 Fix: Retry listener on failure
+        if (!this._isDestroyed) {
+          console.log("Retrying listener in 5 seconds...");
+          setTimeout(() => {
+            if (!this._isDestroyed) this.sync();
+          }, 5000);
+        }
       });
 
     } catch (err) {
@@ -439,6 +469,9 @@ export class FireProvider extends ObservableV2<any> {
       origin === 'origin:firebase/update') {
       return;
     }
+
+    // Issue 17 Fix: Invalidate clock cache on local update
+    this._localClockCache = null;
 
     // Merge into cache
     this.updateCache = this.updateCache ? Y.mergeUpdates([this.updateCache, update]) : update;
@@ -455,18 +488,19 @@ export class FireProvider extends ObservableV2<any> {
     const update = this.updateCache;
     this.updateCache = null;
 
+    // Issue 3 Fix: Store all client metadata
     const metas = this.extractAllMetadata(update);
-    const meta = metas.length > 0 ? metas[0] : null;
     const docData: any = {
       update: Bytes.fromUint8Array(update),
       createdAt: serverTimestamp(),
       createdBy: this.uid
     };
 
-    if (meta) {
-      docData.clientID = meta.clientID;
-      docData.clockStart = meta.clockStart;
-      docData.clockEnd = meta.clockEnd;
+    if (metas.length > 0) {
+      docData.clientIDs = metas.map(m => m.clientID);
+      docData.clientID = metas[0].clientID; // Backwards compat
+      docData.clockStart = Math.min(...metas.map(m => m.clockStart));
+      docData.clockEnd = Math.max(...metas.map(m => m.clockEnd));
     }
 
     try {
@@ -474,7 +508,6 @@ export class FireProvider extends ObservableV2<any> {
     } catch (err) {
       console.error("Failed to save update to Firestore", err);
       // Recovery: Put back the updates we failed to save
-      // We prepend the failed update to the current cache (if any)
       if (this.updateCache) {
         this.updateCache = Y.mergeUpdates([update, this.updateCache]);
       } else {
@@ -488,10 +521,12 @@ export class FireProvider extends ObservableV2<any> {
   /**
    * Attempts to acquire a distributed lock for compaction.
    * Returns true if lock was successfully acquired.
+   * 
+   * Issue 4 Fix: Uses lock createdAt timestamp + TTL offset instead of client expiry
+   * to be more resilient to clock skew between clients.
    */
   private async acquireLock(): Promise<boolean> {
     const lockRef = doc(this.db, this.path, this.LOCK_PATH);
-    const clientNow = Date.now();
 
     try {
       return await runTransaction(this.db, async (transaction) => {
@@ -499,20 +534,23 @@ export class FireProvider extends ObservableV2<any> {
 
         if (lockSnap.exists()) {
           const data = lockSnap.data();
-          const expiresAt = data.expiresAt instanceof Timestamp ? data.expiresAt.toMillis() : 0;
+          const createdAt = (data.createdAt && typeof data.createdAt.toMillis === 'function') ? data.createdAt.toMillis() : (typeof data.createdAt === 'number' ? data.createdAt : 0);
+          const lockAge = Date.now() - createdAt;
 
-          // Check if valid lock exists and is held by someone else
-          if (clientNow < expiresAt && data.owner !== this.uid) {
+          // Issue 4 Fix: Compare lock age against TTL instead of client-side expiry
+          // This is more resilient to clock skew since we're comparing duration, not absolute time
+          // If the lock is newer than TTL, it's still valid
+          if (lockAge < this.lockTTL && data.owner !== this.uid) {
             return false; // Lock is busy
           }
         }
 
-        // Lock is free, or expired, or owned by us (re-entrant). Claim it.
-        const newExpiry = Timestamp.fromMillis(clientNow + this.lockTTL);
-
+        // Lock is free, expired, or owned by us (re-entrant). Claim it.
         transaction.set(lockRef, {
           owner: this.uid,
-          expiresAt: newExpiry
+          createdAt: Date.now(),
+          // Keep expiresAt for backwards compat and debugging (as number to avoid Timestamp issues)
+          expiresAt: Date.now() + this.lockTTL
         });
 
         return true;
@@ -605,10 +643,17 @@ export class FireProvider extends ObservableV2<any> {
         const mainSnap = await transaction.get(mainRef);
 
         let baseSnapshot: Uint8Array | null = null;
+        let currentVersion = 0; // Issue 9 Fix: Track snapshot version
+
         if (mainSnap.exists()) {
           const data = mainSnap.data();
-          if (data && data.content) {
-            baseSnapshot = (data.content as Bytes).toUint8Array();
+          if (data) {
+            if (data.content) {
+              baseSnapshot = (data.content as Bytes).toUint8Array();
+            }
+            if (typeof data.version === 'number') {
+              currentVersion = data.version;
+            }
           }
         }
 
@@ -657,10 +702,13 @@ export class FireProvider extends ObservableV2<any> {
 
         if (sizeInBytes < TARGET_LIMIT) {
           // Path 1: Compact to Snapshot
+          // Path 1: Compact to Snapshot
           console.log(`Compacted to Snapshot (Size: ${sizeInBytes})`);
           transaction.set(mainRef, {
             content: Bytes.fromUint8Array(candidate),
-            stateVector: this.calculateStateVector(candidate)
+            stateVector: this.calculateStateVector(candidate),
+            version: currentVersion + 1, // Issue 9 Fix: Increment version
+            updatedAt: serverTimestamp()
           }, { merge: true });
 
           updatesToProcess.forEach(u => transaction.delete(u.ref));
@@ -761,29 +809,32 @@ export class FireProvider extends ObservableV2<any> {
       const MAX_RETRIES = 5;
       // Aborted often means contention on the *data* documents, not just the lock.
       const isRetryable = e.code === 'aborted' || e.code === 'unavailable' || e.code === 'deadline-exceeded';
+      const isLockLostError = e.message && e.message.includes('Lock lost');
 
-      if (attempt <= MAX_RETRIES && isRetryable) {
+      if (attempt < MAX_RETRIES && isRetryable && !isLockLostError && !this._isDestroyed) {
         // Backoff and retry
         const backoff = (Math.pow(2, attempt) * 100) + (Math.random() * 100);
         console.warn(`Compaction failed (attempt ${attempt}). Retrying in ${Math.floor(backoff)}ms...`, e);
 
+        // Release lock before backoff to allow other clients to proceed
+        this.isCompacting = false;
+        await this.releaseLock();
+
         await this.wait(backoff);
 
-        // RECURSION SAFEGUARD:
-        // We release the lock before retrying to ensure a clean slate.
-        // We do NOT recursively call compact() inside the catch block without cleanup.
-        // Instead, we let the finally block release the lock, and we should ideally 
-        // restructure this to a loop or just let the next trigger handle it.
-        // For this implementation, we will exit and rely on the next update trigger 
-        // or a dedicated maintenance loop.
-
+        // Issue 2 Fix: Actually retry compaction
+        if (!this._isDestroyed) {
+          return this.compact(attempt + 1);
+        }
       } else {
         console.error("Compaction failed permanently.", e);
       }
     } finally {
-      // 3. Always Release Lock
-      this.isCompacting = false;
-      await this.releaseLock();
+      // 3. Always Release Lock (if not already released for retry)
+      if (this.isCompacting) {
+        this.isCompacting = false;
+        await this.releaseLock();
+      }
     }
   }
 
@@ -822,31 +873,39 @@ export class FireProvider extends ObservableV2<any> {
       return;
     }
 
+    // Issue 18: Note - Subdocument creation is currently 1-to-1.
+    // Future optimization: Batch subdoc creation if multiple are discovered simultaneously.
     const provider = new FireProvider({
       firebaseApp: this.firebaseApp,
       ydoc: subdoc,
       path: subPath,
       maxUpdatesThreshold: this.maxUpdatesThreshold,
       maxWaitTime: this.maxWaitTime,
-      depth: this.depth + 1
+      depth: this.depth + 1,
+      // Issue 7 Fix: Inherit all configuration
+      compactionProbability: this.compactionProbability,
+      lockTTL: this.lockTTL,
+      compactionLimit: this.compactionLimit
     });
     this.subProviders.set(guid, provider);
   }
 
-  destroy() {
+  // Issue 5 Fix: Make destroy async to properly await flush
+  async destroy(): Promise<void> {
     this._isDestroyed = true;
     if (this._unsubscribeUpdates) this._unsubscribeUpdates();
 
     this.doc.off('update', this.handleUpdate);
     this.doc.off('subdocs', this.handleSubdocs);
 
-    // Destroy children
-    this.subProviders.forEach(p => p.destroy());
+    // Destroy children (await all)
+    const destroyPromises = Array.from(this.subProviders.values()).map(p => p.destroy());
+    await Promise.all(destroyPromises);
     this.subProviders.clear();
 
-    // Flush any pending updates
+    // Flush any pending updates and WAIT for completion
     if (this.updateCache) {
-      this.saveToFirestore();
+      await this.saveToFirestore();
     }
 
     super.destroy();

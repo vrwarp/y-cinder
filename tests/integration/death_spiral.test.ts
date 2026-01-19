@@ -4,6 +4,7 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { collection, getDocs, doc, Bytes, setDoc } from 'firebase/firestore';
 import { setupEmulator } from '../utils/emulator';
+import { waitForCondition } from '../utils/wait';
 
 describe('FireProvider Death Spiral Repro', () => {
     let app: any;
@@ -75,7 +76,12 @@ describe('FireProvider Death Spiral Repro', () => {
         });
 
         // Wait for sync
-        await new Promise(r => setTimeout(r, 2000));
+        console.log("Waiting for sync...");
+        await waitForCondition(() => {
+            const text = ydoc2.getText('large').toString();
+            console.log(`Current text length: ${text.length}`);
+            return text.length === 120000 * 10;
+        }, 20000, 1000, 'Data integrity check failed');
 
         const text = ydoc2.getText('large').toString();
         expect(text.length).toBe(120000 * 10);

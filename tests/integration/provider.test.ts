@@ -78,7 +78,7 @@ describe('FireProvider Integration (Emulator)', () => {
         provider2.destroy();
     });
 
-    it('should perform compaction on emulator', async () => {
+    it('should perform compaction on emulator', { timeout: 15000 }, async () => {
         const path = `integration-tests/compaction-${Date.now()}`;
         const doc = new Y.Doc();
         // Low threshold to force compaction

@@ -79,9 +79,11 @@ describe('Distributed Compaction Lock', () => {
         const lockRef = doc(db, path, 'metadata/lock_compaction');
 
         // 1. Create a valid lock held by someone else
+        // Issue 4 Fix: Now uses createdAt + TTL age check
         await setDoc(lockRef, {
             owner: fakeOwner,
-            expiresAt: Timestamp.fromMillis(Date.now() + 10000) // Valid for 10s
+            createdAt: Timestamp.fromMillis(Date.now()), // Created just now (valid)
+            expiresAt: Timestamp.fromMillis(Date.now() + 10000)
         });
 
         const ydoc = new Y.Doc();

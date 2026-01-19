@@ -41,6 +41,7 @@ export interface FireProviderConfig {
   compactionProbability?: number; // default 0.01 (1%)
   depth?: number;
   lockTTL?: number; // NEW: default 60000ms (60s)
+  compactionLimit?: number; // NEW: default 500
 }
 
 export class FireProvider extends ObservableV2<any> {
@@ -63,6 +64,7 @@ export class FireProvider extends ObservableV2<any> {
   maxUpdatesThreshold: number = 50;
   maxWaitTime: number = 500;
   compactionProbability: number = 0.01;
+  compactionLimit: number = 500;
   depth: number;
 
   // NEW: Lock Configuration
@@ -83,6 +85,7 @@ export class FireProvider extends ObservableV2<any> {
     compactionProbability = 0.01,
     depth = 0,
     lockTTL = 60000, // Default 60s safety window
+    compactionLimit = 500,
   }: FireProviderConfig) {
     super();
     this.firebaseApp = firebaseApp;
@@ -92,6 +95,7 @@ export class FireProvider extends ObservableV2<any> {
     this.maxUpdatesThreshold = maxUpdatesThreshold;
     this.maxWaitTime = maxWaitTime;
     this.compactionProbability = compactionProbability;
+    this.compactionLimit = compactionLimit;
     this.depth = depth;
     this.lockTTL = lockTTL;
 
@@ -559,7 +563,8 @@ export class FireProvider extends ObservableV2<any> {
       console.log(`Starting compaction (attempt ${attempt})...`);
 
       // Query updates and history to identify work
-      const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+      // FIX: Add limit to prevent unbounded memory usage
+      const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'), limit(this.compactionLimit));
       const updatesSnap = await getDocs(updatesQ);
 
       const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));

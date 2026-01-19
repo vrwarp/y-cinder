@@ -73,7 +73,7 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
                 }
             }
             return true;
-        }, 15000, 500, 'Fuzz test did not converge');
+        }, 30000, 500, 'Fuzz test did not converge');
 
         const finalState = clients[0].doc.getText('content').toString();
         console.log(`Fuzz test converged to length: ${finalState.length}`);

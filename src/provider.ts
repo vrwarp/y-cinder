@@ -457,9 +457,16 @@ export class FireProvider extends ObservableV2<any> {
     try {
       await addDoc(collection(this.db, this.path, 'updates'), docData);
     } catch (err) {
-      console.error("Failed to save update", err);
-      // If failed, we might want to preserve the cache, but strictly we could lose data here on network fail.
-      // For this implementation, we log error.
+      console.error("Failed to save update to Firestore", err);
+      // Recovery: Put back the updates we failed to save
+      // We prepend the failed update to the current cache (if any)
+      if (this.updateCache) {
+        this.updateCache = Y.mergeUpdates([update, this.updateCache]);
+      } else {
+        this.updateCache = update;
+      }
+      // Ensure we retry
+      this._debouncedSave();
     }
   }
 

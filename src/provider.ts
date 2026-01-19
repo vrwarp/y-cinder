@@ -73,6 +73,10 @@ export class FireProvider extends ObservableV2<any> {
 
   private _unsubscribeUpdates: Unsubscribe | null = null;
   private _debouncedSave: () => void;
+  // Test Hooks
+  public _testHooks?: {
+    beforeTransaction?: () => Promise<void>;
+  };
 
   private _isDestroyed = false;
 
@@ -578,6 +582,11 @@ export class FireProvider extends ObservableV2<any> {
       const updateDocs = updatesSnap.docs;
       const historyDocs = historySnaps.docs;
 
+      // TEST HOOK: Allow simulating concurrent modifications
+      if (this._testHooks && this._testHooks.beforeTransaction) {
+        await this._testHooks.beforeTransaction();
+      }
+
       await runTransaction(this.db, async (transaction) => {
         // === STEP A: THE KILL SWITCH ===
         // We re-read the lock inside the transaction to ensure we still own it.
@@ -604,13 +613,17 @@ export class FireProvider extends ObservableV2<any> {
         }
 
         // Read updates to merge
-        const updatesToMerge: Uint8Array[] = [];
+        const updatesToProcess: { ref: DocumentReference, data: Uint8Array, createdAt: Timestamp }[] = [];
         for (const uDoc of updateDocs) {
           const freshSnap = await transaction.get(uDoc.ref);
           if (freshSnap.exists()) {
             const data = freshSnap.data();
             if (data && data.update) {
-              updatesToMerge.push((data.update as Bytes).toUint8Array());
+              updatesToProcess.push({
+                ref: uDoc.ref,
+                data: (data.update as Bytes).toUint8Array(),
+                createdAt: data.createdAt
+              });
             }
           }
         }
@@ -630,13 +643,13 @@ export class FireProvider extends ObservableV2<any> {
           }
         }
 
-        if (updatesToMerge.length === 0 && historyToMerge.length === 0) return;
+        if (updatesToProcess.length === 0 && historyToMerge.length === 0) return;
 
         // Perform Merge
         const allContent: Uint8Array[] = [];
         if (baseSnapshot) allContent.push(baseSnapshot);
         historyToMerge.forEach(h => allContent.push(h.val));
-        updatesToMerge.forEach(u => allContent.push(u));
+        updatesToProcess.forEach(u => allContent.push(u.data));
 
         const candidate = Y.mergeUpdates(allContent);
         const sizeInBytes = candidate.byteLength;
@@ -650,7 +663,7 @@ export class FireProvider extends ObservableV2<any> {
             stateVector: this.calculateStateVector(candidate)
           }, { merge: true });
 
-          updateDocs.forEach(u => transaction.delete(u.ref));
+          updatesToProcess.forEach(u => transaction.delete(u.ref));
           historyToMerge.forEach(h => transaction.delete(h.ref));
 
         } else {
@@ -658,12 +671,13 @@ export class FireProvider extends ObservableV2<any> {
           // We can't fit everything into Base.
           // Goal: Merge updates into History Segments.
 
-          if (updatesToMerge.length > 0) {
+          if (updatesToProcess.length > 0) {
             // FIX: Handle updates that are too large for a single History Segment
             const MAX_SEGMENT_SIZE = 900000; // Safe limit (900KB)
 
             // 1. Try merging all first (Optimistic)
-            let pendingMerge = Y.mergeUpdates(updatesToMerge);
+            const allUpdates = updatesToProcess.map(u => u.data);
+            let pendingMerge = Y.mergeUpdates(allUpdates);
 
             if (pendingMerge.byteLength < MAX_SEGMENT_SIZE) {
               // Fast path: It fits in one segment
@@ -672,14 +686,14 @@ export class FireProvider extends ObservableV2<any> {
 
               transaction.set(historyRef, {
                 segment: Bytes.fromUint8Array(pendingMerge),
-                startTime: updateDocs[0].data().createdAt,
-                endTime: updateDocs[updateDocs.length - 1].data().createdAt
+                startTime: updatesToProcess[0].createdAt,
+                endTime: updatesToProcess[updatesToProcess.length - 1].createdAt
                 // Note: We don't save stateVector for segments as they might be deltas (invalid SV)
               });
 
               // Delete all utilized updates
-              for (const uDoc of updateDocs) {
-                transaction.delete(uDoc.ref);
+              for (const item of updatesToProcess) {
+                transaction.delete(item.ref);
               }
             } else {
               // Slow path: The updates are too big. We must split them.
@@ -689,8 +703,9 @@ export class FireProvider extends ObservableV2<any> {
               let currentBatchSize = 0;
               let batchStartIndex = 0;
 
-              for (let i = 0; i < updatesToMerge.length; i++) {
-                const update = updatesToMerge[i];
+              for (let i = 0; i < updatesToProcess.length; i++) {
+                const item = updatesToProcess[i];
+                const update = item.data;
                 const updateSize = update.byteLength;
 
                 // Check if adding this update would likely exceed limit
@@ -702,13 +717,13 @@ export class FireProvider extends ObservableV2<any> {
 
                   transaction.set(historyRef, {
                     segment: Bytes.fromUint8Array(mergedBatch),
-                    startTime: updateDocs[batchStartIndex].data().createdAt,
-                    endTime: updateDocs[i - 1].data().createdAt
+                    startTime: updatesToProcess[batchStartIndex].createdAt,
+                    endTime: updatesToProcess[i - 1].createdAt
                   });
 
                   // Delete updates in this batch
                   for (let j = batchStartIndex; j < i; j++) {
-                    transaction.delete(updateDocs[j].ref);
+                    transaction.delete(updatesToProcess[j].ref);
                   }
 
                   // Reset
@@ -729,12 +744,12 @@ export class FireProvider extends ObservableV2<any> {
 
                 transaction.set(historyRef, {
                   segment: Bytes.fromUint8Array(mergedBatch),
-                  startTime: updateDocs[batchStartIndex].data().createdAt,
-                  endTime: updateDocs[updatesToMerge.length - 1].data().createdAt
+                  startTime: updatesToProcess[batchStartIndex].createdAt,
+                  endTime: updatesToProcess[updatesToProcess.length - 1].createdAt
                 });
 
-                for (let j = batchStartIndex; j < updatesToMerge.length; j++) {
-                  transaction.delete(updateDocs[j].ref);
+                for (let j = batchStartIndex; j < updatesToProcess.length; j++) {
+                  transaction.delete(updatesToProcess[j].ref);
                 }
               }
             }

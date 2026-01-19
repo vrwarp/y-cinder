@@ -711,13 +711,20 @@ export class FireProvider extends ObservableV2<any> {
     const guid = subdoc.guid;
     if (this.subProviders.has(guid)) return;
 
+    const subPath = `${this.path}/subdocs/${guid}`;
+
     // Firestore path limit is 100. Safety limit at 50.
     if (this.depth >= 50) {
       console.warn(`Max subdocument depth exceeded at ${this.path}`);
+      this.emit('connection-error', [{
+        code: 'recursion-limit',
+        message: 'Max subdocument recursion depth exceeded',
+        path: subPath,
+        doc: subdoc
+      }]);
       return;
     }
 
-    const subPath = `${this.path}/subdocs/${guid}`;
     const provider = new FireProvider({
       firebaseApp: this.firebaseApp,
       ydoc: subdoc,

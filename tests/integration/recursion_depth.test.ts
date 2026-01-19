@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
@@ -60,6 +60,48 @@ describe('FireProvider Recursion Depth Guard (Emulator)', () => {
         console.log(`Reached depth: ${reachedDepth}`);
 
         expect(reachedDepth).toBeLessThanOrEqual(50);
+
+        rootProvider.destroy();
+    });
+    it('should emit connection-error when recursion depth limit is reached', async () => {
+        const path = `depth-tests/signal-${Date.now()}`;
+        const rootDoc = new Y.Doc();
+
+        // Initialize at depth 49
+        const rootProvider = new FireProvider({
+            firebaseApp: app,
+            ydoc: rootDoc,
+            path: path,
+            depth: 49
+        });
+
+        // 1. Add first subdoc (Level 50)
+        const subdoc1 = new Y.Doc();
+        rootDoc.getArray('subdocs').push([subdoc1]);
+
+        // Wait for handler
+        await new Promise(r => setTimeout(r, 100));
+
+        // Get the child provider
+        const childProvider = rootProvider.subProviders.values().next().value;
+        expect(childProvider).toBeDefined();
+        if (!childProvider) return; // TS Guard
+        expect(childProvider.depth).toBe(50);
+
+        const errorSpy = vi.fn();
+        childProvider.on('connection-error', errorSpy);
+
+        // 2. Add second subdoc (Level 51) - should trigger signal
+        const subdoc2 = new Y.Doc();
+        subdoc1.getArray('subdocs').push([subdoc2]);
+
+        // Wait for handler
+        await new Promise(r => setTimeout(r, 100));
+
+        expect(errorSpy).toHaveBeenCalled();
+        const errorArgs = errorSpy.mock.calls[0][0];
+        expect(errorArgs.code).toBe('recursion-limit');
+        expect(errorArgs.path).toContain(subdoc2.guid);
 
         rootProvider.destroy();
     });

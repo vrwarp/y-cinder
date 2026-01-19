@@ -18,10 +18,19 @@ import {
   Timestamp,
   writeBatch,
   DocumentReference,
-  setDoc
+  setDoc,
+  QueryDocumentSnapshot
 } from "@firebase/firestore";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
+import { toBase64, fromBase64 } from "lib0/buffer";
+import * as encoding from "lib0/encoding";
+
+interface UpdateMetadata {
+  clientID: number;
+  clockStart: number;
+  clockEnd: number;
+}
 
 export interface FireProviderConfig {
   firebaseApp: FirebaseApp;
@@ -102,104 +111,247 @@ export class FireProvider extends ObservableV2<any> {
     };
   }
 
+  // helper for SV calculation
+  private calculateStateVector(update: Uint8Array): string {
+    const tempDoc = new Y.Doc();
+    Y.applyUpdate(tempDoc, update);
+    const sv = Y.encodeStateVector(tempDoc);
+    const svBase64 = toBase64(sv);
+    tempDoc.destroy();
+    return svBase64;
+  }
+
+  // Helper: Extract all metadata (multi-client) 
+  private extractAllMetadata(update: Uint8Array): UpdateMetadata[] {
+    try {
+      // @ts-ignore
+      const decoded = Y.decodeUpdate(update);
+      const results: UpdateMetadata[] = [];
+      if (decoded.structs) {
+        decoded.structs.forEach((struct: any) => {
+          results.push({
+            clientID: struct.id.client,
+            clockStart: struct.id.clock,
+            clockEnd: struct.id.clock + struct.length
+          });
+        });
+      }
+      return results;
+    } catch (e) {
+      return [];
+    }
+  }
+
   // helper for delay
   private wait(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  // Helper: Write State Vector map to Uint8Array
+  private writeStateVector(sv: Map<number, number>): Uint8Array {
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, sv.size);
+    for (const [client, clock] of sv) {
+      encoding.writeVarUint(encoder, client);
+      encoding.writeVarUint(encoder, clock);
+    }
+    return encoding.toUint8Array(encoder);
+  }
+
   /**
-   * Sync Mechanism
-   * 1. Load Base Snapshot
-   * 2. Load History Segments
-   * 3. Subscribe to Live Updates
+   * Sync Mechanism (Metadata-Only)
+   * 1. Fetch Metadata (State Vectors / Clocks)
+   * 2. Construct Server SV
+   * 3. Calculate Differences
+   * 4. Apply only missing updates
    */
   async sync() {
     try {
-      // SHADOW SYNC STRATEGY
-      // We reconstruct the server state in a temporary "shadow" doc to determine
-      // exactly what local changes are missing from the server.
-      const remoteShadow = new Y.Doc();
+      const serverSVMap = new Map<number, number>();
 
-      try {
-        // 1. Fetch Updates (Tier 3)
-        // We fetch updates FIRST to avoid the "staggered read" race condition.
-        // If compaction happens while reading, we might miss updates if we read them last.
-        // By reading them first, we either get them here, OR if they are compacted into the snapshot,
-        // we will get them in step 3 when we read the new snapshot.
-        const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
-        const updatesSnap = await getDocs(updatesQ);
-        if (this._isDestroyed) return;
+      // Store potential updates to apply
+      const pendingUpdates: { type: string, data: any, priority: number }[] = [];
 
-        updatesSnap.forEach(snap => {
-          const data = snap.data();
-          if (data && data.update) {
+      // 1. Fetch Updates (Tier 3)
+      const updatesQ = query(collection(this.db, this.path, 'updates'), orderBy('createdAt', 'asc'));
+      const updatesSnap = await getDocs(updatesQ);
+      if (this._isDestroyed) return;
+
+      updatesSnap.forEach(snap => {
+        const data = snap.data();
+        if (data) {
+          // Metadata extraction
+          let addedToPending = false;
+          if (typeof data.clientID === 'number' && typeof data.clockEnd === 'number') {
+            // We have metadata!
+            const current = serverSVMap.get(data.clientID) || 0;
+            if (data.clockEnd > current) {
+              serverSVMap.set(data.clientID, data.clockEnd);
+            }
+            addedToPending = true;
+          } else if (data.update) {
+            // Fallback: Parse metadata from blob to update ServerSV
             try {
-              const update = (data.update as Bytes).toUint8Array();
-              // We DO NOT apply to this.doc here, we let the onSnapshot listener handle it 
-              // (or we could, but standardizing on onSnapshot is cleaner for the live path).
-              // However, for the shadow doc, we MUST apply it.
-              Y.applyUpdate(remoteShadow, update);
+              const updateBlob = (data.update as Bytes).toUint8Array();
+              const metas = this.extractAllMetadata(updateBlob);
+              metas.forEach(meta => {
+                const current = serverSVMap.get(meta.clientID) || 0;
+                if (meta.clockEnd > current) {
+                  serverSVMap.set(meta.clientID, meta.clockEnd);
+                }
+              });
             } catch (e) {
-              console.error("Failed to apply update to shadow", e);
+              console.warn("Failed to parse fallback metadata", e);
+            }
+            addedToPending = true;
+          }
+
+          if (addedToPending) {
+            pendingUpdates.push({ type: 'update', data, priority: 3 });
+          }
+        }
+      });
+
+      // 2. Fetch History Segments (Tier 2)
+      const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
+      const historySnaps = await getDocs(historyQ);
+      if (this._isDestroyed) return;
+
+      historySnaps.forEach(snap => {
+        const data = snap.data();
+        if (data && data.stateVector) {
+          const vector = fromBase64(data.stateVector);
+          const map = Y.decodeStateVector(vector);
+          for (const [client, clock] of map.entries()) {
+            const current = serverSVMap.get(client) || 0;
+            if (clock > current) {
+              serverSVMap.set(client, clock);
             }
           }
-        });
+          pendingUpdates.push({ type: 'history', data, priority: 2 });
+        } else if (data && data.segment) {
+          // Fallback: Parse segment to update ServerSV
+          try {
+            const segmentBlob = (data.segment as Bytes).toUint8Array();
+            const metas = this.extractAllMetadata(segmentBlob);
+            metas.forEach(meta => {
+              const current = serverSVMap.get(meta.clientID) || 0;
+              if (meta.clockEnd > current) {
+                serverSVMap.set(meta.clientID, meta.clockEnd);
+              }
+            });
+          } catch (e) {
+            console.warn("Failed to parse fallback history segment", e);
+          }
+          pendingUpdates.push({ type: 'history', data, priority: 2 });
+        }
+      });
 
-        // 2. Fetch History Segments (Tier 2)
-        const historyQ = query(collection(this.db, this.path, 'history'), orderBy('startTime', 'asc'));
-        const historySnaps = await getDocs(historyQ);
-        if (this._isDestroyed) return;
+      // 3. Fetch Base Snapshot (Tier 1)
+      const mainRef = doc(this.db, this.path);
+      const mainSnap = await getDoc(mainRef);
+      if (this._isDestroyed) return;
 
-        historySnaps.forEach(snap => {
-          const data = snap.data();
-          if (data && data.segment) {
-            try {
-              const segment = (data.segment as Bytes).toUint8Array();
-              Y.applyUpdate(this.doc, segment, 'origin:firebase/history');
-              Y.applyUpdate(remoteShadow, segment);
-            } catch (e) {
-              console.error("Failed to apply history segment", e);
+      if (mainSnap.exists()) {
+        const data = mainSnap.data();
+        if (data && data.stateVector) {
+          const vector = fromBase64(data.stateVector);
+          const map = Y.decodeStateVector(vector);
+          for (const [client, clock] of map.entries()) {
+            const current = serverSVMap.get(client) || 0;
+            if (clock > current) {
+              serverSVMap.set(client, clock);
             }
           }
-        });
+          pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
+        } else if (data && data.content) {
+          pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
+        }
+      }
 
-        // 3. Fetch Base Snapshot (Tier 1)
-        const mainRef = doc(this.db, this.path);
-        const mainSnap = await getDoc(mainRef);
-        if (this._isDestroyed) return;
+      // 4. Check what we actually need
+      // We compare Local SV with the gathered info.
 
-        if (mainSnap.exists()) {
-          const data = mainSnap.data();
-          if (data && data.content) {
-            try {
-              const content = (data.content as Bytes).toUint8Array();
-              Y.applyUpdate(this.doc, content, 'origin:firebase/snapshot');
-              Y.applyUpdate(remoteShadow, content);
-            } catch (e) {
-              console.error("Failed to apply snapshot", e);
-            }
+      const localSV = Y.encodeStateVector(this.doc);
+      const localSVMap = Y.decodeStateVector(localSV);
+
+      // Helper to check if we already have this data
+      const isRedundant = (metadata: { svMap?: Map<number, number>, client?: number, end?: number }) => {
+        if (metadata.svMap) {
+          for (const [client, clock] of metadata.svMap) {
+            const localClock = localSVMap.get(client) || 0;
+            if (clock > localClock) return false; // We miss something
+          }
+          return true; // We have everything
+        }
+        if (metadata.client !== undefined && metadata.end !== undefined) {
+          const localClock = localSVMap.get(metadata.client) || 0;
+          return localClock >= metadata.end;
+        }
+        return false; // Unknown, assume not redundant
+      };
+
+      // Apply things
+      // Sort by priority (Snapshot first, then History, then Updates)
+      pendingUpdates.sort((a, b) => a.priority - b.priority);
+
+      for (const item of pendingUpdates) {
+        let redundant = false;
+
+        // Check checks
+        if (item.type === 'snapshot' || item.type === 'history') {
+          if (item.data.stateVector) {
+            const sv = fromBase64(item.data.stateVector);
+            const map = Y.decodeStateVector(sv);
+            if (isRedundant({ svMap: map })) redundant = true;
+          }
+          // For legacy data without SV, we can't be sure, so we apply (idempotent)
+        } else if (item.type === 'update') {
+          if (item.data.clientID !== undefined && item.data.clockEnd !== undefined) {
+            if (isRedundant({ client: item.data.clientID, end: item.data.clockEnd })) redundant = true;
           }
         }
 
-        // 4. Calculate Missing Local Updates
-        const shadowSv = Y.encodeStateVector(remoteShadow);
-        const localDiff = Y.encodeStateAsUpdate(this.doc, shadowSv);
-
-        // 5. Push if needed
-        // Yjs empty update is 2 bytes.
-        if (localDiff.byteLength > 2) {
-          console.log("Pushing missing local updates to Firestore.");
-          const pkg = {
-            update: Bytes.fromUint8Array(localDiff),
-            createdAt: serverTimestamp(),
-            createdBy: this.uid
-          };
-          await addDoc(collection(this.db, this.path, 'updates'), pkg);
-          if (this._isDestroyed) return;
+        if (!redundant) {
+          try {
+            if (item.type === 'snapshot' && item.data.content) {
+              Y.applyUpdate(this.doc, (item.data.content as Bytes).toUint8Array(), 'origin:firebase/snapshot');
+            } else if (item.type === 'history' && item.data.segment) {
+              Y.applyUpdate(this.doc, (item.data.segment as Bytes).toUint8Array(), 'origin:firebase/history');
+            } else if (item.type === 'update' && item.data.update) {
+              Y.applyUpdate(this.doc, (item.data.update as Bytes).toUint8Array(), 'origin:firebase/update');
+            }
+          } catch (e) {
+            console.error(`Failed to apply ${item.type}`, e);
+          }
         }
+      }
 
-      } finally {
-        remoteShadow.destroy();
+
+      // 5. Push Missing Local Updates
+      // We calculate diff against the *Server SV* we constructed.
+      // This is efficient because we don't assume server has "infinite" state, 
+      // we assume it has what we saw.
+      const serverSV = this.writeStateVector(serverSVMap);
+      const localDiff = Y.encodeStateAsUpdate(this.doc, serverSV);
+
+      if (localDiff.byteLength > 2) {
+        console.log("Pushing missing local updates to Firestore.");
+        // We apply the same logic for saving metadata
+        const metas = this.extractAllMetadata(localDiff);
+        const meta = metas.length > 0 ? metas[0] : null;
+        const pkg: any = {
+          update: Bytes.fromUint8Array(localDiff),
+          createdAt: serverTimestamp(),
+          createdBy: this.uid
+        };
+        if (meta) {
+          pkg.clientID = meta.clientID;
+          pkg.clockStart = meta.clockStart;
+          pkg.clockEnd = meta.clockEnd;
+        }
+        await addDoc(collection(this.db, this.path, 'updates'), pkg);
+        if (this._isDestroyed) return;
       }
 
       if (this._unsubscribeUpdates) this._unsubscribeUpdates();
@@ -218,6 +370,25 @@ export class FireProvider extends ObservableV2<any> {
             // Check if this update was created by us
             if (data.createdBy === this.uid) {
               return;
+            }
+
+            // FILTER: Check if we already have this update using metadata
+            // Only applicable if we have an up-to-date view of our own clocks, which we do.
+            if (typeof data.clientID === 'number' && typeof data.clockEnd === 'number') {
+              // Get our local clock for this client
+              // Note: localSVMap might be stale if we edited locally since sync start.
+              // We should get fresh vector.
+              const freshSV = Y.encodeStateVector(this.doc);
+              // Decoding full SV map every update might be slight overhead but better than parsing update.
+              // Actually, Yjs has efficient lookup? No.
+              // Optim: Just apply using Yjs idempotency. But wait, "CPU Waste".
+              // We can cache our own clocks?
+              // Let's decode SV for check.
+              const freshMap = Y.decodeStateVector(freshSV);
+              const localClock = freshMap.get(data.clientID) || 0;
+              if (localClock >= data.clockEnd) {
+                return; // Skip
+              }
             }
 
             if (data.update) {
@@ -239,8 +410,6 @@ export class FireProvider extends ObservableV2<any> {
 
       this._unsubscribeUpdates = onSnapshot(liveUpdatesQ, listenerFn, (error) => {
         console.error("onSnapshot listener failed", error);
-        // If the listener fails (e.g. Grpc error in emulator), we might want to trigger a re-sync
-        // but for now we at least log it so it's visible in tests.
       });
 
     } catch (err) {
@@ -263,18 +432,30 @@ export class FireProvider extends ObservableV2<any> {
     this._debouncedSave();
   }
 
+
+
   async saveToFirestore() {
     if (!this.updateCache) return;
 
     const update = this.updateCache;
     this.updateCache = null;
 
+    const metas = this.extractAllMetadata(update);
+    const meta = metas.length > 0 ? metas[0] : null;
+    const docData: any = {
+      update: Bytes.fromUint8Array(update),
+      createdAt: serverTimestamp(),
+      createdBy: this.uid
+    };
+
+    if (meta) {
+      docData.clientID = meta.clientID;
+      docData.clockStart = meta.clockStart;
+      docData.clockEnd = meta.clockEnd;
+    }
+
     try {
-      await addDoc(collection(this.db, this.path, 'updates'), {
-        update: Bytes.fromUint8Array(update),
-        createdAt: serverTimestamp(),
-        createdBy: this.uid
-      });
+      await addDoc(collection(this.db, this.path, 'updates'), docData);
     } catch (err) {
       console.error("Failed to save update", err);
       // If failed, we might want to preserve the cache, but strictly we could lose data here on network fail.
@@ -371,7 +552,10 @@ export class FireProvider extends ObservableV2<any> {
         if (sizeInBytes < TARGET_LIMIT) {
           // Success: Everything fits in Base Snapshot
           console.log(`Compacted to Snapshot (Size: ${sizeInBytes})`);
-          transaction.set(mainRef, { content: Bytes.fromUint8Array(candidate) }, { merge: true });
+          transaction.set(mainRef, {
+            content: Bytes.fromUint8Array(candidate),
+            stateVector: this.calculateStateVector(candidate)
+          }, { merge: true });
 
           // Delete all utilized segments
           for (const uDoc of updateDocs) {
@@ -402,6 +586,7 @@ export class FireProvider extends ObservableV2<any> {
                 segment: Bytes.fromUint8Array(pendingMerge),
                 startTime: updateDocs[0].data().createdAt,
                 endTime: updateDocs[updateDocs.length - 1].data().createdAt
+                // Note: We don't save stateVector for segments as they might be deltas (invalid SV)
               });
 
               // Delete all utilized updates

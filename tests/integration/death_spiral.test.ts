@@ -17,10 +17,12 @@ describe('FireProvider Death Spiral Repro', () => {
     });
 
     it('should fail to compact if updates exceed 1MB without chunking', { timeout: 30000 }, async () => {
-        const ydoc = new Y.Doc();
+        const generatorDoc = new Y.Doc();
+        const providerDoc = new Y.Doc();
+
         const provider = new FireProvider({
             firebaseApp: app,
-            ydoc,
+            ydoc: providerDoc,
             path,
             maxUpdatesThreshold: 1000 // Don't trigger automatically too early
         });
@@ -32,14 +34,14 @@ describe('FireProvider Death Spiral Repro', () => {
 
         for (let i = 0; i < 10; i++) {
             const text = 'a'.repeat(updateSize);
-            ydoc.getText('large').insert(0, text);
+            generatorDoc.getText('large').insert(0, text);
 
             // Get delta since last update
             const update = lastStateVector
-                ? Y.encodeStateAsUpdate(ydoc, lastStateVector)
-                : Y.encodeStateAsUpdate(ydoc);
+                ? Y.encodeStateAsUpdate(generatorDoc, lastStateVector)
+                : Y.encodeStateAsUpdate(generatorDoc);
 
-            lastStateVector = Y.encodeStateVector(ydoc);
+            lastStateVector = Y.encodeStateVector(generatorDoc);
 
             await setDoc(doc(collection(db, path, 'updates'), `upd-${i}`), {
                 update: Bytes.fromUint8Array(update),

@@ -111,6 +111,9 @@ export declare function startSubdocProvider(subdoc: Y.Doc, ctx: SubdocContext, s
 /**
  * Destroys all subdocument providers.
  *
+ * P0.6 FIX: Uses Promise.allSettled instead of Promise.all to ensure
+ * all subdocs are destroyed even if one fails. Logs individual failures.
+ *
  * @param subProviders - Map of subdocument providers
  * @returns Promise that resolves when all providers are destroyed
  *

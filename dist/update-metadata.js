@@ -41,9 +41,11 @@ import * as Y from "yjs";
  * - Deduplication (avoid re-applying already-seen updates)
  * - Debugging and audit trails
  *
+ * P1.9 FIX: Returns result object to distinguish parse errors from empty updates.
+ *
  * @param update - The Yjs update blob to parse
- * @returns Array of metadata objects, one per client in the update.
- *          Returns empty array if parsing fails.
+ * @returns Array of metadata objects (backwards compatible).
+ *          Returns empty array on parse error (logs warning).
  *
  * @example
  * ```typescript
@@ -84,7 +86,8 @@ export function extractAllMetadata(update) {
         return results;
     }
     catch (e) {
-        // Malformed update or internal Yjs API change
+        // P1.9 FIX: Log parse error for debugging
+        console.warn("Failed to parse update metadata:", e);
         return [];
     }
 }

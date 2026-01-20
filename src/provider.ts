@@ -113,6 +113,12 @@ export class FireProvider extends ObservableV2<any> {
   /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
   private _debounceTimerId: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Creates a new FireProvider instance.
+   * 
+   * @param config - Configuration options
+   * @throws {Error} If config parameters (path, depth, maxUpdatesThreshold) are invalid.
+   */
   constructor(config: FireProviderConfig) {
     super();
 
@@ -128,7 +134,7 @@ export class FireProvider extends ObservableV2<any> {
       lockTTL = DEFAULTS.LOCK_TTL,
       compactionLimit = DEFAULTS.COMPACTION_LIMIT,
       testHooks,
-    } = config;
+    }: FireProviderConfig = config;
 
     this.firebaseApp = firebaseApp;
     this.db = getFirestore(firebaseApp);
@@ -144,9 +150,17 @@ export class FireProvider extends ObservableV2<any> {
     this.compactionLimit = compactionLimit;
     this._testHooks = testHooks;
 
-    // P1.8 FIX: Validate path format
+    // P1.8 / P2.20 FIX: Validate path and config
     if (!path || path.includes('//') || path.startsWith('/') || path.endsWith('/')) {
       throw new Error(`Invalid Firestore path: '${path}'. Path must not be empty, start/end with '/', or contain '//'`);
+    }
+
+    if (maxUpdatesThreshold <= 0) {
+      throw new Error(`Invalid maxUpdatesThreshold: ${maxUpdatesThreshold}. Must be positive.`);
+    }
+
+    if (depth < 0 || depth > 100) {
+      throw new Error(`Invalid depth: ${depth}. Must be between 0 and 100.`);
     }
 
     // P1.5 FIX: Setup debounced save with timer tracking
@@ -186,6 +200,7 @@ export class FireProvider extends ObservableV2<any> {
    * Normally handled automatically when update threshold is exceeded.
    * 
    * @param attempt - Internal retry counter (do not set manually)
+   * @throws {Error} If locking fails or Firestore operations error
    */
   async compact(attempt: number = 1): Promise<void> {
     // Prevent concurrent compaction from same instance
@@ -314,7 +329,7 @@ export class FireProvider extends ObservableV2<any> {
    * Handles local document updates.
    * Batches updates and triggers debounced save to Firestore.
    */
-  private handleUpdate = (update: Uint8Array, origin: any): void => {
+  private handleUpdate = (update: Uint8Array, origin: unknown): void => {
     // Prevent echo loops from remote updates
     if (origin === FIREBASE_ORIGINS.SNAPSHOT ||
       origin === FIREBASE_ORIGINS.HISTORY ||
@@ -373,7 +388,7 @@ export class FireProvider extends ObservableV2<any> {
       createdAt: serverTimestamp(),
       createdBy: this.uid,
       ...aggregateMetadata(metas),
-    };
+    } as Record<string, any>;
 
     try {
       await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), docData);

@@ -63,6 +63,20 @@ export declare class FireProvider extends ObservableV2<any> {
     private _unsubscribeUpdates;
     private _debouncedSave;
     private _isDestroyed;
+    /** P0.3 FIX: Cached clock offset to avoid measuring on every lock attempt */
+    private _cachedClockOffset;
+    /** P0.5 FIX: Flag to prevent race condition during save */
+    private _isSaving;
+    /** P1.4 FIX: Sync retry counter for exponential backoff */
+    private _syncRetryCount;
+    /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
+    private _debounceTimerId;
+    /**
+     * Creates a new FireProvider instance.
+     *
+     * @param config - Configuration options
+     * @throws {Error} If config parameters (path, depth, maxUpdatesThreshold) are invalid.
+     */
     constructor(config: FireProviderConfig);
     /**
      * Whether compaction is currently in progress.
@@ -73,6 +87,7 @@ export declare class FireProvider extends ObservableV2<any> {
      * Normally handled automatically when update threshold is exceeded.
      *
      * @param attempt - Internal retry counter (do not set manually)
+     * @throws {Error} If locking fails or Firestore operations error
      */
     compact(attempt?: number): Promise<void>;
     /**
@@ -83,10 +98,15 @@ export declare class FireProvider extends ObservableV2<any> {
      * 2. Destroys all subdocument providers
      * 3. Flushes any pending local updates
      * 4. Cleans up event handlers
+     * 5. P1.5: Cancels pending debounce timer
      */
     destroy(): Promise<void>;
     /**
      * Performs initial synchronization and sets up real-time listener.
+     *
+     * P0.7 NOTE: The sync algorithm uses eventual consistency.
+     * Read order (Updates → History → Snapshot) ensures we never miss data,
+     * though we may occasionally apply duplicates (Yjs handles this safely).
      */
     private sync;
     /**
@@ -100,6 +120,8 @@ export declare class FireProvider extends ObservableV2<any> {
     private handleSubdocs;
     /**
      * Saves the cached update to Firestore.
+     * P0.5 FIX: Uses _isSaving flag to prevent race condition where
+     * updates arriving during save could be duplicated or lost.
      */
     private saveToFirestore;
 }

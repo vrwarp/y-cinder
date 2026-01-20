@@ -40,10 +40,10 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-import { onSnapshot, doc, collection, addDoc, Bytes, query, orderBy, getDocs, getDoc, serverTimestamp, } from "@firebase/firestore";
+import { onSnapshot, doc, collection, addDoc, Bytes, query, orderBy, getDocs, getDoc, serverTimestamp, limit, startAfter, limitToLast, } from "@firebase/firestore";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
-import { FIREBASE_ORIGINS, FIRESTORE_PATHS } from "./types";
+import { FIREBASE_ORIGINS, FIRESTORE_PATHS, DEFAULTS, } from "./types";
 import { writeStateVector } from "./utils";
 import { extractAllMetadata, aggregateMetadata, isUpdateRedundant } from "./update-metadata";
 /**
@@ -55,6 +55,20 @@ import { extractAllMetadata, aggregateMetadata, isUpdateRedundant } from "./upda
  * 3. Compare with local state vector
  * 4. Apply only missing data
  * 5. Push local updates not on server
+ *
+ * ## P0.7: Eventual Consistency
+ *
+ * This function uses separate, non-transactional reads which means
+ * compaction can race with our reads. The read order (Updates → History →
+ * Snapshot) is deliberately chosen to be safe:
+ *
+ * - **Worst case**: We read Updates, compaction moves Update A to History,
+ *   we read History (includes A). Result: We see A in both - duplicate, but safe.
+ * - **Data loss scenario (avoided)**: If we read History first and Updates second,
+ *   compaction could move data between reads causing us to miss it.
+ *
+ * Yjs handles duplicate updates gracefully (they're idempotent), so the
+ * "duplicate" worst case has no data integrity impact.
  *
  * @param ctx - Sync context
  * @returns Sync result with statistics
@@ -72,35 +86,62 @@ import { extractAllMetadata, aggregateMetadata, isUpdateRedundant } from "./upda
 export function performInitialSync(ctx) {
     return __awaiter(this, void 0, void 0, function* () {
         const { db, path, doc: ydoc, uid, isDestroyed } = ctx;
+        const BATCH_SIZE = DEFAULTS.SYNC_BATCH_SIZE;
         try {
             const serverSVMap = new Map();
             const pendingUpdates = [];
             let updatesApplied = 0;
-            // 1. Fetch Updates (Tier 3)
-            const updatesQ = query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'));
-            const updatesSnap = yield getDocs(updatesQ);
-            if (isDestroyed())
-                return { success: false, updatesApplied: 0, localUpdatesPushed: false };
-            updatesSnap.forEach(snap => {
-                const data = snap.data();
-                if (data) {
-                    processUpdateMetadata(data, serverSVMap);
-                    pendingUpdates.push({ type: 'update', data, priority: 3 });
+            // 1. Fetch Updates (Tier 3) with pagination (P0.1 fix)
+            let lastUpdateDoc = null;
+            let hasMoreUpdates = true;
+            while (hasMoreUpdates) {
+                const updatesQ = lastUpdateDoc
+                    ? query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'), startAfter(lastUpdateDoc), limit(BATCH_SIZE))
+                    : query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'), limit(BATCH_SIZE));
+                const updatesSnap = yield getDocs(updatesQ);
+                if (isDestroyed())
+                    return { success: false, updatesApplied: 0, localUpdatesPushed: false };
+                if (updatesSnap.empty) {
+                    hasMoreUpdates = false;
                 }
-            });
-            // 2. Fetch History Segments (Tier 2)
-            const historyQ = query(collection(db, path, FIRESTORE_PATHS.HISTORY), orderBy('startTime', 'asc'));
-            const historySnaps = yield getDocs(historyQ);
-            if (isDestroyed())
-                return { success: false, updatesApplied: 0, localUpdatesPushed: false };
-            historySnaps.forEach(snap => {
-                const data = snap.data();
-                if (data) {
-                    processHistoryMetadata(data, serverSVMap);
-                    pendingUpdates.push({ type: 'history', data, priority: 2 });
+                else {
+                    updatesSnap.forEach(snap => {
+                        const data = snap.data();
+                        if (data) {
+                            processUpdateMetadata(data, serverSVMap);
+                            pendingUpdates.push({ type: 'update', data, priority: 3 });
+                        }
+                    });
+                    lastUpdateDoc = updatesSnap.docs[updatesSnap.docs.length - 1];
+                    hasMoreUpdates = updatesSnap.docs.length === BATCH_SIZE;
                 }
-            });
-            // 3. Fetch Base Snapshot (Tier 1)
+            }
+            // 2. Fetch History Segments (Tier 2) with pagination (P0.1 fix)
+            let lastHistoryDoc = null;
+            let hasMoreHistory = true;
+            while (hasMoreHistory) {
+                const historyQ = lastHistoryDoc
+                    ? query(collection(db, path, FIRESTORE_PATHS.HISTORY), orderBy('startTime', 'asc'), startAfter(lastHistoryDoc), limit(BATCH_SIZE))
+                    : query(collection(db, path, FIRESTORE_PATHS.HISTORY), orderBy('startTime', 'asc'), limit(BATCH_SIZE));
+                const historySnap = yield getDocs(historyQ);
+                if (isDestroyed())
+                    return { success: false, updatesApplied: 0, localUpdatesPushed: false };
+                if (historySnap.empty) {
+                    hasMoreHistory = false;
+                }
+                else {
+                    historySnap.forEach(snap => {
+                        const data = snap.data();
+                        if (data) {
+                            processHistoryMetadata(data, serverSVMap);
+                            pendingUpdates.push({ type: 'history', data, priority: 2 });
+                        }
+                    });
+                    lastHistoryDoc = historySnap.docs[historySnap.docs.length - 1];
+                    hasMoreHistory = historySnap.docs.length === BATCH_SIZE;
+                }
+            }
+            // 3. Fetch Base Snapshot (Tier 1) - single document, no pagination needed
             const mainRef = doc(db, path);
             const mainSnap = yield getDoc(mainRef);
             if (isDestroyed())
@@ -114,9 +155,8 @@ export function performInitialSync(ctx) {
                     }
                 }
             }
-            // 4. Apply missing data
-            const localSV = Y.encodeStateVector(ydoc);
-            const localSVMap = Y.decodeStateVector(localSV);
+            // 4. Apply missing data with state vector refresh (P0.4 fix)
+            let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
             // Sort by priority (Snapshot first, then History, then Updates)
             pendingUpdates.sort((a, b) => a.priority - b.priority);
             for (const item of pendingUpdates) {
@@ -124,8 +164,14 @@ export function performInitialSync(ctx) {
                     break;
                 if (!isItemRedundant(item, localSVMap)) {
                     const applied = applyItem(item, ydoc);
-                    if (applied)
+                    if (applied) {
                         updatesApplied++;
+                        // P0.4 FIX: Refresh localSVMap after applying snapshot
+                        // This prevents redundant processing of history/updates already in snapshot
+                        if (item.type === 'snapshot') {
+                            localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+                        }
+                    }
                 }
             }
             // 5. Push Missing Local Updates
@@ -155,15 +201,28 @@ export function performInitialSync(ctx) {
 /**
  * Creates a real-time listener for new updates.
  *
+ * P0.2 FIX: Uses limitToLast() to prevent memory explosion when connecting
+ * to documents with many pending updates. Only the most recent updates are
+ * tracked; older updates were already processed during initial sync.
+ *
  * @param ctx - Sync context
  * @returns Unsubscribe function
  */
 export function createUpdateListener(ctx) {
-    const { db, path, doc: ydoc, uid, maxUpdatesThreshold, compactionProbability, onCompactionNeeded, isDestroyed } = ctx;
-    const liveUpdatesQ = query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'));
+    const { db, path, doc: ydoc, uid, maxUpdatesThreshold, compactionProbability, onCompactionNeeded, onListenerError, isDestroyed } = ctx;
+    // P0.2 FIX: Use limitToLast to prevent loading all docs into memory
+    // We only care about NEW updates arriving after initial sync
+    const liveUpdatesQ = query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'), limitToLast(DEFAULTS.REALTIME_LIMIT));
     return onSnapshot(liveUpdatesQ, (snapshot) => {
-        // Check for compaction trigger
-        if (snapshot.size > maxUpdatesThreshold && onCompactionNeeded) {
+        // Check for compaction trigger based on actual size
+        // Note: snapshot.size may be capped by limitToLast, so we check docChanges for additions
+        if (snapshot.size >= DEFAULTS.REALTIME_LIMIT && onCompactionNeeded) {
+            // At capacity - definitely need compaction
+            if (Math.random() < compactionProbability) {
+                onCompactionNeeded();
+            }
+        }
+        else if (snapshot.size > maxUpdatesThreshold && onCompactionNeeded) {
             if (Math.random() < compactionProbability) {
                 onCompactionNeeded();
             }
@@ -197,7 +256,10 @@ export function createUpdateListener(ctx) {
         });
     }, (error) => {
         console.error("onSnapshot listener failed", error);
-        // Retry logic handled by caller
+        // P1.7 FIX: Emit error event so caller can handle disconnect
+        if (onListenerError) {
+            onListenerError(error);
+        }
     });
 }
 // --- Helper Functions ---
@@ -288,6 +350,8 @@ function processSnapshotMetadata(data, serverSVMap) {
  * Determines if a pending update is already contained in the local document.
  * Uses clock comparison to avoid re-applying known data.
  *
+ * P1.3 FIX: Now handles history segments with stateVector field.
+ *
  * @param item - The pending update to check
  * @param localSVMap - Local document's state vector
  * @returns true if local document already has all data from this item
@@ -302,6 +366,23 @@ function isItemRedundant(item, localSVMap) {
                 return false;
         }
         return true;
+    }
+    // P1.3 FIX: Handle history segments with stateVector
+    if (item.type === 'history' && item.data.stateVector) {
+        try {
+            const sv = fromBase64(item.data.stateVector);
+            const map = Y.decodeStateVector(sv);
+            for (const [client, clock] of map) {
+                const localClock = localSVMap.get(client) || 0;
+                if (clock > localClock)
+                    return false;
+            }
+            return true;
+        }
+        catch (e) {
+            // If stateVector parsing fails, treat as not redundant
+            return false;
+        }
     }
     if (item.type === 'update') {
         if (item.data.clientID !== undefined && item.data.clockEnd !== undefined) {

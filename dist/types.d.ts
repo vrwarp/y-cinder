@@ -111,6 +111,10 @@ export declare const DEFAULTS: {
     readonly MAX_SUBDOC_DEPTH: 50;
     readonly TARGET_SNAPSHOT_SIZE: 900000;
     readonly MAX_RETRIES: 5;
+    /** Maximum docs to fetch per batch during initial sync (P0.1 fix) */
+    readonly SYNC_BATCH_SIZE: 100;
+    /** Maximum updates to track in real-time listener (P0.2 fix) */
+    readonly REALTIME_LIMIT: 200;
 };
 declare module 'yjs' {
     function decodeUpdate(update: Uint8Array): {

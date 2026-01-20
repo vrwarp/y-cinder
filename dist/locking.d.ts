@@ -62,6 +62,11 @@ export interface LockConfig {
     uid: string;
     /** Lock time-to-live in milliseconds */
     lockTTL: number;
+    /**
+     * P0.3 FIX: Pre-measured clock offset to avoid measuring on every lock attempt.
+     * If provided, measureClockSkew is skipped (saves 3 Firestore ops).
+     */
+    cachedClockOffset?: number;
 }
 /**
  * Attempts to acquire a distributed lock for exclusive operations.
@@ -106,6 +111,11 @@ export declare function acquireLock(config: LockConfig): Promise<boolean>;
 export declare function releaseLock(config: Pick<LockConfig, 'db' | 'path' | 'uid'>): Promise<void>;
 /**
  * Checks if a lock is currently held and unexpired.
+ *
+ * P1.1 FIX: Uses cachedClockOffset for accurate age calculation on
+ * clients with clock skew. Without offset, the age may be incorrect.
+ *
+ * Note: This is primarily used for debugging/diagnostics.
  *
  * @param config - Lock configuration
  * @returns Object with lock status information

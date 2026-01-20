@@ -44,6 +44,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 import { doc, collection, Bytes, runTransaction, query, orderBy, getDocs, serverTimestamp, limit, } from "@firebase/firestore";
 import * as Y from "yjs";
+import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { calculateStateVector, wait, calculateBackoff } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
@@ -75,9 +76,10 @@ import { acquireLock, releaseLock } from "./locking";
  */
 export function compact(ctx, attempt = 1) {
     return __awaiter(this, void 0, void 0, function* () {
-        const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange } = ctx;
+        const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange, cachedClockOffset } = ctx;
         // 1. Distributed Gate: Try to become the Leader
-        const hasLock = yield acquireLock({ db, path, uid, lockTTL });
+        // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
+        const hasLock = yield acquireLock({ db, path, uid, lockTTL, cachedClockOffset });
         if (!hasLock) {
             return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
         }
@@ -244,10 +246,15 @@ function compactToHistory(params) {
         // Fast path: It fits in one segment
         const segmentId = Math.random().toString(36).substring(2);
         const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
+        // P1.2 FIX: Calculate and store stateVector for efficient sync redundancy checks
+        const tempDoc = new Y.Doc();
+        Y.applyUpdate(tempDoc, pendingMerge);
+        const stateVector = toBase64(Y.encodeStateVector(tempDoc));
         transaction.set(historyRef, {
             segment: Bytes.fromUint8Array(pendingMerge),
             startTime: updatesToProcess[0].createdAt,
             endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
+            stateVector, // P1.2 FIX: Pre-computed stateVector
         });
         for (const item of updatesToProcess) {
             transaction.delete(item.ref);

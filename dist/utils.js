@@ -118,6 +118,12 @@ export function calculateStateVector(update) {
  * ```
  */
 export function generateSessionId() {
+    // P2.17: Use crypto.randomUUID() if available for better entropy
+    const g = globalThis;
+    if (g.crypto && g.crypto.randomUUID) {
+        return g.crypto.randomUUID();
+    }
+    // Fallback for legacy environments
     return Math.random().toString(36).substring(2) + Date.now().toString(36);
 }
 /**

@@ -51,6 +51,8 @@ export interface SyncContext {
     compactionProbability: number;
     /** Callback to trigger compaction */
     onCompactionNeeded?: () => void;
+    /** P1.7 FIX: Callback when listener encounters an error */
+    onListenerError?: (error: Error) => void;
     /** Flag to check if provider is destroyed */
     isDestroyed: () => boolean;
 }
@@ -77,6 +79,20 @@ export interface SyncResult {
  * 4. Apply only missing data
  * 5. Push local updates not on server
  *
+ * ## P0.7: Eventual Consistency
+ *
+ * This function uses separate, non-transactional reads which means
+ * compaction can race with our reads. The read order (Updates → History →
+ * Snapshot) is deliberately chosen to be safe:
+ *
+ * - **Worst case**: We read Updates, compaction moves Update A to History,
+ *   we read History (includes A). Result: We see A in both - duplicate, but safe.
+ * - **Data loss scenario (avoided)**: If we read History first and Updates second,
+ *   compaction could move data between reads causing us to miss it.
+ *
+ * Yjs handles duplicate updates gracefully (they're idempotent), so the
+ * "duplicate" worst case has no data integrity impact.
+ *
  * @param ctx - Sync context
  * @returns Sync result with statistics
  *
@@ -93,6 +109,10 @@ export interface SyncResult {
 export declare function performInitialSync(ctx: SyncContext): Promise<SyncResult>;
 /**
  * Creates a real-time listener for new updates.
+ *
+ * P0.2 FIX: Uses limitToLast() to prevent memory explosion when connecting
+ * to documents with many pending updates. Only the most recent updates are
+ * tracked; older updates were already processed during initial sync.
  *
  * @param ctx - Sync context
  * @returns Unsubscribe function

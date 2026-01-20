@@ -1,3 +1,28 @@
+/**
+ * Distributed Locking Module
+ *
+ * Provides distributed locking primitives for coordinating exclusive operations
+ * (like compaction) across multiple clients. Uses Firestore transactions and
+ * server timestamps to ensure correctness despite client clock skew.
+ *
+ * ## Lock Semantics
+ *
+ * - **TTL-based expiry**: Locks automatically expire after lockTTL milliseconds
+ * - **Re-entrant**: A client can re-acquire its own unexpired lock
+ * - **Clock-skew tolerant**: Uses server timestamps for all time comparisons
+ *
+ * ## Implementation
+ *
+ * The lock is stored as a Firestore document with:
+ * - `owner`: Client ID that holds the lock
+ * - `createdAt`: Server timestamp when lock was acquired
+ *
+ * Before acquiring, we measure clock skew by round-tripping through the server,
+ * ensuring accurate TTL calculations even when client clocks are wrong.
+ *
+ * @module locking
+ */
+
 import {
     Firestore,
     doc,

@@ -1,3 +1,14 @@
+/**
+ * Advanced Integration Tests
+ *
+ * Tests complex multi-client scenarios including:
+ * - Subdocument synchronization across clients
+ * - Concurrent modifications to nested data structures
+ * - Complex Yjs data types (arrays, maps, text)
+ *
+ * @file advanced.test.ts
+ */
+
 import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';

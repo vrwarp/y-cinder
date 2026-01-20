@@ -1,3 +1,12 @@
+/**
+ * Flush on Destroy Tests
+ *
+ * Tests that pending updates are correctly flushed to Firestore when
+ * destroy() is called. Verifies no data loss occurs during provider
+ * shutdown, even when updates are still in the debounce buffer.
+ *
+ * @file flush_on_destroy.test.ts
+ */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';

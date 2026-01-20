@@ -1,3 +1,16 @@
+/**
+ * Update Metadata Unit Tests
+ *
+ * Tests for metadata extraction and comparison functions:
+ * - extractAllMetadata: Parses Yjs update internals to get clock ranges
+ * - aggregateMetadata: Combines metadata for Firestore storage
+ * - isUpdateRedundant: Determines if an update is already applied locally
+ *
+ * These functions enable efficient sync by comparing clocks instead of content.
+ *
+ * @file update-metadata.test.ts
+ */
+
 import { describe, it, expect } from 'vitest';
 import {
     extractAllMetadata,

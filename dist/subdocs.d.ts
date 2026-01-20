@@ -21,11 +21,8 @@
  *
  * @module subdocs
  */
-
 import * as Y from "yjs";
 import { FirebaseApp } from "@firebase/app";
-import { DEFAULTS } from "./types";
-
 /**
  * Event emitted when subdocuments change.
  */
@@ -34,7 +31,6 @@ export interface SubdocsEvent {
     removed: Set<Y.Doc>;
     loaded: Set<Y.Doc>;
 }
-
 /**
  * Context for subdocument management.
  */
@@ -60,7 +56,6 @@ export interface SubdocContext {
     /** Callback to emit connection errors */
     onConnectionError?: (error: SubdocError) => void;
 }
-
 /**
  * Error emitted when subdocument operations fail.
  */
@@ -70,23 +65,21 @@ export interface SubdocError {
     path: string;
     doc: Y.Doc;
 }
-
 /**
  * Map of subdocument GUIDs to their providers.
  */
 export type SubProviderMap = Map<string, any>;
-
 /**
  * Handles subdocument events (added, removed, loaded).
- * 
+ *
  * This function manages the lifecycle of subdocument providers:
  * - For added/loaded subdocs: Creates a new provider
  * - For removed subdocs: Destroys the existing provider
- * 
+ *
  * @param event - The subdocs event from Y.Doc
  * @param ctx - Subdocument context
  * @param subProviders - Map of existing subdocument providers
- * 
+ *
  * @example
  * ```typescript
  * doc.on('subdocs', (event) => {
@@ -94,45 +87,18 @@ export type SubProviderMap = Map<string, any>;
  * });
  * ```
  */
-export function handleSubdocs(
-    event: SubdocsEvent,
-    ctx: SubdocContext,
-    subProviders: SubProviderMap
-): void {
-    const { added, removed, loaded } = event;
-
-    // Handle added subdocs
-    added.forEach(subdoc => {
-        startSubdocProvider(subdoc, ctx, subProviders);
-    });
-
-    // Handle loaded subdocs
-    loaded.forEach(subdoc => {
-        startSubdocProvider(subdoc, ctx, subProviders);
-    });
-
-    // Handle removed subdocs
-    removed.forEach(subdoc => {
-        const guid = subdoc.guid;
-        const provider = subProviders.get(guid);
-        if (provider) {
-            provider.destroy();
-            subProviders.delete(guid);
-        }
-    });
-}
-
+export declare function handleSubdocs(event: SubdocsEvent, ctx: SubdocContext, subProviders: SubProviderMap): void;
 /**
  * Starts a provider for a subdocument.
- * 
+ *
  * Checks recursion depth limit and creates a new provider if allowed.
  * Emits a connection error if the depth limit is exceeded.
- * 
+ *
  * @param subdoc - The subdocument to sync
  * @param ctx - Subdocument context
  * @param subProviders - Map of existing subdocument providers
  * @returns The created provider, or null if depth limit exceeded
- * 
+ *
  * @example
  * ```typescript
  * const provider = startSubdocProvider(subdoc, context, subProviders);
@@ -141,80 +107,27 @@ export function handleSubdocs(
  * }
  * ```
  */
-export function startSubdocProvider(
-    subdoc: Y.Doc,
-    ctx: SubdocContext,
-    subProviders: SubProviderMap
-): any | null {
-    const guid = subdoc.guid;
-
-    // Already have a provider for this subdoc
-    if (subProviders.has(guid)) {
-        return subProviders.get(guid);
-    }
-
-    const subPath = `${ctx.parentPath}/subdocs/${guid}`;
-
-    // Check recursion depth limit
-    if (ctx.depth >= DEFAULTS.MAX_SUBDOC_DEPTH) {
-        console.warn(`Max subdocument depth exceeded at ${ctx.parentPath}`);
-
-        ctx.onConnectionError?.({
-            code: 'recursion-limit',
-            message: 'Max subdocument recursion depth exceeded',
-            path: subPath,
-            doc: subdoc,
-        });
-
-        return null;
-    }
-
-    // Create new provider with inherited configuration
-    const provider = ctx.createProvider({
-        firebaseApp: ctx.firebaseApp,
-        ydoc: subdoc,
-        path: subPath,
-        maxUpdatesThreshold: ctx.maxUpdatesThreshold,
-        maxWaitTime: ctx.maxWaitTime,
-        depth: ctx.depth + 1,
-        compactionProbability: ctx.compactionProbability,
-        lockTTL: ctx.lockTTL,
-        compactionLimit: ctx.compactionLimit,
-    });
-
-    subProviders.set(guid, provider);
-    return provider;
-}
-
+export declare function startSubdocProvider(subdoc: Y.Doc, ctx: SubdocContext, subProviders: SubProviderMap): any | null;
 /**
  * Destroys all subdocument providers.
- * 
+ *
  * @param subProviders - Map of subdocument providers
  * @returns Promise that resolves when all providers are destroyed
- * 
+ *
  * @example
  * ```typescript
  * await destroyAllSubdocs(subProviders);
  * ```
  */
-export async function destroyAllSubdocs(subProviders: SubProviderMap): Promise<void> {
-    const destroyPromises = Array.from(subProviders.values()).map(p => p.destroy());
-    await Promise.all(destroyPromises);
-    subProviders.clear();
-}
-
+export declare function destroyAllSubdocs(subProviders: SubProviderMap): Promise<void>;
 /**
  * Gets statistics about subdocument providers.
- * 
+ *
  * @param subProviders - Map of subdocument providers
  * @returns Object with subdoc statistics
  */
-export function getSubdocStats(subProviders: SubProviderMap): {
+export declare function getSubdocStats(subProviders: SubProviderMap): {
     count: number;
     guids: string[];
-} {
-    return {
-        count: subProviders.size,
-        guids: Array.from(subProviders.keys()),
-    };
-}
+};
+//# sourceMappingURL=subdocs.d.ts.map

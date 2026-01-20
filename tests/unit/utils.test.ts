@@ -1,3 +1,17 @@
+/**
+ * Utility Function Unit Tests
+ *
+ * Tests for the core utility functions used throughout the provider:
+ * - debounce: Coalesces rapid function calls
+ * - wait: Promise-based delay
+ * - writeStateVector: State vector encoding
+ * - calculateStateVector: State vector extraction from updates
+ * - generateSessionId: Unique ID generation
+ * - calculateBackoff: Exponential backoff with jitter
+ *
+ * @file utils.test.ts
+ */
+
 import { describe, it, expect } from 'vitest';
 import {
     debounce,

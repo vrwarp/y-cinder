@@ -1,3 +1,13 @@
+/**
+ * Mixed Sync Mode Tests
+ *
+ * Tests synchronization behavior when clients have different starting states.
+ * Verifies that clients with pre-existing local content correctly sync with
+ * clients that start fresh, ensuring bidirectional merge consistency.
+ *
+ * @file repro_mixed_sync.test.ts
+ */
+
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';

@@ -1,3 +1,13 @@
+/**
+ * Race Condition Tests
+ *
+ * Tests for race conditions in concurrent operations, particularly in the
+ * saveToFirestore error recovery path. Ensures that failed writes are
+ * correctly restored to the update cache without duplicating data.
+ *
+ * @file race_condition.test.ts
+ */
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';

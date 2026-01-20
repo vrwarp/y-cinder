@@ -1,3 +1,16 @@
+/**
+ * Distributed Lock Integration Tests
+ *
+ * Tests the distributed locking mechanism used to coordinate compaction
+ * across multiple clients. Verifies:
+ * - Lock acquisition and release
+ * - TTL-based lock expiry
+ * - Clock skew resilience
+ * - Mutual exclusion guarantees
+ *
+ * @file distributed_lock.test.ts
+ */
+
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';

@@ -1,3 +1,13 @@
+/**
+ * Death Spiral Compaction Tests
+ *
+ * Tests the chunked compaction strategy that prevents the "death spiral"
+ * when updates exceed Firestore's 1MB document limit. Verifies that large
+ * updates are correctly split into multiple history segments rather than
+ * failing or causing data loss.
+ *
+ * @file death_spiral.test.ts
+ */
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';

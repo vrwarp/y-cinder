@@ -1,3 +1,14 @@
+/**
+ * Thundering Herd Compaction Tests
+ *
+ * Tests the probabilistic compaction trigger mechanism that prevents the
+ * "thundering herd" problem. When many clients are connected and updates
+ * exceed the threshold, only a small percentage (controlled by
+ * `compactionProbability`) should attempt compaction, preventing contention.
+ *
+ * @file thundering_herd.test.ts
+ * @see https://en.wikipedia.org/wiki/Thundering_herd_problem
+ */
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';

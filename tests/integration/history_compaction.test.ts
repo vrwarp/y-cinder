@@ -1,3 +1,13 @@
+/**
+ * History Compaction Tests
+ *
+ * Tests the tiered compaction strategy (updates → history → snapshot).
+ * Verifies that updates are correctly merged into history segments when
+ * the snapshot size limit would be exceeded, and that history segments
+ * are properly merged into the base snapshot during subsequent compactions.
+ *
+ * @file history_compaction.test.ts
+ */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';

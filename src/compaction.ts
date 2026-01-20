@@ -1,3 +1,39 @@
+/**
+ * Compaction Module
+ *
+ * Implements the tiered compaction strategy for managing Yjs updates in Firestore.
+ * The compaction system reduces storage costs and sync times by periodically
+ * merging small updates into larger, more efficient structures.
+ *
+ * ## Architecture
+ *
+ * The storage hierarchy (from most to least compact):
+ * ```
+ * ┌─────────────────────────────────────────────────┐
+ * │  Base Snapshot (Tier 1)                         │
+ * │  - Single document with full state              │
+ * │  - Target: < 900KB                              │
+ * ├─────────────────────────────────────────────────┤
+ * │  History Segments (Tier 2)                      │
+ * │  - Merged batches of updates                    │
+ * │  - Created when snapshot would exceed limit     │
+ * ├─────────────────────────────────────────────────┤
+ * │  Updates (Tier 3)                               │
+ * │  - Individual client updates                    │
+ * │  - Compacted when count exceeds threshold       │
+ * └─────────────────────────────────────────────────┘
+ * ```
+ *
+ * ## Safety Guarantees
+ *
+ * - **Atomicity**: All operations happen within Firestore transactions
+ * - **Locking**: Distributed lock prevents concurrent compaction
+ * - **Retry**: Exponential backoff handles transient failures
+ * - **Chunking**: Large data is split to stay under Firestore limits
+ *
+ * @module compaction
+ */
+
 import {
     Firestore,
     doc,

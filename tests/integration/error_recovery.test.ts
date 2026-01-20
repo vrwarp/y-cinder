@@ -1,6 +1,15 @@
+/**
+ * Error Recovery Integration Tests
+ *
+ * Tests the provider's resilience to transient errors including:
+ * - Compaction transaction failures and retry logic
+ * - Network interruptions during sync
+ * - Exponential backoff behavior
+ *
+ * @file error_recovery.test.ts
+ */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-
 const { mockControls } = vi.hoisted(() => {
     return { mockControls: { shouldFailAddDoc: false, failCount: 0 } }
 });

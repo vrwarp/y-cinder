@@ -1,3 +1,14 @@
+/**
+ * Recursion Depth Limit Tests
+ *
+ * Tests the subdocument recursion depth limiting feature. Verifies that:
+ * - Subdocuments up to MAX_SUBDOC_DEPTH are synced correctly
+ * - Subdocuments exceeding the limit emit a 'connection-error' event
+ * - The system gracefully handles deeply nested document structures
+ *
+ * @file recursion_depth.test.ts
+ */
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';

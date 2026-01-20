@@ -1,55 +1,106 @@
+/**
+ * FireProvider - Yjs persistence provider for Firebase Firestore
+ *
+ * This is the main orchestration class that coordinates:
+ * - Document synchronization with Firestore
+ * - Debounced update batching
+ * - Tiered compaction (snapshot → history → updates)
+ * - Distributed locking for safe concurrent operations
+ * - Subdocument lifecycle management
+ *
+ * @module FireProvider
+ */
 import { FirebaseApp } from "@firebase/app";
 import { Firestore } from "@firebase/firestore";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
-export interface FireProviderConfig {
-    firebaseApp: FirebaseApp;
-    ydoc: Y.Doc;
-    path: string;
-    maxUpdatesThreshold?: number;
-    maxWaitTime?: number;
-    compactionProbability?: number;
-    depth?: number;
-}
+import { FireProviderConfig } from "./types";
+export { FireProviderConfig } from "./types";
+/**
+ * Yjs persistence provider for Firebase Firestore.
+ *
+ * Provides real-time synchronization of Yjs documents with Firestore,
+ * including automatic compaction, distributed locking, and subdocument support.
+ *
+ * @example
+ * ```typescript
+ * import { FireProvider } from 'y-cinder';
+ *
+ * const provider = new FireProvider({
+ *   firebaseApp: app,
+ *   ydoc: doc,
+ *   path: 'documents/my-doc'
+ * });
+ *
+ * // Later...
+ * await provider.destroy();
+ * ```
+ */
 export declare class FireProvider extends ObservableV2<any> {
-    doc: Y.Doc;
-    path: string;
-    db: Firestore;
-    firebaseApp: FirebaseApp;
-    uid: string;
-    subProviders: Map<string, FireProvider>;
-    isCompacting: boolean;
-    updateCache: Uint8Array | null;
-    maxUpdatesThreshold: number;
-    maxWaitTime: number;
-    compactionProbability: number;
-    depth: number;
+    /** The Yjs document being synced */
+    readonly doc: Y.Doc;
+    /** Firestore document path */
+    readonly path: string;
+    /** Firestore instance */
+    readonly db: Firestore;
+    /** Firebase app instance */
+    readonly firebaseApp: FirebaseApp;
+    /** Unique session ID for this provider instance */
+    readonly uid: string;
+    /** Map of subdocument providers */
+    private subProviders;
+    /** Whether compaction is currently in progress */
+    private _isCompacting;
+    /** Pending update cache for debouncing */
+    private updateCache;
+    private readonly maxUpdatesThreshold;
+    private readonly maxWaitTime;
+    private readonly compactionProbability;
+    private readonly compactionLimit;
+    private readonly depth;
+    private readonly lockTTL;
+    private readonly _testHooks?;
     private _unsubscribeUpdates;
     private _debouncedSave;
     private _isDestroyed;
-    constructor({ firebaseApp, ydoc, path, maxUpdatesThreshold, maxWaitTime, compactionProbability, depth, }: FireProviderConfig);
-    private debounce;
-    private wait;
+    constructor(config: FireProviderConfig);
     /**
-     * Sync Mechanism
-     * 1. Load Base Snapshot
-     * 2. Load History Segments
-     * 3. Subscribe to Live Updates
+     * Whether compaction is currently in progress.
      */
-    sync(): Promise<void>;
-    handleUpdate: (update: Uint8Array, origin: any) => void;
-    saveToFirestore(): Promise<void>;
+    get isCompacting(): boolean;
     /**
-     * Compaction Logic (Tiered)
-     * Merges updates into History Segments or Base Snapshot
+     * Manually trigger compaction.
+     * Normally handled automatically when update threshold is exceeded.
+     *
+     * @param attempt - Internal retry counter (do not set manually)
      */
     compact(attempt?: number): Promise<void>;
-    handleSubdocs: ({ added, removed, loaded }: {
-        added: Set<Y.Doc>;
-        removed: Set<Y.Doc>;
-        loaded: Set<Y.Doc>;
-    }) => void;
-    startSubdocProvider(subdoc: Y.Doc): void;
-    destroy(): void;
+    /**
+     * Destroys the provider and releases all resources.
+     *
+     * This method:
+     * 1. Stops listening for remote updates
+     * 2. Destroys all subdocument providers
+     * 3. Flushes any pending local updates
+     * 4. Cleans up event handlers
+     */
+    destroy(): Promise<void>;
+    /**
+     * Performs initial synchronization and sets up real-time listener.
+     */
+    private sync;
+    /**
+     * Handles local document updates.
+     * Batches updates and triggers debounced save to Firestore.
+     */
+    private handleUpdate;
+    /**
+     * Handles subdocument events.
+     */
+    private handleSubdocs;
+    /**
+     * Saves the cached update to Firestore.
+     */
+    private saveToFirestore;
 }
 //# sourceMappingURL=provider.d.ts.map

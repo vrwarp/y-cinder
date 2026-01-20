@@ -1,3 +1,14 @@
+/**
+ * Comprehensive Integration Tests
+ *
+ * End-to-end tests covering the complete FireProvider feature set including:
+ * - Multi-client sync with various data operations
+ * - Subdocument creation and synchronization
+ * - Full lifecycle testing (create, sync, destroy)
+ *
+ * @file comprehensive.test.ts
+ */
+
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';

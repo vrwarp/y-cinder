@@ -1,3 +1,15 @@
+/**
+ * Fuzz Integration Tests
+ *
+ * Randomized stress tests that generate random document operations across
+ * multiple simulated clients. Verifies that all clients eventually converge
+ * to the same document state regardless of operation order or timing.
+ *
+ * Uses a seeded PRNG for reproducibility when debugging failures.
+ *
+ * @file fuzz.test.ts
+ */
+
 import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';

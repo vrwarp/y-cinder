@@ -1,3 +1,12 @@
+/**
+ * Basic Sync Reproduction Tests
+ *
+ * Simple reproduction tests for basic synchronization scenarios.
+ * Used to isolate and verify specific sync behaviors in controlled conditions.
+ *
+ * @file repro_sync.test.ts
+ */
+
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';

@@ -1,3 +1,12 @@
+/**
+ * Zombie Provider Detection Tests
+ *
+ * Tests that destroyed providers stop processing updates and don't
+ * interfere with newly created providers on the same path. Verifies
+ * clean teardown prevents "zombie" listeners from duplicating work.
+ *
+ * @file repro_zombie.test.ts
+ */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';

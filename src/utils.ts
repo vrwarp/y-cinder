@@ -1,3 +1,21 @@
+/**
+ * Utility Functions
+ *
+ * General-purpose utility functions used throughout the y-fire library.
+ * These are pure functions with no side effects (except for timing).
+ *
+ * ## Functions
+ *
+ * - **debounce**: Rate-limits function calls (used for batching updates)
+ * - **wait**: Promise-based delay (used for retry backoff)
+ * - **writeStateVector**: Encodes state vectors for efficient comparison
+ * - **calculateStateVector**: Extracts state vector from Yjs update blobs
+ * - **generateSessionId**: Creates unique client identifiers
+ * - **calculateBackoff**: Computes exponential backoff delays with jitter
+ *
+ * @module utils
+ */
+
 import * as Y from "yjs";
 import { toBase64 } from "lib0/buffer";
 import * as encoding from "lib0/encoding";

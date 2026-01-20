@@ -1,3 +1,16 @@
+/**
+ * FireProvider Core Integration Tests
+ *
+ * Tests the fundamental functionality of FireProvider including:
+ * - Real-time synchronization between multiple clients
+ * - Data persistence across provider restarts
+ * - Basic compaction behavior
+ *
+ * These tests require the Firestore emulator to be running on port 8080.
+ *
+ * @file provider.test.ts
+ */
+
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';

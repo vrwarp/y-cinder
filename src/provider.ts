@@ -136,6 +136,21 @@ export class FireProvider extends ObservableV2<any> {
       testHooks,
     }: FireProviderConfig = config;
 
+    // P1.8 / P2.20 FIX: Validate path and config BEFORE any Firebase SDK calls
+    // This ensures validation errors are thrown with clear messages before
+    // getFirestore() which could fail with cryptic errors on invalid app.
+    if (!path || path.includes('//') || path.startsWith('/') || path.endsWith('/')) {
+      throw new Error(`Invalid Firestore path: '${path}'. Path must not be empty, start/end with '/', or contain '//'`);
+    }
+
+    if (maxUpdatesThreshold <= 0) {
+      throw new Error(`Invalid maxUpdatesThreshold: ${maxUpdatesThreshold}. Must be positive.`);
+    }
+
+    if (depth < 0 || depth > 100) {
+      throw new Error(`Invalid depth: ${depth}. Must be between 0 and 100.`);
+    }
+
     this.firebaseApp = firebaseApp;
     this.db = getFirestore(firebaseApp);
     this.path = path;
@@ -149,19 +164,6 @@ export class FireProvider extends ObservableV2<any> {
     this.lockTTL = lockTTL;
     this.compactionLimit = compactionLimit;
     this._testHooks = testHooks;
-
-    // P1.8 / P2.20 FIX: Validate path and config
-    if (!path || path.includes('//') || path.startsWith('/') || path.endsWith('/')) {
-      throw new Error(`Invalid Firestore path: '${path}'. Path must not be empty, start/end with '/', or contain '//'`);
-    }
-
-    if (maxUpdatesThreshold <= 0) {
-      throw new Error(`Invalid maxUpdatesThreshold: ${maxUpdatesThreshold}. Must be positive.`);
-    }
-
-    if (depth < 0 || depth > 100) {
-      throw new Error(`Invalid depth: ${depth}. Must be between 0 and 100.`);
-    }
 
     // P1.5 FIX: Setup debounced save with timer tracking
     this._debouncedSave = () => {

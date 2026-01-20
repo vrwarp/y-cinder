@@ -3,13 +3,15 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 
 // Mock dependencie to avoid full initialization
-vi.mock('@firebase/app', () => ({
+vi.mock('firebase/app', () => ({
     initializeApp: vi.fn(),
 }));
-vi.mock('@firebase/firestore', () => ({
+vi.mock('firebase/firestore', () => ({
     getFirestore: vi.fn(),
     collection: vi.fn(),
     onSnapshot: vi.fn(),
+    addDoc: vi.fn(),
+    query: vi.fn(),
 }));
 
 describe('FireProvider Configuration Validation', () => {

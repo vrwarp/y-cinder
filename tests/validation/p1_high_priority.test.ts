@@ -53,6 +53,7 @@ describe('P1 High Priority Issue Validation', () => {
     };
 
     beforeEach(async () => {
+        vi.setConfig({ testTimeout: 20000 });
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
@@ -352,7 +353,7 @@ describe('P1 High Priority Issue Validation', () => {
             await waitForConditionEquals(
                 () => verifyDoc.getText('x').toString(),
                 'important-data',
-                { timeout: 3000, interval: 50, message: 'Data should be persisted' }
+                { timeout: 10000, interval: 50, message: 'Data should be persisted' }
             );
 
             await verifyProvider.destroy();

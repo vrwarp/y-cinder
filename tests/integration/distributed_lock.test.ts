@@ -154,8 +154,8 @@ describe('Distributed Compaction Lock', () => {
             firebaseApp: app,
             ydoc,
             path,
-            maxUpdatesThreshold: 0, // Force work
-            compactionProbability: 0 // Manual trigger
+            maxUpdatesThreshold: 1, // Force work
+            compactionProbability: 1 // Manual trigger
         });
         mainProvider = provider;
 

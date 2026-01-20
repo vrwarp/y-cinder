@@ -112,7 +112,7 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
 
         // 3. Trigger Compaction (via provider)
         // We use a provider with VERY low threshold
-        const provider = createProvider(new Y.Doc(), path, { maxUpdatesThreshold: 0 }); // Trigger immediately on sync/update
+        const provider = createProvider(new Y.Doc(), path, { maxUpdatesThreshold: 1 }); // Trigger immediately on sync/update
 
         // Wait for sync and compaction - use longer timeout for large payload
         await new Promise(r => setTimeout(r, 4000));

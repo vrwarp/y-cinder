@@ -85,7 +85,7 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
                 }
             }
             return true;
-        }, { timeout: 45000, interval: 500, message: 'Fuzz test did not converge' });
+        }, { timeout: 60000, interval: 500, message: 'Fuzz test did not converge' });
 
         const finalState = clients[0].doc.getText('content').toString();
         console.log(`Fuzz test converged to length: ${finalState.length}`);

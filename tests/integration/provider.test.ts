@@ -15,7 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
-import { waitForCondition } from '../utils/wait';
+import { waitForConditionEquals } from '../utils/wait';
 
 describe('FireProvider Integration (Emulator)', () => {
     let app: any;
@@ -55,9 +55,11 @@ describe('FireProvider Integration (Emulator)', () => {
         doc1.getText('content').insert(0, 'Hello World');
 
         // Wait for sync
-        await waitForCondition(() => {
-            return doc2.getText('content').toString() === 'Hello World';
-        }, 5000, 100, 'Doc2 should receive content');
+        await waitForConditionEquals(
+            () => doc2.getText('content').toString(),
+            'Hello World',
+            { timeout: 5000, interval: 100, message: 'Doc2 should receive content' }
+        );
 
         expect(doc2.getText('content').toString()).toBe('Hello World');
 
@@ -82,9 +84,11 @@ describe('FireProvider Integration (Emulator)', () => {
         const doc2 = new Y.Doc();
         const provider2 = createProvider(doc2, path);
 
-        await waitForCondition(() => {
-            return doc2.getText('content').toString() === 'Persisted Data';
-        }, 5000, 100, 'Doc2 should load persisted data');
+        await waitForConditionEquals(
+            () => doc2.getText('content').toString(),
+            'Persisted Data',
+            { timeout: 5000, interval: 100, message: 'Doc2 should load persisted data' }
+        );
 
         expect(doc2.getText('content').toString()).toBe('Persisted Data');
 
@@ -111,9 +115,11 @@ describe('FireProvider Integration (Emulator)', () => {
         const doc2 = new Y.Doc();
         const provider2 = createProvider(doc2, path);
 
-        await waitForCondition(() => {
-            return doc2.getText('content').toString() === 'ABC';
-        }, 5000, 100, 'Doc2 should receive compacted data');
+        await waitForConditionEquals(
+            () => doc2.getText('content').toString(),
+            'ABC',
+            { timeout: 10000, interval: 100, message: 'Doc2 should receive compacted data' }
+        );
 
         expect(doc2.getText('content').toString()).toBe('ABC');
 

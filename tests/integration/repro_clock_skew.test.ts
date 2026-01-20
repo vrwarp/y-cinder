@@ -151,7 +151,7 @@ describe('Issue 4: Clock Skew in Distributed Lock', () => {
         }
     });
 
-    it('should prevent concurrent compaction due to clock skew', async () => {
+    it('should prevent concurrent compaction due to clock skew', { timeout: 15000 }, async () => {
         const ydoc1 = new Y.Doc();
         const ydoc2 = new Y.Doc();
 

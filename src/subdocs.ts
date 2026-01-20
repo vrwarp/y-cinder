@@ -189,6 +189,9 @@ export function startSubdocProvider(
 /**
  * Destroys all subdocument providers.
  * 
+ * P0.6 FIX: Uses Promise.allSettled instead of Promise.all to ensure
+ * all subdocs are destroyed even if one fails. Logs individual failures.
+ * 
  * @param subProviders - Map of subdocument providers
  * @returns Promise that resolves when all providers are destroyed
  * 
@@ -198,8 +201,26 @@ export function startSubdocProvider(
  * ```
  */
 export async function destroyAllSubdocs(subProviders: SubProviderMap): Promise<void> {
-    const destroyPromises = Array.from(subProviders.values()).map(p => p.destroy());
-    await Promise.all(destroyPromises);
+    const destroyPromises = Array.from(subProviders.entries()).map(
+        async ([guid, provider]) => {
+            try {
+                await provider.destroy();
+            } catch (err) {
+                console.error(`Failed to destroy subdoc provider ${guid}:`, err);
+                throw err; // Rethrow so allSettled records it as rejected
+            }
+        }
+    );
+
+    // P0.6 FIX: Use allSettled to ensure all subdocs attempt destruction
+    const results = await Promise.allSettled(destroyPromises);
+
+    // Log any failures (but don't throw - we want cleanup to continue)
+    const failures = results.filter(r => r.status === 'rejected');
+    if (failures.length > 0) {
+        console.warn(`${failures.length} subdoc(s) failed to destroy properly`);
+    }
+
     subProviders.clear();
 }
 

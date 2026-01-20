@@ -118,6 +118,10 @@ export const DEFAULTS = {
     MAX_SUBDOC_DEPTH: 50,
     TARGET_SNAPSHOT_SIZE: 900000, // 900KB
     MAX_RETRIES: 5,
+    /** Maximum docs to fetch per batch during initial sync (P0.1 fix) */
+    SYNC_BATCH_SIZE: 100,
+    /** Maximum updates to track in real-time listener (P0.2 fix) */
+    REALTIME_LIMIT: 200,
 } as const;
 
 // Type augmentation for internal Yjs API

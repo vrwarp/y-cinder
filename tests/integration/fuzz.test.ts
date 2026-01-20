@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
-import { waitForCondition } from '../utils/wait';
+import { waitForConditionTruthy } from '../utils/wait';
 
 describe('FireProvider Fuzz Testing (Emulator)', () => {
     let app: any;
@@ -76,8 +76,8 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
             await new Promise(r => setTimeout(r, Math.random() * 20 + 5)); // Increased jitter to avoid emulator contention
         }
 
-        // Allow settling using waitForCondition
-        await waitForCondition(async () => {
+        // Allow settling using waitForConditionTruthy
+        await waitForConditionTruthy(async () => {
             const state0 = clients[0].doc.getText('content').toString();
             for (let i = 1; i < numClients; i++) {
                 if (clients[i].doc.getText('content').toString() !== state0) {
@@ -85,7 +85,7 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
                 }
             }
             return true;
-        }, 45000, 500, 'Fuzz test did not converge');
+        }, { timeout: 45000, interval: 500, message: 'Fuzz test did not converge' });
 
         const finalState = clients[0].doc.getText('content').toString();
         console.log(`Fuzz test converged to length: ${finalState.length}`);

@@ -38,7 +38,7 @@ vi.mock('@firebase/firestore', async (importOriginal) => {
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
-import { waitForCondition } from '../utils/wait';
+import { waitForConditionEquals } from '../utils/wait';
 
 describe('Issue 1: saveToFirestore Race Condition', () => {
     let app: any;
@@ -96,10 +96,11 @@ describe('Issue 1: saveToFirestore Race Condition', () => {
 
         // Verify both updates eventually sync to doc2
         try {
-            await waitForCondition(() => {
-                const text = doc2.getText('content').toString();
-                return text === 'FirstSecondThird';
-            }, 5000, 100, 'All updates should sync');
+            await waitForConditionEquals(
+                () => doc2.getText('content').toString(),
+                'FirstSecondThird',
+                { timeout: 5000, interval: 100, message: 'All updates should sync' }
+            );
         } catch (e) {
             // Expected to fail if bug exists
         }
@@ -151,9 +152,11 @@ describe('Issue 1: saveToFirestore Race Condition', () => {
         await new Promise(r => setTimeout(r, 1000));
 
         try {
-            await waitForCondition(() => {
-                return doc2.getText('content').toString() === doc1.getText('content').toString();
-            }, 5000, 100, 'Rapid updates should sync');
+            await waitForConditionEquals(
+                () => doc2.getText('content').toString(),
+                doc1.getText('content').toString(),
+                { timeout: 5000, interval: 100, message: 'Rapid updates should sync' }
+            );
         } catch (e) {
             // Expected to fail if bug exists
         }

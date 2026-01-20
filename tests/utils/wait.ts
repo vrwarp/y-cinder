@@ -1,56 +1,185 @@
 /**
- * Async Polling Utilities
+ * Async Polling Utilities (Improved)
  *
- * Provides utilities for waiting on asynchronous conditions in tests.
- * Essential for integration tests where timing is non-deterministic.
+ * Provides utilities for waiting on asynchronous conditions in tests with
+ * meaningful error messages that include the last seen value on timeout.
  *
  * @module tests/utils/wait
  */
 
+export interface WaitOptions {
+    /** Maximum time to wait in milliseconds (default: 2000ms) */
+    timeout?: number;
+    /** Polling interval in milliseconds (default: 50ms) */
+    interval?: number;
+    /** Error message to show on timeout */
+    message?: string;
+}
+
+const DEFAULT_TIMEOUT = 2000;
+const DEFAULT_INTERVAL = 50;
+
 /**
- * Waits for a condition to become true, polling at regular intervals.
+ * Generic wait function that polls a getter until a predicate returns true.
+ * On timeout, throws an error including the last retrieved value.
  *
- * This utility is essential for integration tests where the timing of
- * asynchronous operations (like Firestore sync) is non-deterministic.
- * It polls the predicate function until it returns true or times out.
- *
- * @param predicate - Function that returns true when the condition is met.
- *                    Can be sync or async.
- * @param timeout - Maximum time to wait in milliseconds (default: 2000ms)
- * @param interval - Polling interval in milliseconds (default: 50ms)
- * @param message - Error message to show on timeout (default: 'Condition not met')
- * @returns Promise that resolves when condition is met
- * @throws Error if timeout is reached before condition is met
- *
- * @example
- * ```typescript
- * // Wait for document sync
- * await waitForCondition(
- *   () => doc2.getText('content').toString() === 'Hello',
- *   5000,
- *   100,
- *   'Doc2 should receive content'
- * );
- *
- * // With async predicate
- * await waitForCondition(
- *   async () => (await getDoc(ref)).exists(),
- *   3000
- * );
- * ```
+ * @param getter - Function to retrieve the current value (can be async)
+ * @param predicate - Function that returns true when the value is valid
+ * @param options - Wait configuration
+ * @returns Promise resolving to the final value that satisfied the predicate
  */
-export async function waitForCondition(
-    predicate: () => boolean | Promise<boolean>,
-    timeout: number = 2000,
-    interval: number = 50,
-    message: string = 'Condition not met'
-): Promise<void> {
+export async function waitFor<T>(
+    getter: () => T | Promise<T>,
+    predicate: (value: T) => boolean,
+    options: WaitOptions = {}
+): Promise<T> {
+    const timeout = options.timeout ?? DEFAULT_TIMEOUT;
+    const interval = options.interval ?? DEFAULT_INTERVAL;
     const start = Date.now();
+    let lastValue: T | undefined;
+    let lastError: any;
+
     while (Date.now() - start < timeout) {
-        if (await predicate()) {
-            return;
+        try {
+            lastValue = await getter();
+            if (predicate(lastValue)) {
+                return lastValue;
+            }
+        } catch (e) {
+            lastError = e;
         }
         await new Promise(r => setTimeout(r, interval));
     }
-    throw new Error(`${message} (timed out after ${timeout}ms)`);
+
+    // Prepare detailed error message
+    const msg = options.message ? `${options.message} (timed out after ${timeout}ms)` : `Wait timed out after ${timeout}ms`;
+
+    let details = '';
+    if (lastValue !== undefined) {
+        try {
+            const strVal = typeof lastValue === 'object' ? JSON.stringify(lastValue) : String(lastValue);
+            // Truncate long values
+            const truncated = strVal.length > 200 ? strVal.substring(0, 200) + '...' : strVal;
+            details = `\nLast value: ${truncated}`;
+        } catch (e) {
+            details = `\nLast value: [Unable to stringify]`;
+        }
+    } else if (lastError) {
+        details = `\nLast error: ${lastError.message}`;
+    }
+
+    throw new Error(`${msg}${details}`);
+}
+
+/**
+ * Waits for a value to strictly equal an expected value.
+ */
+export async function waitForConditionEquals<T>(
+    getter: () => T | Promise<T>,
+    expected: T,
+    optionsOrTimeout?: WaitOptions | number,
+    interval?: number,
+    message?: string
+): Promise<T> {
+    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    if (!options.message) {
+        options.message = `Expected value to equal ${JSON.stringify(expected)}`;
+    }
+    return waitFor(getter, val => val === expected, options);
+}
+
+/**
+ * Waits for a value to NOT equal an expected value.
+ */
+export async function waitForConditionNotEquals<T>(
+    getter: () => T | Promise<T>,
+    notExpected: T,
+    optionsOrTimeout?: WaitOptions | number,
+    interval?: number,
+    message?: string
+): Promise<T> {
+    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    if (!options.message) {
+        options.message = `Expected value to NOT equal ${JSON.stringify(notExpected)}`;
+    }
+    return waitFor(getter, val => val !== notExpected, options);
+}
+
+/**
+ * Waits for a numeric value to be greater than a limit.
+ */
+export async function waitForConditionGreaterThan(
+    getter: () => number | Promise<number>,
+    limit: number,
+    optionsOrTimeout?: WaitOptions | number,
+    interval?: number,
+    message?: string
+): Promise<number> {
+    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    if (!options.message) {
+        options.message = `Expected value > ${limit}`;
+    }
+    return waitFor(getter, val => val > limit, options);
+}
+
+/**
+ * Waits for a numeric value to be less than a limit.
+ */
+export async function waitForConditionLessThan(
+    getter: () => number | Promise<number>,
+    limit: number,
+    optionsOrTimeout?: WaitOptions | number,
+    interval?: number,
+    message?: string
+): Promise<number> {
+    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    if (!options.message) {
+        options.message = `Expected value < ${limit}`;
+    }
+    return waitFor(getter, val => val < limit, options);
+}
+
+/**
+ * Waits for a value to be truthy (!!value === true).
+ */
+export async function waitForConditionTruthy<T>(
+    getter: () => T | Promise<T>,
+    optionsOrTimeout?: WaitOptions | number,
+    interval?: number,
+    message?: string
+): Promise<T> {
+    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    if (!options.message) {
+        options.message = `Expected value to be truthy`;
+    }
+    return waitFor(getter, val => !!val, options);
+}
+
+/**
+ * Generic predicate wait (similar to old waitForCondition but with options object support)
+ * DEPRECATED: Prefer specific helpers for better error messaging.
+ */
+export async function waitForCondition(
+    predicate: () => boolean | Promise<boolean>,
+    timeout?: number,
+    interval?: number,
+    message?: string
+): Promise<void> {
+    await waitFor(predicate, val => !!val, { timeout, interval, message });
+}
+
+// Helper to handle mixed argument styles for backward compatibility ease
+function normalizeOptions(
+    optionsOrTimeout?: WaitOptions | number,
+    interval?: number,
+    message?: string
+): WaitOptions {
+    if (typeof optionsOrTimeout === 'number') {
+        return {
+            timeout: optionsOrTimeout,
+            interval,
+            message
+        };
+    }
+    return optionsOrTimeout || {};
 }

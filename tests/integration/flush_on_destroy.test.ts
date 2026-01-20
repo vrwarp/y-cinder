@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator'; // Assuming these exist from reading previous tests
-import { waitForCondition } from '../utils/wait';
+
 import { getDocs, collection, query, orderBy } from '@firebase/firestore';
 
 describe('FireProvider Destroy Flush (Emulator)', () => {

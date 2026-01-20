@@ -14,7 +14,7 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { doc, setDoc, collection, addDoc, serverTimestamp, Bytes } from 'firebase/firestore';
-import { waitForCondition } from '../utils/wait';
+import { waitForConditionEquals, waitForConditionTruthy } from '../utils/wait';
 
 describe('FireProvider Comprehensive Integration (Emulator)', () => {
     let app: any;
@@ -73,9 +73,11 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
         const provider = createProvider(testDoc, path);
 
         // Issue 11 Fix: Use waitForCondition instead of fixed timeout
-        await waitForCondition(() => {
-            return testDoc.getText('content').toString() === 'Snapshot+History+Live';
-        }, 10000, 100, 'Tiered storage rehydration should complete');
+        await waitForConditionEquals(
+            () => testDoc.getText('content').toString(),
+            'Snapshot+History+Live',
+            { timeout: 10000, interval: 100, message: 'Tiered storage rehydration should complete' }
+        );
 
         expect(testDoc.getText('content').toString()).toBe('Snapshot+History+Live');
         await provider.destroy();
@@ -156,10 +158,10 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
         await new Promise(r => setTimeout(r, 3000));
 
         let child2: Y.Doc | undefined;
-        await waitForCondition(() => {
+        await waitForConditionTruthy(() => {
             child2 = doc2.getMap('subdocs').get('child-1') as Y.Doc;
             return !!child2;
-        }, 5000, 100, 'Child document should be synced');
+        }, { timeout: 5000, interval: 100, message: 'Child document should be synced' });
 
         expect(child2).toBeDefined();
 
@@ -167,17 +169,19 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
         // await new Promise(r => setTimeout(r, 4000));
 
         let grandChild2: Y.Doc | undefined;
-        await waitForCondition(() => {
+        await waitForConditionTruthy(() => {
             grandChild2 = child2!.getMap('subdocs').get('grandchild-1') as Y.Doc;
             return !!grandChild2;
-        }, 8000, 100, 'Grandchild document should be synced');
+        }, { timeout: 8000, interval: 100, message: 'Grandchild document should be synced' });
 
         expect(grandChild2).toBeDefined();
 
         // Wait for Grandchild content sync
-        await waitForCondition(() => {
-            return grandChild2!.getText('deep').toString() === 'Deep Secret';
-        }, 5000, 100, 'Grandchild content should be synced');
+        await waitForConditionEquals(
+            () => grandChild2!.getText('deep').toString(),
+            'Deep Secret',
+            { timeout: 5000, interval: 100, message: 'Grandchild content should be synced' }
+        );
 
         expect(grandChild2!.getText('deep').toString()).toBe('Deep Secret');
 

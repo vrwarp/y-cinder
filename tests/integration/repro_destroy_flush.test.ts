@@ -16,7 +16,7 @@ import {
     getDocs,
     terminate
 } from '@firebase/firestore';
-import { waitForCondition } from '../utils/wait';
+
 
 const EMULATOR_HOST = '127.0.0.1';
 const FIRESTORE_PORT = 8080;

@@ -33,7 +33,7 @@ vi.mock('@firebase/firestore', async (importOriginal) => {
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
-import { waitForCondition } from '../utils/wait';
+import { waitForConditionEquals } from '../utils/wait';
 
 describe('FireProvider Error Recovery (Emulator)', () => {
     let app: any;
@@ -81,9 +81,11 @@ describe('FireProvider Error Recovery (Emulator)', () => {
 
         // Wait for potential recovery
         try {
-            await waitForCondition(() => {
-                return doc2.getText('content').toString() === 'Critical Data';
-            }, 3000, 100, 'Doc2 should eventually receive data');
+            await waitForConditionEquals(
+                () => doc2.getText('content').toString(),
+                'Critical Data',
+                { timeout: 3000, interval: 100, message: 'Doc2 should eventually receive data' }
+            );
         } catch (e) {
             // Check if it failed
         }

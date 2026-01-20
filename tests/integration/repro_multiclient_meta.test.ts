@@ -18,7 +18,7 @@ import {
     Bytes,
     terminate
 } from '@firebase/firestore';
-import { waitForCondition } from '../utils/wait';
+import { waitForConditionTruthy } from '../utils/wait';
 
 const EMULATOR_HOST = '127.0.0.1';
 const FIRESTORE_PORT = 8080;
@@ -126,10 +126,10 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
         docB.getText('shared').insert(1, 'B');
 
         // Wait for sync
-        await waitForCondition(() => {
+        await waitForConditionTruthy(() => {
             return docA.getText('shared').toString().includes('B') &&
                 docB.getText('shared').toString().includes('A');
-        }, 5000, 100, 'Both clients should see each other changes');
+        }, { timeout: 5000, interval: 100, message: 'Both clients should see each other changes' });
 
         // Provider C joins late
         const docC = new Y.Doc();
@@ -141,10 +141,10 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
             maxWaitTime: 50
         });
 
-        await waitForCondition(() => {
+        await waitForConditionTruthy(() => {
             const text = docC.getText('shared').toString();
             return text.includes('A') && text.includes('B');
-        }, 5000, 100, 'Late joiner should get all updates');
+        }, { timeout: 5000, interval: 100, message: 'Late joiner should get all updates' });
 
         const finalText = docC.getText('shared').toString();
         console.log(`Final text on C: "${finalText}"`);

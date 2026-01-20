@@ -76,16 +76,17 @@ export async function measureClockSkew(
 
         if (data && data.t && typeof data.t.toMillis === 'function') {
             const serverTime = data.t.toMillis();
-            // Fire-and-forget cleanup
-            deleteDoc(ref).catch(() => { });
+            // P1.6 FIX: Cleanup in finally ensures doc removed even on errors
             return serverTime - Date.now();
         }
 
-        deleteDoc(ref).catch(() => { });
         return 0;
     } catch (e) {
         // If we can't write/read, assume 0 skew (best effort)
         return 0;
+    } finally {
+        // P1.6 FIX: Always attempt cleanup to prevent orphaned docs
+        deleteDoc(ref).catch(() => { });
     }
 }
 
@@ -101,6 +102,11 @@ export interface LockConfig {
     uid: string;
     /** Lock time-to-live in milliseconds */
     lockTTL: number;
+    /** 
+     * P0.3 FIX: Pre-measured clock offset to avoid measuring on every lock attempt.
+     * If provided, measureClockSkew is skipped (saves 3 Firestore ops).
+     */
+    cachedClockOffset?: number;
 }
 
 /**
@@ -130,14 +136,16 @@ export interface LockConfig {
  * ```
  */
 export async function acquireLock(config: LockConfig): Promise<boolean> {
-    const { db, path, uid, lockTTL } = config;
+    const { db, path, uid, lockTTL, cachedClockOffset } = config;
 
-    // 1. Calculate Server Time Offset to handle clock skew
-    let serverOffset = 0;
-    try {
-        serverOffset = await measureClockSkew(db, path, uid);
-    } catch (e) {
-        console.warn("Failed to measure clock skew, defaulting to 0:", e);
+    // P0.3 FIX: Use cached offset if provided, otherwise measure (only on first call)
+    let serverOffset = cachedClockOffset ?? 0;
+    if (cachedClockOffset === undefined) {
+        try {
+            serverOffset = await measureClockSkew(db, path, uid);
+        } catch (e) {
+            console.warn("Failed to measure clock skew, defaulting to 0:", e);
+        }
     }
 
     // Estimated Server Time
@@ -212,6 +220,11 @@ export async function releaseLock(config: Pick<LockConfig, 'db' | 'path' | 'uid'
 /**
  * Checks if a lock is currently held and unexpired.
  * 
+ * P1.1 FIX: Uses cachedClockOffset for accurate age calculation on
+ * clients with clock skew. Without offset, the age may be incorrect.
+ * 
+ * Note: This is primarily used for debugging/diagnostics.
+ * 
  * @param config - Lock configuration
  * @returns Object with lock status information
  */
@@ -221,7 +234,7 @@ export async function checkLockStatus(config: LockConfig): Promise<{
     isExpired?: boolean;
     ageMs?: number;
 }> {
-    const { db, path, uid, lockTTL } = config;
+    const { db, path, uid, lockTTL, cachedClockOffset } = config;
     const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
 
     try {
@@ -236,7 +249,9 @@ export async function checkLockStatus(config: LockConfig): Promise<{
             ? data.createdAt.toMillis()
             : 0;
 
-        const ageMs = Date.now() - createdAt;
+        // P1.1 FIX: Use cached clock offset for accurate age calculation
+        const serverNow = Date.now() + (cachedClockOffset ?? 0);
+        const ageMs = serverNow - createdAt;
 
         return {
             exists: true,

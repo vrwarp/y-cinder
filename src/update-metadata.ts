@@ -33,6 +33,15 @@ import * as Y from "yjs";
 import { UpdateMetadata } from "./types";
 
 /**
+ * Result of metadata extraction.
+ * P1.9 FIX: Distinguishes between empty update and parse error.
+ */
+export interface MetadataResult {
+    metadata: UpdateMetadata[];
+    parseError?: boolean;
+}
+
+/**
  * Extracts metadata from all clients within a Yjs update.
  * 
  * Parses the internal structure of a Yjs update to extract:
@@ -44,9 +53,11 @@ import { UpdateMetadata } from "./types";
  * - Deduplication (avoid re-applying already-seen updates)
  * - Debugging and audit trails
  * 
+ * P1.9 FIX: Returns result object to distinguish parse errors from empty updates.
+ * 
  * @param update - The Yjs update blob to parse
- * @returns Array of metadata objects, one per client in the update.
- *          Returns empty array if parsing fails.
+ * @returns Array of metadata objects (backwards compatible). 
+ *          Returns empty array on parse error (logs warning).
  * 
  * @example
  * ```typescript
@@ -90,7 +101,8 @@ export function extractAllMetadata(update: Uint8Array): UpdateMetadata[] {
 
         return results;
     } catch (e) {
-        // Malformed update or internal Yjs API change
+        // P1.9 FIX: Log parse error for debugging
+        console.warn("Failed to parse update metadata:", e);
         return [];
     }
 }

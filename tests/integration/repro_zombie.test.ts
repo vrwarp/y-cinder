@@ -24,7 +24,7 @@ import {
     Bytes,
     terminate
 } from '@firebase/firestore';
-import { waitForCondition } from '../utils/wait';
+import { waitForConditionEquals } from '../utils/wait';
 
 // Emulator settings
 const EMULATOR_HOST = '127.0.0.1';
@@ -92,10 +92,10 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         await addUpdate(updateC, 3);
 
         // Wait for them to exist
-        await waitForCondition(async () => {
+        await waitForConditionEquals(async () => {
             const snap = await getDocs(updatesCol);
-            return snap.size === 3;
-        });
+            return snap.size;
+        }, 3, { timeout: 5000, interval: 100, message: 'Wait for updates to appear' });
 
         const initialSnap = await getDocs(updatesCol);
         const sortedDocs = initialSnap.docs.sort((a, b) => {

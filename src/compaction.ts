@@ -49,6 +49,7 @@ import {
     Timestamp,
 } from "@firebase/firestore";
 import * as Y from "yjs";
+import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
 import { calculateStateVector, wait, calculateBackoff } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
@@ -73,6 +74,8 @@ export interface CompactionContext {
     testHooks?: TestHooks;
     /** Callback when compaction state changes */
     onCompactionStateChange?: (isCompacting: boolean) => void;
+    /** P0.3 FIX: Cached clock offset to pass to locking */
+    cachedClockOffset?: number;
 }
 
 /**
@@ -121,10 +124,11 @@ export async function compact(
     ctx: CompactionContext,
     attempt: number = 1
 ): Promise<CompactionResult> {
-    const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange } = ctx;
+    const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange, cachedClockOffset } = ctx;
 
     // 1. Distributed Gate: Try to become the Leader
-    const hasLock = await acquireLock({ db, path, uid, lockTTL });
+    // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
+    const hasLock = await acquireLock({ db, path, uid, lockTTL, cachedClockOffset });
     if (!hasLock) {
         return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
     }
@@ -342,10 +346,16 @@ function compactToHistory(params: {
         const segmentId = Math.random().toString(36).substring(2);
         const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
 
+        // P1.2 FIX: Calculate and store stateVector for efficient sync redundancy checks
+        const tempDoc = new Y.Doc();
+        Y.applyUpdate(tempDoc, pendingMerge);
+        const stateVector = toBase64(Y.encodeStateVector(tempDoc));
+
         transaction.set(historyRef, {
             segment: Bytes.fromUint8Array(pendingMerge),
             startTime: updatesToProcess[0].createdAt,
             endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
+            stateVector, // P1.2 FIX: Pre-computed stateVector
         });
 
         for (const item of updatesToProcess) {

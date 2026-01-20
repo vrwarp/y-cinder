@@ -11,8 +11,12 @@ vi.mock('@firebase/firestore', () => ({
     query: vi.fn(),
     orderBy: vi.fn(),
     limit: vi.fn(),
+    startAfter: vi.fn(),
+    limitToLast: vi.fn(),
     getDocs: vi.fn(() => Promise.resolve({ docs: [], empty: true, forEach: () => { } })),
-    getDoc: vi.fn(() => Promise.resolve({ exists: () => false })),
+    getDoc: vi.fn(() => Promise.resolve({ exists: () => false, data: () => ({ t: { toMillis: () => Date.now() } }) })),
+    setDoc: vi.fn(() => Promise.resolve()),
+    deleteDoc: vi.fn(() => Promise.resolve()),
     onSnapshot: vi.fn(() => vi.fn()), // Returns unsubscribe fn
     addDoc: vi.fn(),
     writeBatch: vi.fn(() => ({ commit: vi.fn() })),
@@ -46,9 +50,8 @@ describe('FireProvider', () => {
     it('should initialize and start sync', async () => {
         const provider = new FireProvider({ firebaseApp, ydoc, path });
 
-        // Sync is async in constructor. Wait for microtasks.
-        await new Promise(resolve => setTimeout(resolve, 0));
-        await new Promise(resolve => setTimeout(resolve, 0)); // Extra wait for chained awaits in sync
+        // Sync is async in constructor. Wait for microtasks and clock skew measurement.
+        await new Promise(resolve => setTimeout(resolve, 50));
 
         expect(firestore.getFirestore).toHaveBeenCalledWith(firebaseApp);
         // Sync should trigger getDoc (base) and getDocs (history) and onSnapshot (updates)
@@ -86,9 +89,8 @@ describe('FireProvider', () => {
         const provider = new FireProvider({ firebaseApp, ydoc, path, maxUpdatesThreshold: 5, compactionProbability: 1 });
         const compactSpy = vi.spyOn(provider, 'compact');
 
-        // Wait for sync to reach onSnapshot subscribe
-        await new Promise(resolve => setTimeout(resolve, 0));
-        await new Promise(resolve => setTimeout(resolve, 0));
+        // Wait for sync to reach onSnapshot subscribe (includes clock skew measurement)
+        await new Promise(resolve => setTimeout(resolve, 50));
 
         // Mock onSnapshot callback
         const onSnapshotMock = firestore.onSnapshot as any;

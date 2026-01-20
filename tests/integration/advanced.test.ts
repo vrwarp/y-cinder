@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
-import { waitForCondition } from '../utils/wait';
+import { waitForConditionTruthy } from '../utils/wait';
 
 describe('FireProvider Advanced Integration (Emulator)', () => {
     let app: any;
@@ -99,8 +99,8 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
             c.doc.getText('content').insert(0, `Client${idx}`);
         });
 
-        // Wait for convergence using waitForCondition
-        await waitForCondition(async () => {
+        // Wait for convergence using waitForConditionTruthy
+        await waitForConditionTruthy(async () => {
             const firstContent = clients[0].doc.getText('content').toString();
             if (firstContent.length < numClients * 'Client0'.length) return false;
 
@@ -110,7 +110,7 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
                 }
             }
             return true;
-        }, 15000, 100, 'Clients did not converge');
+        }, { timeout: 15000, interval: 100, message: 'Clients did not converge' });
 
         const finalContent = clients[0].doc.getText('content').toString();
         expect(finalContent.length).toBe(numClients * 'Client0'.length);

@@ -31,10 +31,11 @@ import {
   FIREBASE_ORIGINS,
   FIRESTORE_PATHS,
 } from "./types";
-import { debounce, generateSessionId } from "./utils";
+import { debounce, generateSessionId, calculateBackoff } from "./utils";
 import { extractAllMetadata, aggregateMetadata } from "./update-metadata";
 import { performInitialSync, createUpdateListener, SyncContext } from "./sync";
 import { compact, CompactionContext } from "./compaction";
+import { measureClockSkew } from "./locking";
 import {
   handleSubdocs as handleSubdocsEvent,
   destroyAllSubdocs,
@@ -103,6 +104,14 @@ export class FireProvider extends ObservableV2<any> {
   private _unsubscribeUpdates: Unsubscribe | null = null;
   private _debouncedSave: () => void;
   private _isDestroyed = false;
+  /** P0.3 FIX: Cached clock offset to avoid measuring on every lock attempt */
+  private _cachedClockOffset: number | undefined = undefined;
+  /** P0.5 FIX: Flag to prevent race condition during save */
+  private _isSaving = false;
+  /** P1.4 FIX: Sync retry counter for exponential backoff */
+  private _syncRetryCount = 0;
+  /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
+  private _debounceTimerId: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: FireProviderConfig) {
     super();
@@ -135,15 +144,32 @@ export class FireProvider extends ObservableV2<any> {
     this.compactionLimit = compactionLimit;
     this._testHooks = testHooks;
 
-    // Setup debounced save
-    this._debouncedSave = debounce(this.saveToFirestore.bind(this), this.maxWaitTime);
+    // P1.8 FIX: Validate path format
+    if (!path || path.includes('//') || path.startsWith('/') || path.endsWith('/')) {
+      throw new Error(`Invalid Firestore path: '${path}'. Path must not be empty, start/end with '/', or contain '//'`);
+    }
+
+    // P1.5 FIX: Setup debounced save with timer tracking
+    this._debouncedSave = () => {
+      if (this._debounceTimerId) {
+        clearTimeout(this._debounceTimerId);
+      }
+      this._debounceTimerId = setTimeout(() => {
+        this._debounceTimerId = null;
+        this.saveToFirestore();
+      }, this.maxWaitTime);
+    };
 
     // Attach document event handlers
     this.doc.on('update', this.handleUpdate);
     this.doc.on('subdocs', this.handleSubdocs);
 
     // Start synchronization
-    this.sync();
+    this.sync().catch(err => {
+      // P1.7: errors during initial sync are handled by retry logic in sync()
+      // but we catch here to prevent unhandled promise rejection
+      console.debug('Initial sync handled error:', err);
+    });
   }
 
   // --- Public API ---
@@ -176,6 +202,8 @@ export class FireProvider extends ObservableV2<any> {
       onCompactionStateChange: (isCompacting) => {
         this._isCompacting = isCompacting;
       },
+      // P0.3 FIX: Pass cached clock offset to avoid re-measuring
+      cachedClockOffset: this._cachedClockOffset,
     };
 
     await compact(ctx, attempt);
@@ -189,9 +217,16 @@ export class FireProvider extends ObservableV2<any> {
    * 2. Destroys all subdocument providers
    * 3. Flushes any pending local updates
    * 4. Cleans up event handlers
+   * 5. P1.5: Cancels pending debounce timer
    */
   async destroy(): Promise<void> {
     this._isDestroyed = true;
+
+    // P1.5 FIX: Cancel pending debounce timer
+    if (this._debounceTimerId) {
+      clearTimeout(this._debounceTimerId);
+      this._debounceTimerId = null;
+    }
 
     // Stop listening
     if (this._unsubscribeUpdates) {
@@ -218,8 +253,24 @@ export class FireProvider extends ObservableV2<any> {
 
   /**
    * Performs initial synchronization and sets up real-time listener.
+   * 
+   * P0.7 NOTE: The sync algorithm uses eventual consistency.
+   * Read order (Updates → History → Snapshot) ensures we never miss data,
+   * though we may occasionally apply duplicates (Yjs handles this safely).
    */
   private async sync(): Promise<void> {
+    // P0.3 FIX: Measure clock offset once per session and cache it
+    // This avoids 3 Firestore ops on every lock attempt
+    if (this._cachedClockOffset === undefined) {
+      try {
+        this._cachedClockOffset = await measureClockSkew(this.db, this.path, this.uid);
+        console.log(`Clock offset measured: ${this._cachedClockOffset}ms`);
+      } catch (e) {
+        console.warn("Failed to measure clock skew, using 0:", e);
+        this._cachedClockOffset = 0;
+      }
+    }
+
     const syncCtx: SyncContext = {
       db: this.db,
       path: this.path,
@@ -247,12 +298,14 @@ export class FireProvider extends ObservableV2<any> {
     } catch (err) {
       console.error("Sync failed", err);
 
-      // Retry after delay
+      // P1.4 FIX: Exponential backoff instead of fixed retry
       if (!this._isDestroyed) {
-        console.log("Retrying sync in 5 seconds...");
+        this._syncRetryCount++;
+        const backoffMs = calculateBackoff(this._syncRetryCount);
+        console.log(`Retrying sync in ${backoffMs}ms (attempt ${this._syncRetryCount})...`);
         setTimeout(() => {
           if (!this._isDestroyed) this.sync();
-        }, 5000);
+        }, backoffMs);
       }
     }
   }
@@ -302,10 +355,15 @@ export class FireProvider extends ObservableV2<any> {
 
   /**
    * Saves the cached update to Firestore.
+   * P0.5 FIX: Uses _isSaving flag to prevent race condition where
+   * updates arriving during save could be duplicated or lost.
    */
   private async saveToFirestore(): Promise<void> {
-    if (!this.updateCache) return;
+    if (!this.updateCache || this._isSaving) return;
 
+    this._isSaving = true;
+
+    // Take the current cache for this save operation
     const update = this.updateCache;
     this.updateCache = null;
 
@@ -319,10 +377,17 @@ export class FireProvider extends ObservableV2<any> {
 
     try {
       await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), docData);
+
+      // P0.5 FIX: Check if new updates arrived during save
+      // If so, schedule another save
+      if (this.updateCache) {
+        this._debouncedSave();
+      }
     } catch (err) {
       console.error("Failed to save update to Firestore", err);
 
-      // Recovery: Put back the updates we failed to save
+      // Recovery: Merge back the update we failed to save
+      // with any new updates that arrived during the attempt
       if (this.updateCache) {
         this.updateCache = Y.mergeUpdates([update, this.updateCache]);
       } else {
@@ -331,6 +396,8 @@ export class FireProvider extends ObservableV2<any> {
 
       // Retry
       this._debouncedSave();
+    } finally {
+      this._isSaving = false;
     }
   }
 }

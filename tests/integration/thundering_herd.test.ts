@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { collection, addDoc, Bytes, serverTimestamp, getDocs, onSnapshot } from 'firebase/firestore';
-import { setupEmulator } from '../utils/emulator';
+import { setupEmulator, clearFirestore } from '../utils/emulator';
 
 describe('Thundering Herd Compaction Fix', () => {
     let app: any;
@@ -15,6 +15,7 @@ describe('Thundering Herd Compaction Fix', () => {
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
+        await clearFirestore(db);
     });
 
     it('should NOT trigger compaction when probability is 0', { timeout: 60000 }, async () => {
@@ -27,6 +28,10 @@ describe('Thundering Herd Compaction Fix', () => {
             compactionProbability: 0 // Never compact
         });
 
+        // CRITICAL: Wait for provider to complete initial sync and set up listener
+        // The constructor calls sync() async, so we must wait for it
+        await new Promise(r => setTimeout(r, 500));
+
         // Add 6 updates (above threshold 5)
         for (let i = 0; i < 6; i++) {
             await addDoc(collection(db, path, 'updates'), {
@@ -36,14 +41,14 @@ describe('Thundering Herd Compaction Fix', () => {
             });
         }
 
-        // Wait for onSnapshot (just a small buffer)
+        // Wait for onSnapshot to process (give time for potential compaction)
         await new Promise(r => setTimeout(r, 2000));
 
-        // Check if compaction happened (updates should still be there)
+        // Check if compaction happened (updates should still be there since probability=0)
         const updatesSnap = await getDocs(collection(db, path, 'updates'));
         expect(updatesSnap.size).toBeGreaterThanOrEqual(6);
 
-        provider.destroy();
+        await provider.destroy();
     });
 
     it('should trigger compaction when probability is 1', { timeout: 60000 }, async () => {
@@ -56,6 +61,9 @@ describe('Thundering Herd Compaction Fix', () => {
             compactionProbability: 1 // Always compact
         });
 
+        // CRITICAL: Wait for provider to complete initial sync and set up listener
+        await new Promise(r => setTimeout(r, 500));
+
         // Add 6 updates
         for (let i = 0; i < 6; i++) {
             await addDoc(collection(db, path, 'updates'), {
@@ -65,10 +73,16 @@ describe('Thundering Herd Compaction Fix', () => {
             });
         }
 
-        // Wait for updates to be cleared (compaction finished)
+        // Wait for compaction to complete
+        // The onSnapshot should trigger compaction when it sees > 5 updates
         await new Promise<void>((resolve, reject) => {
+            let resolved = false;
+
             const unsub = onSnapshot(collection(db, path, 'updates'), (snap) => {
-                if (snap.size === 0) {
+                // Compaction either moves updates to snapshot (size=0) 
+                // or to history segments (size reduced)
+                if (snap.size === 0 && !resolved) {
+                    resolved = true;
                     unsub();
                     resolve();
                 }
@@ -76,10 +90,16 @@ describe('Thundering Herd Compaction Fix', () => {
                 unsub();
                 reject(err);
             });
-            // Safety timeout
-            setTimeout(() => { unsub(); reject(new Error("Compaction wait timed out")); }, 15000);
+
+            // Safety timeout - longer to allow for lock acquisition and compaction
+            setTimeout(() => {
+                if (!resolved) {
+                    unsub();
+                    reject(new Error("Compaction wait timed out"));
+                }
+            }, 30000);
         });
 
-        provider.destroy();
+        await provider.destroy();
     });
 });

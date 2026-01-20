@@ -14,17 +14,20 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { collection, getDocs, setDoc, doc, Bytes } from 'firebase/firestore';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { getStableDate } from '../unit/prng';
 
 describe('FireProvider History Compaction', () => {
     let app: any;
     let db: any;
-    const path = `tests/history-compaction-${Date.now()}`;
+    let path: string;
+    let counter = 0;
 
     beforeEach(async () => {
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
         // await clearFirestore(db);
+        path = `tests/history-compaction-${getStableDate()}-${counter++}`;
     });
 
     afterEach(async () => {

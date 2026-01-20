@@ -14,8 +14,8 @@ const { mockControls } = vi.hoisted(() => {
     return { mockControls: { shouldFailAddDoc: false, failCount: 0 } }
 });
 
-vi.mock('@firebase/firestore', async (importOriginal) => {
-    const actual = await importOriginal<any>();
+vi.mock('@firebase/firestore', async (importOriginal: () => Promise<any>) => {
+    const actual = await importOriginal();
     return {
         ...actual,
         addDoc: async (collectionRef: any, data: any) => {
@@ -34,6 +34,7 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { waitForConditionEquals } from '../utils/wait';
+import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Error Recovery (Emulator)', () => {
     let app: any;
@@ -57,8 +58,10 @@ describe('FireProvider Error Recovery (Emulator)', () => {
         mockControls.failCount = 0;
     });
 
+    let counter = 0;
+
     it('should retry saving updates if write fails initially', async () => {
-        const path = `integration-tests/error-recovery-${Date.now()}`;
+        const path = `integration-tests/error-recovery-${getStableDate()}-${counter++}`;
 
         const doc1 = new Y.Doc();
         // Short debounce to trigger saves quickly

@@ -14,6 +14,8 @@ export interface WaitOptions {
     interval?: number;
     /** Error message to show on timeout */
     message?: string;
+    /** Callback to generate additional debug info on failure */
+    onFailure?: () => Promise<string> | string;
 }
 
 const DEFAULT_TIMEOUT = 2000;
@@ -68,6 +70,15 @@ export async function waitFor<T>(
         details = `\nLast error: ${lastError.message}`;
     }
 
+    if (options.onFailure) {
+        try {
+            const extraDebug = await options.onFailure();
+            details += `\nDebug Info: ${extraDebug}`;
+        } catch (e) {
+            details += `\nDebug Info: [Failed to generate: ${e}]`;
+        }
+    }
+
     throw new Error(`${msg}${details}`);
 }
 
@@ -79,9 +90,10 @@ export async function waitForConditionEquals<T>(
     expected: T,
     optionsOrTimeout?: WaitOptions | number,
     interval?: number,
-    message?: string
+    message?: string,
+    onFailure?: () => Promise<string> | string
 ): Promise<T> {
-    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    const options = normalizeOptions(optionsOrTimeout, interval, message, onFailure);
     if (!options.message) {
         options.message = `Expected value to equal ${JSON.stringify(expected)}`;
     }
@@ -96,9 +108,10 @@ export async function waitForConditionNotEquals<T>(
     notExpected: T,
     optionsOrTimeout?: WaitOptions | number,
     interval?: number,
-    message?: string
+    message?: string,
+    onFailure?: () => Promise<string> | string
 ): Promise<T> {
-    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    const options = normalizeOptions(optionsOrTimeout, interval, message, onFailure);
     if (!options.message) {
         options.message = `Expected value to NOT equal ${JSON.stringify(notExpected)}`;
     }
@@ -113,9 +126,10 @@ export async function waitForConditionGreaterThan(
     limit: number,
     optionsOrTimeout?: WaitOptions | number,
     interval?: number,
-    message?: string
+    message?: string,
+    onFailure?: () => Promise<string> | string
 ): Promise<number> {
-    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    const options = normalizeOptions(optionsOrTimeout, interval, message, onFailure);
     if (!options.message) {
         options.message = `Expected value > ${limit}`;
     }
@@ -130,9 +144,10 @@ export async function waitForConditionLessThan(
     limit: number,
     optionsOrTimeout?: WaitOptions | number,
     interval?: number,
-    message?: string
+    message?: string,
+    onFailure?: () => Promise<string> | string
 ): Promise<number> {
-    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    const options = normalizeOptions(optionsOrTimeout, interval, message, onFailure);
     if (!options.message) {
         options.message = `Expected value < ${limit}`;
     }
@@ -146,9 +161,10 @@ export async function waitForConditionTruthy<T>(
     getter: () => T | Promise<T>,
     optionsOrTimeout?: WaitOptions | number,
     interval?: number,
-    message?: string
+    message?: string,
+    onFailure?: () => Promise<string> | string
 ): Promise<T> {
-    const options = normalizeOptions(optionsOrTimeout, interval, message);
+    const options = normalizeOptions(optionsOrTimeout, interval, message, onFailure);
     if (!options.message) {
         options.message = `Expected value to be truthy`;
     }
@@ -172,13 +188,15 @@ export async function waitForCondition(
 function normalizeOptions(
     optionsOrTimeout?: WaitOptions | number,
     interval?: number,
-    message?: string
+    message?: string,
+    onFailure?: () => Promise<string> | string
 ): WaitOptions {
     if (typeof optionsOrTimeout === 'number') {
         return {
             timeout: optionsOrTimeout,
             interval,
-            message
+            message,
+            onFailure
         };
     }
     return optionsOrTimeout || {};

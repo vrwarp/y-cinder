@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator } from '../utils/emulator';
+import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Sync Reproduction', () => {
     let app: any;
@@ -32,7 +33,7 @@ describe('FireProvider Sync Reproduction', () => {
     });
 
     it('should sync existing document content to empty firestore', async () => {
-        const path = `repro-tests/repro-sync-${Date.now()}`;
+        const path = `repro-tests/repro-sync-${getStableDate()}`;
 
         // 1. Create a document and populate it *before* connecting
         const doc1 = new Y.Doc();

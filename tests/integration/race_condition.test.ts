@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator } from '../utils/emulator';
+import { getStableDate } from '../unit/prng';
 import { getDocs, query, collection, orderBy } from '@firebase/firestore';
 
 describe('FireProvider Race Condition Guard (Emulator)', () => {
@@ -24,8 +25,10 @@ describe('FireProvider Race Condition Guard (Emulator)', () => {
         db = setup.db;
     });
 
+    let counter = 0;
+
     it('should not attach listeners if destroyed during sync', async () => {
-        const path = `race-tests/leak-${Date.now()}`;
+        const path = `race-tests/leak-${getStableDate()}-${counter++}`;
         const doc = new Y.Doc();
 
         // We want to simulate destroy() being called while sync() is in flight.
@@ -50,7 +53,7 @@ describe('FireProvider Race Condition Guard (Emulator)', () => {
     });
 
     it('should halt sync() mid-way if destroyed', async () => {
-        const path = `race-tests/halt-${Date.now()}`;
+        const path = `race-tests/halt-${getStableDate()}-${counter++}`;
         const doc = new Y.Doc();
 
         // Mock getDocs to delay it and allow us to destroy mid-flight

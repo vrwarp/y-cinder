@@ -15,16 +15,21 @@ import * as Y from 'yjs';
 import { collection, getDocs, doc, Bytes, setDoc } from 'firebase/firestore';
 import { setupEmulator } from '../utils/emulator';
 import { waitForConditionEquals } from '../utils/wait';
+import { getStableDate, seedFromString } from '../unit/prng';
 
 describe('FireProvider Death Spiral Repro', () => {
     let app: any;
     let db: any;
-    const path = `tests/death-spiral-${Date.now()}`;
+    let path: string;
+    let counter = 0;
 
     beforeEach(async () => {
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
+        const seed = `death-spiral-${getStableDate()}-${counter++}`;
+        const rng = seedFromString(seed);
+        path = `tests/${seed}-${rng.string(5)}`;
     });
 
     it('should fail to compact if updates exceed 1MB without chunking', { timeout: 30000 }, async () => {

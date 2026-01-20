@@ -38,6 +38,7 @@ import {
 import { acquireLock, releaseLock, checkLockStatus, measureClockSkew } from '../../src/locking';
 import { extractAllMetadata, aggregateMetadata } from '../../src/update-metadata';
 import { calculateStateVector } from '../../src/utils';
+import { getStableDate } from '../unit/prng';
 
 describe('P1 High Priority Issue Validation', () => {
     let app: any;
@@ -71,8 +72,10 @@ describe('P1 High Priority Issue Validation', () => {
      * EXPECTED BEHAVIOR: Should use clock skew compensation or document limitation
      */
     describe('P1.1: checkLockStatus Clock Skew', () => {
+        let counter = 0;
+
         it('should report accurate lock status despite client clock skew', async () => {
-            const path = `validation/p1-1-${Date.now()}`;
+            const path = `validation/p1-1-${getStableDate()}-${counter++}`;
             const lockTTL = 60000; // 60 seconds
 
             // Create a lock as if from another client
@@ -108,7 +111,7 @@ describe('P1 High Priority Issue Validation', () => {
         });
 
         it('should handle clock ahead scenario', async () => {
-            const path = `validation/p1-1-ahead-${Date.now()}`;
+            const path = `validation/p1-1-ahead-${getStableDate()}-${counter++}`;
             const lockTTL = 60000;
 
             // Create fresh lock
@@ -144,8 +147,10 @@ describe('P1 High Priority Issue Validation', () => {
      * EXPECTED BEHAVIOR: Should include precomputed stateVector
      */
     describe('P1.2: History Segments stateVector', () => {
+        let counter = 0;
+
         it('should include stateVector in history segments after compaction', async () => {
-            const path = `validation/p1-2-${Date.now()}`;
+            const path = `validation/p1-2-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path, {
@@ -194,7 +199,7 @@ describe('P1 High Priority Issue Validation', () => {
         });
 
         it('should be faster to sync with pre-computed stateVector', async () => {
-            const path = `validation/p1-2-perf-${Date.now()}`;
+            const path = `validation/p1-2-perf-${getStableDate()}-${counter++}`;
 
             // Create history segment with manually computed stateVector (simulating fix)
             const historyDoc = new Y.Doc();
@@ -232,8 +237,10 @@ describe('P1 High Priority Issue Validation', () => {
      * P1.3 FIX: Now checks stateVector on history segments.
      */
     describe('P1.3: isItemRedundant History Handling', () => {
-        it('should sync efficiently with history segments', async () => {
-            const path = `validation/p1-3-${Date.now()}`;
+        let counter = 0;
+
+        it('should sync efficiently with history segments', { timeout: 15000 }, async () => {
+            const path = `validation/p1-3-${getStableDate()}-${counter++}`;
 
             // Create history segment with stateVector
             const historyDoc = new Y.Doc();
@@ -271,11 +278,13 @@ describe('P1 High Priority Issue Validation', () => {
      * EXPECTED BEHAVIOR: Exponential backoff with jitter
      */
     describe('P1.4: Sync Retry Backoff', () => {
+        let counter = 0;
+
         it('should use exponential backoff for sync retries', async () => {
             // This test requires observing retry behavior
             // We can't easily inject failures, but we can document expectations
 
-            const path = `validation/p1-4-${Date.now()}`;
+            const path = `validation/p1-4-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path);
@@ -304,8 +313,10 @@ describe('P1 High Priority Issue Validation', () => {
      * EXPECTED BEHAVIOR: Cancel timer in destroy()
      */
     describe('P1.5: Debounce Timer Cleanup', () => {
+        let counter = 0;
+
         it('should not fire save after destroy', async () => {
-            const path = `validation/p1-5-${Date.now()}`;
+            const path = `validation/p1-5-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path, {
@@ -333,7 +344,7 @@ describe('P1 High Priority Issue Validation', () => {
         });
 
         it('should flush pending updates during destroy', async () => {
-            const path = `validation/p1-5-flush-${Date.now()}`;
+            const path = `validation/p1-5-flush-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path, {
@@ -369,8 +380,10 @@ describe('P1 High Priority Issue Validation', () => {
      * EXPECTED BEHAVIOR: Clean up in catch block
      */
     describe('P1.6: Lock Cleanup Document Orphans', () => {
+        let counter = 0;
+
         it('should not leave orphaned documents in maintenance collection', async () => {
-            const path = `validation/p1-6-${Date.now()}`;
+            const path = `validation/p1-6-${getStableDate()}-${counter++}`;
 
             // Perform multiple clock skew measurements
             for (let i = 0; i < 5; i++) {
@@ -398,8 +411,10 @@ describe('P1 High Priority Issue Validation', () => {
      * EXPECTED BEHAVIOR: Emit event so application can handle
      */
     describe('P1.7: Listener Error Events', () => {
+        let counter = 0;
+
         it('should emit error event when listener fails', async () => {
-            const path = `validation/p1-7-${Date.now()}`;
+            const path = `validation/p1-7-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path);

@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator'; // Assuming these exist from reading previous tests
+import { getStableDate } from '../unit/prng';
 
 import { getDocs, collection, query, orderBy } from '@firebase/firestore';
 
@@ -34,8 +35,10 @@ describe('FireProvider Destroy Flush (Emulator)', () => {
         db = setup.db;
     });
 
+    let counter = 0;
+
     it('should flush pending updates on destroy', async () => {
-        const path = `integration-tests/flush-destroy-${Date.now()}`;
+        const path = `integration-tests/flush-destroy-${getStableDate()}-${counter++}`;
         const doc = new Y.Doc();
         // Long debounce to ensure it doesn't auto-save before we destroy
         const provider = createProvider(doc, path, { maxWaitTime: 1000 });

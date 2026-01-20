@@ -16,6 +16,7 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { waitForConditionEquals } from '../utils/wait';
+import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Integration (Emulator)', () => {
     let app: any;
@@ -42,8 +43,10 @@ describe('FireProvider Integration (Emulator)', () => {
         // await clearFirestore(db);
     });
 
+    let counter = 0;
+
     it('should sync updates between two clients', async () => {
-        const path = `integration-tests/sync-${Date.now()}`;
+        const path = `integration-tests/sync-${getStableDate()}-${counter++}`;
 
         const doc1 = new Y.Doc();
         const provider1 = createProvider(doc1, path, { maxWaitTime: 10 });
@@ -68,7 +71,7 @@ describe('FireProvider Integration (Emulator)', () => {
     });
 
     it('should persist data after restart', async () => {
-        const path = `integration-tests/persistence-${Date.now()}`;
+        const path = `integration-tests/persistence-${getStableDate()}-${counter++}`;
 
         const doc1 = new Y.Doc();
         const provider1 = createProvider(doc1, path, { maxWaitTime: 10 });
@@ -96,7 +99,7 @@ describe('FireProvider Integration (Emulator)', () => {
     });
 
     it('should perform compaction on emulator', { timeout: 15000 }, async () => {
-        const path = `integration-tests/compaction-${Date.now()}`;
+        const path = `integration-tests/compaction-${getStableDate()}-${counter++}`;
         const doc = new Y.Doc();
         // Low threshold to force compaction
         const provider = createProvider(doc, path, { maxUpdatesThreshold: 2, maxWaitTime: 5 });

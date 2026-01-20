@@ -25,6 +25,7 @@ import {
     terminate
 } from '@firebase/firestore';
 import { waitForConditionEquals } from '../utils/wait';
+import { getStableDate } from '../unit/prng';
 
 // Emulator settings
 const EMULATOR_HOST = '127.0.0.1';
@@ -36,9 +37,11 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
     let db: any;
     let provider: FireProvider;
     let ydoc: Y.Doc;
-    const path = `tests/repro_zombie_${Date.now()}`;
+    let path: string;
+    let counter = 0;
 
     beforeEach(async () => {
+        path = `tests/repro_zombie_${getStableDate()}-${counter++}`;
         app = initializeApp({ projectId: PROJECT_ID });
         db = getFirestore(app);
         connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);

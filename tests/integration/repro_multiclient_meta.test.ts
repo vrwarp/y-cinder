@@ -19,6 +19,7 @@ import {
     terminate
 } from '@firebase/firestore';
 import { waitForConditionTruthy } from '../utils/wait';
+import { seedFromString, getStableDate } from '../unit/prng';
 
 const EMULATOR_HOST = '127.0.0.1';
 const FIRESTORE_PORT = 8080;
@@ -27,12 +28,22 @@ const PROJECT_ID = 'demo-test';
 describe('Issue 3: Multi-Client Metadata Handling', () => {
     let app: any;
     let db: any;
-    const path = `tests/multiclient-meta-${Date.now()}`;
+    let path: string;
+    let counter = 0;
+
+    let seed: string;
+    let rng: any;
 
     beforeEach(async () => {
-        app = initializeApp({ projectId: PROJECT_ID }, `app-${Date.now()}-${Math.random()}`);
+        seed = `multiclient-meta-${getStableDate()}-${counter++}`;
+        // console.log(`Test Seed: ${seed}`);
+        rng = seedFromString(seed);
+
+        app = initializeApp({ projectId: PROJECT_ID }, `app-${seed}-${rng.string(5)}`);
         db = getFirestore(app);
         connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
+
+        path = `tests/${seed}`;
     });
 
     afterEach(async () => {
@@ -95,7 +106,7 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
     });
 
     it('should correctly filter updates when metadata tracks all clients', async () => {
-        const path2 = `tests/multiclient-filter-${Date.now()}`;
+        const path2 = `tests/multiclient-filter-${seed}`;
 
         // Setup: Provider A has made changes
         const docA = new Y.Doc();

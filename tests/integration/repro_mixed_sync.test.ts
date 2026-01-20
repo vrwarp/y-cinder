@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator } from '../utils/emulator';
+import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Sync Reproduction (Non-Empty)', () => {
     let app: any;
@@ -32,8 +33,10 @@ describe('FireProvider Sync Reproduction (Non-Empty)', () => {
         db = setup.db;
     });
 
+    let counter = 0;
+
     it('should sync local content even if remote is not empty', async () => {
-        const path = `repro-tests/mixed-sync-${Date.now()}`;
+        const path = `repro-tests/mixed-sync-${getStableDate()}-${counter++}`;
 
         // 1. Initialize Firestore with some data ("Hello")
         const doc1 = new Y.Doc();

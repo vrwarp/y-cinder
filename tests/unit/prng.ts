@@ -151,3 +151,12 @@ export function seedFromString(str: string): SeededRandom {
     }
     return new SeededRandom(Math.abs(hash) || 1);
 }
+
+/**
+ * Returns a stable date string (YYYY-MM-DD) for use in deterministic seeds.
+ * 
+ * @returns Date string in ISO format (e.g., "2024-01-20")
+ */
+export function getStableDate(): string {
+    return new Date().toISOString().split('T')[0];
+}

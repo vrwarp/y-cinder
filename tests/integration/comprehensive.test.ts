@@ -15,6 +15,7 @@ import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { doc, setDoc, collection, addDoc, serverTimestamp, Bytes } from 'firebase/firestore';
 import { waitForConditionEquals, waitForConditionTruthy } from '../utils/wait';
+import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Comprehensive Integration (Emulator)', () => {
     let app: any;
@@ -35,8 +36,10 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
         db = setup.db;
     });
 
+    let counter = 0;
+
     it('should rehydrate from Full Tiered Storage (Snapshot + History + Updates)', async () => {
-        const path = `integration-tests/tiered-${Date.now()}`;
+        const path = `integration-tests/tiered-${getStableDate()}-${counter++}`;
 
         // 1. Seed Snapshot
         const validDoc = new Y.Doc();
@@ -84,7 +87,7 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
     }, 20000);
 
     it('should fallback to History Segment when Snapshot is too large (Compaction Level 2)', async () => {
-        const path = `integration-tests/compaction-l2-${Date.now()}`;
+        const path = `integration-tests/compaction-l2-${getStableDate()}-${counter++}`;
 
         // 1. Seed a "Large" Snapshot (mock by checking logic, or actually blobs)
         // FireProvider checks size < 900KB.
@@ -124,7 +127,7 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
     }, 30000); // larger timeout for big payload
 
     it('should sync deep recursion (Root -> Child -> Grandchild)', async () => {
-        const path = `integration-tests/deep-recursion-${Date.now()}`;
+        const path = `integration-tests/deep-recursion-${getStableDate()}-${counter++}`;
 
         const doc1 = new Y.Doc();
         const provider1 = createProvider(doc1, path);
@@ -190,7 +193,7 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
     }, 20000);
 
     it('should handle large payloads gracefully (reject or error)', async () => {
-        const path = `integration-tests/large-payload-${Date.now()}`;
+        const path = `integration-tests/large-payload-${getStableDate()}-${counter++}`;
         const doc1 = new Y.Doc();
         const provider = createProvider(doc1, path);
 

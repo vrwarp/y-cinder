@@ -14,6 +14,7 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { waitForConditionTruthy } from '../utils/wait';
+import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Advanced Integration (Emulator)', () => {
     let app: any;
@@ -36,8 +37,10 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
         await clearFirestore(db);
     });
 
+    let counter = 0;
+
     it('should sync subdocuments recursively', async () => {
-        const path = `integration-tests/subdocs-${Date.now()}`;
+        const path = `integration-tests/subdocs-${getStableDate()}-${counter++}`;
 
         // Client 1 setup
         const doc1 = new Y.Doc();
@@ -83,7 +86,7 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
     }, 20000);
 
     it('should handle concurrent edits from multiple clients', async () => {
-        const path = `integration-tests/concurrency-${Date.now()}`;
+        const path = `integration-tests/concurrency-${getStableDate()}-${counter++}`;
         const numClients = 3;
         const clients = [];
 

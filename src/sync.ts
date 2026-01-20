@@ -97,6 +97,8 @@ export interface SyncResult {
     updatesApplied: number;
     /** Whether local updates were pushed */
     localUpdatesPushed: boolean;
+    /** The last document observed during sync, used as a cursor for the listener */
+    lastSyncedDoc: QueryDocumentSnapshot | null;
 }
 
 /**
@@ -173,7 +175,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const updatesSnap = await getDocs(updatesQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false };
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null };
 
             if (updatesSnap.empty) {
                 hasMoreUpdates = false;
@@ -209,7 +211,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const historySnap = await getDocs(historyQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false };
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null };
 
             if (historySnap.empty) {
                 hasMoreHistory = false;
@@ -229,7 +231,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // 3. Fetch Base Snapshot (Tier 1) - single document, no pagination needed
         const mainRef = doc(db, path);
         const mainSnap = await getDoc(mainRef);
-        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false };
+        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null };
 
         if (mainSnap.exists()) {
             const data = mainSnap.data();
@@ -281,14 +283,15 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             localUpdatesPushed = true;
         }
 
-        return { success: true, updatesApplied, localUpdatesPushed };
+        return { success: true, updatesApplied, localUpdatesPushed, lastSyncedDoc: lastUpdateDoc };
     } catch (err) {
         console.error("Sync failed", err);
         return {
             success: false,
             error: err instanceof Error ? err : new Error(String(err)),
             updatesApplied: 0,
-            localUpdatesPushed: false
+            localUpdatesPushed: false,
+            lastSyncedDoc: null
         };
     }
 }
@@ -301,18 +304,31 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
  * tracked; older updates were already processed during initial sync.
  * 
  * @param ctx - Sync context
+ * @param startAfterDoc - Optional cursor to start listening from (prevents gaps)
  * @returns Unsubscribe function
  */
-export function createUpdateListener(ctx: SyncContext): Unsubscribe {
+export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocumentSnapshot | null = null): Unsubscribe {
     const { db, path, doc: ydoc, uid, maxUpdatesThreshold, compactionProbability, onCompactionNeeded, onListenerError, isDestroyed } = ctx;
 
-    // P0.2 FIX: Use limitToLast to prevent loading all docs into memory
-    // We only care about NEW updates arriving after initial sync
-    const liveUpdatesQ = query(
-        collection(db, path, FIRESTORE_PATHS.UPDATES),
-        orderBy('createdAt', 'asc'),
-        limitToLast(DEFAULTS.REALTIME_LIMIT)
-    );
+    let liveUpdatesQ;
+
+    if (startAfterDoc) {
+        // P1.9 FIX: Continue exactly where sync left off to prevent "Sync Gap"
+        liveUpdatesQ = query(
+            collection(db, path, FIRESTORE_PATHS.UPDATES),
+            orderBy('createdAt', 'asc'),
+            startAfter(startAfterDoc)
+        );
+    } else {
+        // Fallback for fresh docs (or rely on sync to have found nothing)
+        // If sync found nothing, we start from the beginning.
+        // P0.2 NOTE: Removed limitToLast because we assume initial sync caught everything up to "now"
+        // or there was nothing. If there was nothing, we want everything new.
+        liveUpdatesQ = query(
+            collection(db, path, FIRESTORE_PATHS.UPDATES),
+            orderBy('createdAt', 'asc')
+        );
+    }
 
     return onSnapshot(liveUpdatesQ, (snapshot) => {
         // Check for compaction trigger based on actual size
@@ -377,7 +393,15 @@ export function createUpdateListener(ctx: SyncContext): Unsubscribe {
  * @param serverSVMap - Map to populate with client -> clock mappings
  */
 function processUpdateMetadata(data: any, serverSVMap: Map<number, number>): void {
-    if (typeof data.clientID === 'number' && typeof data.clockEnd === 'number') {
+    // P1.9 FIX: Use clientIDs array if available
+    if (data.clientIDs && data.clientIDs.length > 0 && typeof data.clockEnd === 'number') {
+        data.clientIDs.forEach((cid: number) => {
+            const current = serverSVMap.get(cid) || 0;
+            if (data.clockEnd > current) {
+                serverSVMap.set(cid, data.clockEnd);
+            }
+        });
+    } else if (typeof data.clientID === 'number' && typeof data.clockEnd === 'number') {
         const current = serverSVMap.get(data.clientID) || 0;
         if (data.clockEnd > current) {
             serverSVMap.set(data.clientID, data.clockEnd);
@@ -489,9 +513,16 @@ function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, number>): 
     }
 
     if (item.type === 'update') {
-        if (item.data.clientID !== undefined && item.data.clockEnd !== undefined) {
-            const localClock = localSVMap.get(item.data.clientID) || 0;
-            return localClock >= item.data.clockEnd;
+        const data = item.data;
+        // P1.9 FIX: Check all client IDs if available
+        if (data.clientIDs && data.clientIDs.length > 0 && typeof data.clockEnd === 'number') {
+            return isUpdateRedundant(localSVMap, data.clientIDs, data.clockEnd);
+        }
+
+        // Fallback to single client ID (backwards compat)
+        if (data.clientID !== undefined && data.clockEnd !== undefined) {
+            const localClock = localSVMap.get(data.clientID) || 0;
+            return localClock >= data.clockEnd;
         }
     }
 

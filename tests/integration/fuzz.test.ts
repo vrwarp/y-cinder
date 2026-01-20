@@ -15,6 +15,7 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { waitForConditionTruthy } from '../utils/wait';
+import { seedFromString, getStableDate } from '../unit/prng';
 
 describe('FireProvider Fuzz Testing (Emulator)', () => {
     let app: any;
@@ -37,10 +38,21 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
     });
 
     it('should converge after random operations', async () => {
-        const path = `integration-tests/fuzz-${Date.now()}`;
+        // Create a deterministic seed based on date
+        const seedValue = `fuzz-${getStableDate()}`;
+        console.log(`Fuzz test seed: "${seedValue}"`);
+        const rng = seedFromString(seedValue);
+
+        const path = `integration-tests/${seedValue}`;
         const numClients = 3;
         const numOps = 100; // Requested high load
-        const clients = [];
+
+        interface Client {
+            doc: Y.Doc;
+            provider: FireProvider;
+            id: number;
+        }
+        const clients: Client[] = [];
 
         // Setup clients
         for (let i = 0; i < numClients; i++) {
@@ -57,15 +69,15 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
             for (const client of clients) {
                 const text = client.doc.getText('content');
                 const len = text.length;
-                const op = ops[Math.floor(Math.random() * ops.length)];
+                const op = rng.choice(ops);
 
                 try {
                     if (op === 'insert') {
-                        const pos = Math.floor(Math.random() * (len + 1));
-                        const char = Math.random().toString(36).substring(2, 3);
+                        const pos = rng.int(0, len);
+                        const char = rng.string(1);
                         text.insert(pos, char);
                     } else if (op === 'delete' && len > 0) {
-                        const pos = Math.floor(Math.random() * len);
+                        const pos = rng.int(0, len - 1);
                         text.delete(pos, 1);
                     }
                 } catch (e) {
@@ -73,7 +85,7 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
                 }
             }
             // Small jitter
-            await new Promise(r => setTimeout(r, Math.random() * 20 + 5)); // Increased jitter to avoid emulator contention
+            await new Promise(r => setTimeout(r, rng.int(5, 25))); // Increased jitter to avoid emulator contention
         }
 
         // Allow settling using waitForConditionTruthy
@@ -85,7 +97,15 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
                 }
             }
             return true;
-        }, { timeout: 60000, interval: 500, message: 'Fuzz test did not converge' });
+        }, {
+            timeout: 60000,
+            interval: 500,
+            message: 'Fuzz test did not converge',
+            onFailure: async () => {
+                const logs = clients.map(c => `Client ${c.id}: "${c.doc.getText('content').toString()}"`);
+                return logs.join('\n');
+            }
+        });
 
         const finalState = clients[0].doc.getText('content').toString();
         console.log(`Fuzz test converged to length: ${finalState.length}`);

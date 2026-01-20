@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
+import { seedFromString, getStableDate } from '../unit/prng';
 import { initializeApp } from '@firebase/app';
 import {
     getFirestore,
@@ -32,12 +33,16 @@ describe('Issue 4: Clock Skew in Distributed Lock', () => {
     let app: any;
     let db: any;
     let path: string;
+    let counter = 0;
 
     beforeEach(async () => {
-        app = initializeApp({ projectId: PROJECT_ID }, `app-${Date.now()}-${Math.random()}`);
+        const seed = `clock-skew-${getStableDate()}-${counter++}`;
+        // console.log(`Test Seed: ${seed}`); // Optional logging to reduce noise
+        const rng = seedFromString(seed);
+        app = initializeApp({ projectId: PROJECT_ID }, `app-${seed}-${rng.string(5)}`);
         db = getFirestore(app);
         connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
-        path = `tests/clock-skew-${Date.now()}`;
+        path = `tests/${seed}`;
     });
 
     afterEach(async () => {

@@ -33,6 +33,7 @@ import {
     query,
     orderBy,
 } from 'firebase/firestore';
+import { getStableDate } from '../unit/prng';
 
 describe('P0 Critical Issue Validation', () => {
     let app: any;
@@ -68,8 +69,10 @@ describe('P0 Critical Issue Validation', () => {
      * Currently SKIPPED because it tests for the fix, not the bug.
      */
     describe('P0.1: Initial Sync Memory (Pagination)', () => {
+        let counter = 0;
+
         it('should not load all updates into memory at once', async () => {
-            const path = `validation/p0-1-${Date.now()}`;
+            const path = `validation/p0-1-${getStableDate()}-${counter++}`;
 
             // Create a large number of update documents
             const numUpdates = 100;
@@ -118,7 +121,7 @@ describe('P0 Critical Issue Validation', () => {
         });
 
         it('should handle thousands of history segments without OOM', async () => {
-            const path = `validation/p0-1-history-${Date.now()}`;
+            const path = `validation/p0-1-history-${getStableDate()}-${counter++}`;
 
             // Create many history segments
             const numSegments = 50;
@@ -156,8 +159,10 @@ describe('P0 Critical Issue Validation', () => {
      * EXPECTED BEHAVIOR: Should use limitToLast or cursor-based approach
      */
     describe('P0.2: Real-time Listener Memory', () => {
+        let counter = 0;
+
         it('should limit initial snapshot size for real-time listener', async () => {
-            const path = `validation/p0-2-${Date.now()}`;
+            const path = `validation/p0-2-${getStableDate()}-${counter++}`;
 
             // Pre-populate with many updates
             for (let i = 0; i < 100; i++) {
@@ -199,8 +204,10 @@ describe('P0 Critical Issue Validation', () => {
      * EXPECTED BEHAVIOR: Should cache clock offset per session
      */
     describe('P0.3: Clock Skew Measurement Caching', () => {
+        let counter = 0;
+
         it('should NOT call measureClockSkew on every lock attempt', async () => {
-            const path = `validation/p0-3-${Date.now()}`;
+            const path = `validation/p0-3-${getStableDate()}-${counter++}`;
 
             // Track Firestore operations
             let maintenanceWrites = 0;
@@ -234,7 +241,7 @@ describe('P0 Critical Issue Validation', () => {
         });
 
         it('should reuse cached clock offset for subsequent lock attempts', async () => {
-            const path = `validation/p0-3-cache-${Date.now()}`;
+            const path = `validation/p0-3-cache-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
 
@@ -277,8 +284,10 @@ describe('P0 Critical Issue Validation', () => {
      * on redundant applies but doesn't change end state.
      */
     describe('P0.4: Stale State Vector During Sync', () => {
+        let counter = 0;
+
         it('should sync content correctly (fix prevents redundant applies)', { timeout: 10000 }, async () => {
-            const path = `validation/p0-4-${Date.now()}`;
+            const path = `validation/p0-4-${getStableDate()}-${counter++}`;
 
             // Create update with content
             const tempDoc = new Y.Doc();
@@ -319,8 +328,10 @@ describe('P0 Critical Issue Validation', () => {
      * EXPECTED BEHAVIOR: Atomic handling of cache during async write
      */
     describe('P0.5: saveToFirestore Race Condition', () => {
+        let counter = 0;
+
         it('should not lose updates arriving during save', { timeout: 15000 }, async () => {
-            const path = `validation/p0-5-${Date.now()}`;
+            const path = `validation/p0-5-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path, {
@@ -358,7 +369,7 @@ describe('P0 Critical Issue Validation', () => {
         });
 
         it('should recover correctly when addDoc fails', async () => {
-            const path = `validation/p0-5-fail-${Date.now()}`;
+            const path = `validation/p0-5-fail-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path, {
@@ -398,8 +409,10 @@ describe('P0 Critical Issue Validation', () => {
      * EXPECTED BEHAVIOR: Promise.allSettled to destroy all subdocs
      */
     describe('P0.6: Subdoc Destruction Failure', () => {
+        let counter = 0;
+
         it('should destroy all subdocs even if one fails', async () => {
-            const path = `validation/p0-6-${Date.now()}`;
+            const path = `validation/p0-6-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path);
@@ -434,8 +447,10 @@ describe('P0 Critical Issue Validation', () => {
      * EXPECTED BEHAVIOR: Either atomic read or documented eventual consistency
      */
     describe('P0.7: Non-Atomic Sync Reads', () => {
+        let counter = 0;
+
         it('should not miss data during concurrent compaction', async () => {
-            const path = `validation/p0-7-${Date.now()}`;
+            const path = `validation/p0-7-${getStableDate()}-${counter++}`;
 
             // Setup: Create update that will be compacted during our sync
             const tempDoc = new Y.Doc();
@@ -466,7 +481,7 @@ describe('P0 Critical Issue Validation', () => {
         });
 
         it('should handle compaction completing between reads', async () => {
-            const path = `validation/p0-7-race-${Date.now()}`;
+            const path = `validation/p0-7-race-${getStableDate()}-${counter++}`;
 
             // This test simulates a race condition scenario
             // In practice, this is hard to reproduce deterministically

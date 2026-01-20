@@ -16,19 +16,24 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { collection, addDoc, Bytes, serverTimestamp, getDocs, doc, setDoc, getDoc, runTransaction, Timestamp } from 'firebase/firestore';
 import { setupEmulator } from '../utils/emulator';
+import { seedFromString, getStableDate } from '../unit/prng';
 
 describe('Distributed Compaction Lock', () => {
     let app: any;
     let db: any;
     let path: string;
     let mainProvider: FireProvider;
+    let counter = 0;
 
     beforeEach(async () => {
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
         // Unique path for each test
-        path = `tests/dist-lock-${Date.now()}-${Math.random().toString(36).substring(2)}`;
+        const seed = `dist-lock-${getStableDate()}-${counter++}`;
+        // console.log(`Test Seed: ${seed}`);
+        const rng = seedFromString(seed);
+        path = `tests/${seed}-${rng.string(5)}`;
     });
 
     afterEach(() => {

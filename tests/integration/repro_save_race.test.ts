@@ -18,8 +18,8 @@ const { mockControls } = vi.hoisted(() => {
     }
 });
 
-vi.mock('@firebase/firestore', async (importOriginal) => {
-    const actual = await importOriginal<any>();
+vi.mock('@firebase/firestore', async (importOriginal: () => Promise<any>) => {
+    const actual = await importOriginal();
     return {
         ...actual,
         addDoc: async (collectionRef: any, data: any) => {
@@ -39,6 +39,7 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
 import { waitForConditionEquals } from '../utils/wait';
+import { getStableDate } from '../unit/prng';
 
 describe('Issue 1: saveToFirestore Race Condition', () => {
     let app: any;
@@ -54,8 +55,10 @@ describe('Issue 1: saveToFirestore Race Condition', () => {
         mockControls.successCount = 0;
     });
 
+    let counter = 0;
+
     it('should NOT lose updates when write fails and new updates arrive during recovery', async () => {
-        const path = `tests/save-race-${Date.now()}`;
+        const path = `tests/save-race-${getStableDate()}-${counter++}`;
 
         const doc1 = new Y.Doc();
         const provider1 = new FireProvider({
@@ -121,7 +124,7 @@ describe('Issue 1: saveToFirestore Race Condition', () => {
     });
 
     it('should handle rapid updates during error recovery window', async () => {
-        const path = `tests/save-race-rapid-${Date.now()}`;
+        const path = `tests/save-race-rapid-${getStableDate()}-${counter++}`;
 
         const doc1 = new Y.Doc();
         const provider1 = new FireProvider({

@@ -15,8 +15,8 @@ const { mockControls } = vi.hoisted(() => {
     }
 });
 
-vi.mock('@firebase/firestore', async (importOriginal) => {
-    const actual = await importOriginal<any>();
+vi.mock('@firebase/firestore', async (importOriginal: () => Promise<any>) => {
+    const actual = await importOriginal();
     return {
         ...actual,
         getDocs: async (query: any) => {
@@ -36,6 +36,7 @@ vi.mock('@firebase/firestore', async (importOriginal) => {
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { getStableDate } from '../unit/prng';
 
 describe('Issue 13: Network Partition During Sync', () => {
     let app: any;
@@ -50,8 +51,10 @@ describe('Issue 13: Network Partition During Sync', () => {
         mockControls.failCount = 0;
     });
 
+    let counter = 0;
+
     it('should recover gracefully from getDocs failure during sync', { timeout: 20000 }, async () => {
-        const path = `tests/network-partition-${Date.now()}`;
+        const path = `tests/network-partition-${getStableDate()}-${counter++}`;
 
         // Create first provider successfully
         const doc1 = new Y.Doc();
@@ -101,7 +104,7 @@ describe('Issue 13: Network Partition During Sync', () => {
     });
 
     it('should not corrupt local state on sync failure', { timeout: 10000 }, async () => {
-        const path = `tests/no-corrupt-${Date.now()}`;
+        const path = `tests/no-corrupt-${getStableDate()}-${counter++}`;
 
         const doc1 = new Y.Doc();
         doc1.getText('local').insert(0, 'LocalData');

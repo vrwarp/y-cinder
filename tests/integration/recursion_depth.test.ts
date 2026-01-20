@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Recursion Depth Guard (Emulator)', () => {
     let app: any;
@@ -25,8 +26,10 @@ describe('FireProvider Recursion Depth Guard (Emulator)', () => {
         await clearFirestore(db);
     });
 
+    let counter = 0;
+
     it('should limit subdocument recursion depth to 50', async () => {
-        const path = `depth-tests/nested-${Date.now()}`;
+        const path = `depth-tests/nested-${getStableDate()}-${counter++}`;
         const rootDoc = new Y.Doc();
         const rootProvider = new FireProvider({
             firebaseApp: app,
@@ -75,7 +78,7 @@ describe('FireProvider Recursion Depth Guard (Emulator)', () => {
         rootProvider.destroy();
     });
     it('should emit connection-error when recursion depth limit is reached', async () => {
-        const path = `depth-tests/signal-${Date.now()}`;
+        const path = `depth-tests/signal-${getStableDate()}-${counter++}`;
         const rootDoc = new Y.Doc();
 
         // Initialize at depth 49
@@ -94,7 +97,7 @@ describe('FireProvider Recursion Depth Guard (Emulator)', () => {
         await new Promise(r => setTimeout(r, 100));
 
         // Get the child provider
-        const childProvider = rootProvider.subProviders.values().next().value;
+        const childProvider = (rootProvider as any).subProviders.values().next().value;
         expect(childProvider).toBeDefined();
         if (!childProvider) return; // TS Guard
         expect(childProvider.depth).toBe(50);

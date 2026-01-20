@@ -301,7 +301,7 @@ export class FireProvider extends ObservableV2<any> {
 
     try {
       // Perform initial sync
-      await performInitialSync(syncCtx);
+      const result = await performInitialSync(syncCtx);
       if (this._isDestroyed) return;
 
       // Cleanup any previous listener
@@ -310,7 +310,8 @@ export class FireProvider extends ObservableV2<any> {
       }
 
       // Setup real-time listener
-      this._unsubscribeUpdates = createUpdateListener(syncCtx);
+      // P1.9 FIX: Pass cursor to prevent gap
+      this._unsubscribeUpdates = createUpdateListener(syncCtx, result.lastSyncedDoc);
 
     } catch (err) {
       console.error("Sync failed", err);

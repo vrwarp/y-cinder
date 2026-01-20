@@ -15,14 +15,19 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { collection, addDoc, Bytes, serverTimestamp, getDocs, onSnapshot } from 'firebase/firestore';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { seedFromString, getStableDate } from '../unit/prng';
 
 describe('Thundering Herd Compaction Fix', () => {
     let app: any;
     let db: any;
     let path: string;
+    let counter = 0;
 
     beforeEach(async () => {
-        path = `tests/thundering-herd-${Date.now()}-${Math.random().toString(36).substring(2)}`;
+        const seed = `thundering-herd-${getStableDate()}-${counter++}`;
+        console.log(`Test Seed: ${seed}`);
+        const rng = seedFromString(seed);
+        path = `tests/${seed}-${rng.string(5)}`;
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;

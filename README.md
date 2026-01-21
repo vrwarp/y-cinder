@@ -125,16 +125,16 @@ y-cinder writes to the following subcollections:
 
 ## Production Readiness
 
-**Evaluation: High**
+**Evaluation: Production Ready (Context Dependent)**
 
-`y-cinder` is designed with production constraints in mind. It addresses the common pitfalls of using Firestore with Yjs (read/write limits, cost explosions) through its tiered architecture.
+`y-cinder` is designed to solve the specific problem of using Firestore as a Yjs backend. It successfully addresses common pitfalls like read/write costs and initial load performance through its tiered architecture.
 
-- **Reliability**: Uses Firestore transactions and distributed locking to ensure data integrity during compaction.
-- **Performance**: Optimized for fast initial loads by reading snapshots and merged history rather than thousands of individual updates.
-- **Stability**: Includes mechanisms like exponential backoff and connection error handling.
-- **Testing**: The codebase includes comprehensive tests and handles edge cases like clock skew and concurrent edits.
+However, users should evaluate their specific constraints:
 
-It is recommended for applications that require robust, scalable real-time collaboration on Firestore.
+- **Latency**: Firestore snapshot listeners typically have higher latency (500ms - 1s) compared to dedicated WebSocket servers (< 50ms). This makes `y-cinder` excellent for collaborative editing (docs, notes) but unsuitable for high-frequency real-time applications like gaming or cursor tracking.
+- **Cost vs. Scale**: While `y-cinder` is highly optimized, every keystroke debounced to a write is still a Firestore operation. Documents with extreme concurrency (50+ active users simultaneously) may still incur significant costs or hit Firestore's write rate limits on specific index ranges.
+- **Client-Side Maintenance**: Compaction tasks are distributed among clients. While this keeps the architecture "serverless," it means active clients must burn some CPU and bandwidth to maintain database health.
+- **Storage Limits**: Firestore has a strict 1MB limit per document. While `y-cinder` chunks history segments, the base "Snapshot" (the latest state of the document) must fit within 1MB. Extremely large documents may hit this hard limit.
 
 ## Contributors
 

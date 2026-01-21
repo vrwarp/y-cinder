@@ -36,14 +36,25 @@ Designed for efficiency and cost-optimization, y-cinder implements a smart tiere
 
 ## Comparison with y-fire
 
-While `y-fire` provides a solid foundation for synchronizing Yjs documents with Firestore, `y-cinder` introduces several architectural enhancements designed for scale and cost control:
+`y-cinder` diverges significantly from `y-fire` in its architectural philosophy. While `y-fire` is a **Hybrid (WebRTC + Firestore)** provider, `y-cinder` is a **Pure Firestore** provider.
 
 | Feature | y-fire | y-cinder |
 | :--- | :--- | :--- |
-| **Storage Strategy** | Typically stores updates in a linear collection or single document. | **Tiered Storage**: Uses Snapshots, History Segments, and Updates. |
-| **Compaction** | Manual or non-existent in base implementation. | **Automatic & Distributed**: Merges updates into history/snapshots automatically using distributed locking. |
-| **Cost** | Costs grow linearly with update frequency and document size. | **Optimized**: Reads/writes are minimized through batching and compaction. |
-| **Scalability** | Good for small to medium documents. | **High**: Handles large document histories efficiently via segmentation. |
+| **Architecture** | **Hybrid P2P**: Uses Firestore for discovery & persistence, WebRTC for real-time updates. | **Serverless**: Uses Firestore for *everything* (discovery, persistence, and real-time sync). |
+| **Real-time Latency** | **Low (< 50ms)**: Peers talk directly via WebRTC. | **Medium (500ms - 1s)**: Updates must travel to Firestore and back to listeners. |
+| **Network Requirements** | **Complex**: Requires open UDP ports, STUN/TURN servers, and NAT traversal. May be blocked by corporate firewalls. | **Simple**: Only requires standard HTTPS access to Google Cloud. Works behind strict firewalls and proxies. |
+| **Statefulness** | **Stateful**: Peers must be online to share latest state efficiently. | **Stateless**: Clients can come and go; state is always durable in the DB. |
+| **Storage Strategy** | Single document (content field) with periodic sync. | **Tiered Storage**: Snapshots, History Segments, and Updates. |
+
+**Choose `y-fire` if:**
+- You need the lowest possible latency (gaming, collaborative drawing).
+- You want to minimize database writes to near-zero during active sessions.
+- You can manage the complexity of WebRTC signaling and TURN servers.
+
+**Choose `y-cinder` if:**
+- You need a stateless, serverless architecture that "just works" (e.g., enterprise environments).
+- You prioritize data durability and history management over sub-100ms latency.
+- You want to avoid the complexity and cost of maintaining STUN/TURN infrastructure.
 
 ## Architecture
 

@@ -37,7 +37,7 @@ export const DEFAULTS = {
     COMPACTION_PROBABILITY: 0.01,
     DEPTH: 0,
     LOCK_TTL: 60000,
-    COMPACTION_LIMIT: 500,
+    COMPACTION_LIMIT: 200, // P0: Reduced from 500 to stay under Firestore 500 op limit
     MAX_SUBDOC_DEPTH: 50,
     TARGET_SNAPSHOT_SIZE: 900000, // 900KB
     MAX_RETRIES: 5,

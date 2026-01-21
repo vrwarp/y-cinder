@@ -60,7 +60,9 @@ export declare class FireProvider extends ObservableV2<any> {
     private readonly depth;
     private readonly lockTTL;
     private readonly _testHooks?;
-    private _unsubscribeUpdates;
+    private _unsubscribers;
+    private _unsubscribeHistory;
+    private _lastHistoryDoc;
     private _debouncedSave;
     private _isDestroyed;
     /** P0.3 FIX: Cached clock offset to avoid measuring on every lock attempt */
@@ -71,6 +73,7 @@ export declare class FireProvider extends ObservableV2<any> {
     private _syncRetryCount;
     /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
     private _debounceTimerId;
+    private _boundBeforeUnload;
     /**
      * Creates a new FireProvider instance.
      *
@@ -118,6 +121,19 @@ export declare class FireProvider extends ObservableV2<any> {
      * Handles subdocument events.
      */
     private handleSubdocs;
+    /**
+     * CRITICAL FIX: Handles beforeunload event to prevent data loss on tab close.
+     *
+     * Uses navigator.sendBeacon for best-effort delivery of pending updates.
+     * sendBeacon is designed for this exact use case - it queues data for
+     * delivery even after the page unloads.
+     *
+     * Limitations:
+     * - sendBeacon payload is limited to ~64KB
+     * - Firestore SDK doesn't support sendBeacon directly, so we encode minimal payload
+     * - This is BEST EFFORT - not guaranteed delivery
+     */
+    private handleBeforeUnload;
     /**
      * Saves the cached update to Firestore.
      * P0.5 FIX: Uses _isSaving flag to prevent race condition where

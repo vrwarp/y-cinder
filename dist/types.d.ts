@@ -107,7 +107,7 @@ export declare const DEFAULTS: {
     readonly COMPACTION_PROBABILITY: 0.01;
     readonly DEPTH: 0;
     readonly LOCK_TTL: 60000;
-    readonly COMPACTION_LIMIT: 500;
+    readonly COMPACTION_LIMIT: 200;
     readonly MAX_SUBDOC_DEPTH: 50;
     readonly TARGET_SNAPSHOT_SIZE: 900000;
     readonly MAX_RETRIES: 5;

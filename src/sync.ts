@@ -99,6 +99,8 @@ export interface SyncResult {
     localUpdatesPushed: boolean;
     /** The last document observed during sync, used as a cursor for the listener */
     lastSyncedDoc: QueryDocumentSnapshot | null;
+    /** The last history document observed during sync, used as a cursor for history listener */
+    lastHistoryDoc: QueryDocumentSnapshot | null;
 }
 
 /**
@@ -175,7 +177,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const updatesSnap = await getDocs(updatesQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null };
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
 
             if (updatesSnap.empty) {
                 hasMoreUpdates = false;
@@ -254,7 +256,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // 3. Fetch Base Snapshot (Tier 1) - single document, no pagination needed
         const mainRef = doc(db, path);
         const mainSnap = await getDoc(mainRef);
-        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null };
+        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
 
         if (mainSnap.exists()) {
             const data = mainSnap.data();

@@ -48,6 +48,7 @@ import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { calculateStateVector, wait, calculateBackoff } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
+import { mergeUpdatesAsync } from "./merge-utils";
 /**
  * Performs tiered compaction of updates.
  *
@@ -179,16 +180,15 @@ function performCompactionTransaction(params) {
                 return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
             }
             // === STEP C: Perform Merge ===
-            const allContent = [];
-            if (baseSnapshot)
-                allContent.push(baseSnapshot);
-            historyToMerge.forEach(h => allContent.push(h.val));
-            updatesToProcess.forEach(u => allContent.push(u.data));
-            const candidate = Y.mergeUpdates(allContent);
+            // CRITICAL FIX: Use async merge to avoid blocking main thread
+            // Note: Inside transaction, this may fall back to sync if worker unavailable
+            // Try to merge everything
+            const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
+            const candidate = yield mergeUpdatesAsync(allContent);
             const sizeInBytes = candidate.byteLength;
-            if (sizeInBytes < DEFAULTS.TARGET_SNAPSHOT_SIZE) {
+            if (candidate.byteLength <= DEFAULTS.TARGET_SNAPSHOT_SIZE) {
                 // Path 1: Compact to Snapshot
-                return compactToSnapshot({
+                return yield compactToSnapshot({
                     transaction,
                     mainRef,
                     candidate,
@@ -199,7 +199,7 @@ function performCompactionTransaction(params) {
             }
             else {
                 // Path 2: Compact to History Segments
-                return compactToHistory({
+                return yield compactToHistory({
                     transaction,
                     db,
                     path,
@@ -232,30 +232,128 @@ function compactToSnapshot(params) {
 }
 /**
  * Compacts updates into history segments (with chunking for large updates).
+ * CRITICAL FIX: Now async to support off-main-thread merge.
  */
 function compactToHistory(params) {
-    const { transaction, db, path, updatesToProcess } = params;
-    if (updatesToProcess.length === 0) {
-        return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
-    }
-    const MAX_SEGMENT_SIZE = DEFAULTS.TARGET_SNAPSHOT_SIZE;
-    // Try merging all first (optimistic)
-    const allUpdates = updatesToProcess.map(u => u.data);
-    const pendingMerge = Y.mergeUpdates(allUpdates);
-    if (pendingMerge.byteLength < MAX_SEGMENT_SIZE) {
-        // Fast path: It fits in one segment
-        const segmentId = Math.random().toString(36).substring(2);
-        const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
-        // P1.2 FIX: Calculate and store stateVector for efficient sync redundancy checks
-        const tempDoc = new Y.Doc();
-        Y.applyUpdate(tempDoc, pendingMerge);
-        const stateVector = toBase64(Y.encodeStateVector(tempDoc));
-        transaction.set(historyRef, {
-            segment: Bytes.fromUint8Array(pendingMerge),
-            startTime: updatesToProcess[0].createdAt,
-            endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
-            stateVector, // P1.2 FIX: Pre-computed stateVector
-        });
+    return __awaiter(this, void 0, void 0, function* () {
+        const { transaction, db, path, updatesToProcess } = params;
+        if (updatesToProcess.length === 0) {
+            return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
+        }
+        const MAX_SEGMENT_SIZE = DEFAULTS.TARGET_SNAPSHOT_SIZE;
+        // Try merging all first (optimistic) - CRITICAL FIX: async merge
+        const allUpdates = updatesToProcess.map(u => u.data);
+        const pendingMerge = yield mergeUpdatesAsync(allUpdates);
+        if (pendingMerge.byteLength < MAX_SEGMENT_SIZE) {
+            // Fast path: It fits in one segment
+            const segmentId = Math.random().toString(36).substring(2);
+            const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
+            // P1.2 FIX: Calculate and store stateVector for efficient sync redundancy checks
+            const tempDoc = new Y.Doc();
+            Y.applyUpdate(tempDoc, pendingMerge);
+            const stateVector = toBase64(Y.encodeStateVector(tempDoc));
+            transaction.set(historyRef, {
+                segment: Bytes.fromUint8Array(pendingMerge),
+                startTime: updatesToProcess[0].createdAt,
+                endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
+                stateVector, // P1.2 FIX: Pre-computed stateVector
+            });
+            for (const item of updatesToProcess) {
+                transaction.delete(item.ref);
+            }
+            return {
+                success: true,
+                type: 'history',
+                updatesCompacted: updatesToProcess.length,
+                historySegmentsMerged: 0,
+            };
+        }
+        // Slow path: Chunk into multiple segments
+        return yield chunkIntoHistorySegments({ transaction, db, path, updatesToProcess, maxSegmentSize: MAX_SEGMENT_SIZE });
+    });
+}
+/**
+ * Chunks updates into multiple history segments when they exceed size limits.
+ *
+ * STRATEGY: We keep adding updates to a batch until the ESTIMATED merged size
+ * would exceed the limit. Then we flush that batch as a segment.
+ *
+ * IMPORTANT: Each segment is independently mergeable because Y.mergeUpdates
+ * combines updates with shared history correctly. The sync will apply segments
+ * in order, building up the state progressively.
+ */
+function chunkIntoHistorySegments(params) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const { transaction, db, path, updatesToProcess, maxSegmentSize } = params;
+        let currentBatch = [];
+        let batchStartIndex = 0;
+        let segmentsCreated = 0;
+        for (let i = 0; i < updatesToProcess.length; i++) {
+            const item = updatesToProcess[i];
+            // Add to current batch
+            currentBatch.push(item.data);
+            // Check if we should flush (estimate by trying merge)
+            // This is expensive but accurate
+            const merged = yield mergeUpdatesAsync(currentBatch);
+            const mergedSize = merged.byteLength;
+            // If we exceed limit and have more than 1 item, flush all but the last
+            if (mergedSize >= maxSegmentSize && currentBatch.length > 1) {
+                // Remove the last item (the one that pushed us over)
+                currentBatch.pop();
+                // Merge the remaining items
+                const segmentData = yield mergeUpdatesAsync(currentBatch);
+                const segmentId = Math.random().toString(36).substring(2);
+                const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
+                // FIX: Calculate and store stateVector for efficient sync redundancy checks
+                const tempDoc = new Y.Doc();
+                Y.applyUpdate(tempDoc, segmentData);
+                const encodedSV = Y.encodeStateVector(tempDoc);
+                // Only store SV if it's not empty (length > 1 or non-zero). 
+                // An empty SV ([0]) implies the updates were not applied (e.g. pending dependencies),
+                // so we shouldn't claim to "know" the state is empty.
+                let stateVector;
+                if (encodedSV.length > 1 || encodedSV[0] !== 0) {
+                    stateVector = toBase64(encodedSV);
+                }
+                const historyData = {
+                    segment: Bytes.fromUint8Array(segmentData),
+                    startTime: updatesToProcess[batchStartIndex].createdAt,
+                    endTime: updatesToProcess[i - 1].createdAt,
+                };
+                if (stateVector) {
+                    historyData.stateVector = stateVector;
+                }
+                transaction.set(historyRef, historyData);
+                segmentsCreated++;
+                // Start new batch with just the current item
+                currentBatch = [item.data];
+                batchStartIndex = i;
+            }
+        }
+        // Flush remaining batch
+        if (currentBatch.length > 0) {
+            const segmentData = yield mergeUpdatesAsync(currentBatch);
+            const segmentId = Math.random().toString(36).substring(2);
+            const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
+            const tempDoc = new Y.Doc();
+            Y.applyUpdate(tempDoc, segmentData);
+            const encodedSV = Y.encodeStateVector(tempDoc);
+            let stateVector;
+            if (encodedSV.length > 1 || encodedSV[0] !== 0) {
+                stateVector = toBase64(encodedSV);
+            }
+            const historyData = {
+                segment: Bytes.fromUint8Array(segmentData),
+                startTime: updatesToProcess[batchStartIndex].createdAt,
+                endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
+            };
+            if (stateVector) {
+                historyData.stateVector = stateVector;
+            }
+            transaction.set(historyRef, historyData);
+            segmentsCreated++;
+        }
+        // Delete all processed updates
         for (const item of updatesToProcess) {
             transaction.delete(item.ref);
         }
@@ -263,66 +361,9 @@ function compactToHistory(params) {
             success: true,
             type: 'history',
             updatesCompacted: updatesToProcess.length,
-            historySegmentsMerged: 0,
+            historySegmentsMerged: segmentsCreated,
         };
-    }
-    // Slow path: Chunk into multiple segments
-    return chunkIntoHistorySegments({ transaction, db, path, updatesToProcess, maxSegmentSize: MAX_SEGMENT_SIZE });
-}
-/**
- * Chunks updates into multiple history segments when they exceed size limits.
- */
-function chunkIntoHistorySegments(params) {
-    const { transaction, db, path, updatesToProcess, maxSegmentSize } = params;
-    let currentBatch = [];
-    let currentBatchSize = 0;
-    let batchStartIndex = 0;
-    let segmentsCreated = 0;
-    for (let i = 0; i < updatesToProcess.length; i++) {
-        const item = updatesToProcess[i];
-        const updateSize = item.data.byteLength;
-        if (currentBatchSize + updateSize > maxSegmentSize && currentBatch.length > 0) {
-            // Flush current batch
-            const mergedBatch = Y.mergeUpdates(currentBatch);
-            const segmentId = Math.random().toString(36).substring(2);
-            const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
-            transaction.set(historyRef, {
-                segment: Bytes.fromUint8Array(mergedBatch),
-                startTime: updatesToProcess[batchStartIndex].createdAt,
-                endTime: updatesToProcess[i - 1].createdAt,
-            });
-            segmentsCreated++;
-            for (let j = batchStartIndex; j < i; j++) {
-                transaction.delete(updatesToProcess[j].ref);
-            }
-            currentBatch = [];
-            currentBatchSize = 0;
-            batchStartIndex = i;
-        }
-        currentBatch.push(item.data);
-        currentBatchSize += updateSize;
-    }
-    // Flush remaining batch
-    if (currentBatch.length > 0) {
-        const mergedBatch = Y.mergeUpdates(currentBatch);
-        const segmentId = Math.random().toString(36).substring(2);
-        const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
-        transaction.set(historyRef, {
-            segment: Bytes.fromUint8Array(mergedBatch),
-            startTime: updatesToProcess[batchStartIndex].createdAt,
-            endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
-        });
-        segmentsCreated++;
-        for (let j = batchStartIndex; j < updatesToProcess.length; j++) {
-            transaction.delete(updatesToProcess[j].ref);
-        }
-    }
-    return {
-        success: true,
-        type: 'history',
-        updatesCompacted: updatesToProcess.length,
-        historySegmentsMerged: segmentsCreated,
-    };
+    });
 }
 /**
  * Handles compaction errors with exponential backoff retry.

@@ -40,7 +40,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-import { onSnapshot, doc, collection, addDoc, Bytes, query, orderBy, getDocs, getDoc, serverTimestamp, limit, startAfter, limitToLast, } from "@firebase/firestore";
+import { onSnapshot, doc, collection, addDoc, Bytes, query, orderBy, getDocs, getDoc, serverTimestamp, limit, startAfter, } from "@firebase/firestore";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import { FIREBASE_ORIGINS, FIRESTORE_PATHS, DEFAULTS, } from "./types";
@@ -100,7 +100,7 @@ export function performInitialSync(ctx) {
                     : query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'), limit(BATCH_SIZE));
                 const updatesSnap = yield getDocs(updatesQ);
                 if (isDestroyed())
-                    return { success: false, updatesApplied: 0, localUpdatesPushed: false };
+                    return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
                 if (updatesSnap.empty) {
                     hasMoreUpdates = false;
                 }
@@ -112,7 +112,16 @@ export function performInitialSync(ctx) {
                             pendingUpdates.push({ type: 'update', data, priority: 3 });
                         }
                     });
-                    lastUpdateDoc = updatesSnap.docs[updatesSnap.docs.length - 1];
+                    // FIX: Verify cursor is committed to avoid "Invalid query" with pending serverTimestamp
+                    let candidateDoc = updatesSnap.docs[updatesSnap.docs.length - 1];
+                    while (candidateDoc && candidateDoc.metadata.hasPendingWrites) {
+                        const idx = updatesSnap.docs.indexOf(candidateDoc);
+                        candidateDoc = idx > 0 ? updatesSnap.docs[idx - 1] : null;
+                    }
+                    // Only update lastUpdateDoc if we found a later committed doc, or if we haven't set one yet
+                    if (candidateDoc) {
+                        lastUpdateDoc = candidateDoc;
+                    }
                     hasMoreUpdates = updatesSnap.docs.length === BATCH_SIZE;
                 }
             }
@@ -125,19 +134,27 @@ export function performInitialSync(ctx) {
                     : query(collection(db, path, FIRESTORE_PATHS.HISTORY), orderBy('startTime', 'asc'), limit(BATCH_SIZE));
                 const historySnap = yield getDocs(historyQ);
                 if (isDestroyed())
-                    return { success: false, updatesApplied: 0, localUpdatesPushed: false };
+                    return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
                 if (historySnap.empty) {
                     hasMoreHistory = false;
                 }
                 else {
                     historySnap.forEach(snap => {
                         const data = snap.data();
-                        if (data) {
+                        if (data && data.segment) {
                             processHistoryMetadata(data, serverSVMap);
                             pendingUpdates.push({ type: 'history', data, priority: 2 });
                         }
                     });
-                    lastHistoryDoc = historySnap.docs[historySnap.docs.length - 1];
+                    // FIX: Verify cursor is committed
+                    let candidateDoc = historySnap.docs[historySnap.docs.length - 1];
+                    while (candidateDoc && candidateDoc.metadata.hasPendingWrites) {
+                        const idx = historySnap.docs.indexOf(candidateDoc);
+                        candidateDoc = idx > 0 ? historySnap.docs[idx - 1] : null;
+                    }
+                    if (candidateDoc) {
+                        lastHistoryDoc = candidateDoc;
+                    }
                     hasMoreHistory = historySnap.docs.length === BATCH_SIZE;
                 }
             }
@@ -145,7 +162,7 @@ export function performInitialSync(ctx) {
             const mainRef = doc(db, path);
             const mainSnap = yield getDoc(mainRef);
             if (isDestroyed())
-                return { success: false, updatesApplied: 0, localUpdatesPushed: false };
+                return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
             if (mainSnap.exists()) {
                 const data = mainSnap.data();
                 if (data) {
@@ -166,9 +183,9 @@ export function performInitialSync(ctx) {
                     const applied = applyItem(item, ydoc);
                     if (applied) {
                         updatesApplied++;
-                        // P0.4 FIX: Refresh localSVMap after applying snapshot
-                        // This prevents redundant processing of history/updates already in snapshot
-                        if (item.type === 'snapshot') {
+                        // P0.4 FIX: Refresh localSVMap after applying snapshot or history
+                        // This prevents redundant processing of history/updates already in snapshot/previous segments
+                        if (item.type === 'snapshot' || item.type === 'history') {
                             localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
                         }
                     }
@@ -185,7 +202,13 @@ export function performInitialSync(ctx) {
                 yield addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
                 localUpdatesPushed = true;
             }
-            return { success: true, updatesApplied, localUpdatesPushed };
+            return {
+                success: true,
+                updatesApplied,
+                localUpdatesPushed,
+                lastSyncedDoc: lastUpdateDoc,
+                lastHistoryDoc
+            };
         }
         catch (err) {
             console.error("Sync failed", err);
@@ -193,7 +216,9 @@ export function performInitialSync(ctx) {
                 success: false,
                 error: err instanceof Error ? err : new Error(String(err)),
                 updatesApplied: 0,
-                localUpdatesPushed: false
+                localUpdatesPushed: false,
+                lastSyncedDoc: null,
+                lastHistoryDoc: null
             };
         }
     });
@@ -206,13 +231,23 @@ export function performInitialSync(ctx) {
  * tracked; older updates were already processed during initial sync.
  *
  * @param ctx - Sync context
+ * @param startAfterDoc - Optional cursor to start listening from (prevents gaps)
  * @returns Unsubscribe function
  */
-export function createUpdateListener(ctx) {
+export function createUpdateListener(ctx, startAfterDoc = null) {
     const { db, path, doc: ydoc, uid, maxUpdatesThreshold, compactionProbability, onCompactionNeeded, onListenerError, isDestroyed } = ctx;
-    // P0.2 FIX: Use limitToLast to prevent loading all docs into memory
-    // We only care about NEW updates arriving after initial sync
-    const liveUpdatesQ = query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'), limitToLast(DEFAULTS.REALTIME_LIMIT));
+    let liveUpdatesQ;
+    if (startAfterDoc) {
+        // P1.9 FIX: Continue exactly where sync left off to prevent "Sync Gap"
+        liveUpdatesQ = query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'), startAfter(startAfterDoc));
+    }
+    else {
+        // Fallback for fresh docs (or rely on sync to have found nothing)
+        // If sync found nothing, we start from the beginning.
+        // P0.2 NOTE: Removed limitToLast because we assume initial sync caught everything up to "now"
+        // or there was nothing. If there was nothing, we want everything new.
+        liveUpdatesQ = query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'));
+    }
     return onSnapshot(liveUpdatesQ, (snapshot) => {
         // Check for compaction trigger based on actual size
         // Note: snapshot.size may be capped by limitToLast, so we check docChanges for additions
@@ -262,6 +297,88 @@ export function createUpdateListener(ctx) {
         }
     });
 }
+/**
+ * Creates a real-time listener for the root snapshot.
+ *
+ * Ensures that if compaction replaces updates with a snapshot, this client
+ * receives the new reference state.
+ */
+export function createSnapshotListener(ctx) {
+    const { db, path, doc: ydoc, onListenerError } = ctx;
+    return onSnapshot(doc(db, path), (snapshot) => {
+        if (!snapshot.exists())
+            return;
+        const data = snapshot.data();
+        if ((data === null || data === void 0 ? void 0 : data.content) && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
+            // Apply snapshot if it's from a remote origin or if we need to sync up
+            try {
+                // We should check redundancy but applying a snapshot is generally safe/idempotent in Yjs
+                // as long as we don't overwrite local pending changes that aren't in the snapshot yet.
+                // However, a snapshot represents valid state at a specific point.
+                // A safer check: if stateVector of snapshot is "ahead" or strictly different?
+                // For now, simpler approach: Apply it. Yjs handles deduplication.
+                const content = data.content.toUint8Array();
+                Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
+            }
+            catch (err) {
+                console.error("Failed to apply snapshot from listener", err);
+            }
+        }
+    }, (error) => {
+        console.error("Snapshot listener failed", error);
+        if (onListenerError)
+            onListenerError(error);
+    });
+}
+/**
+ * Creates a real-time listener for new history segments.
+ *
+ * Uses the last known history document as a cursor to only fetch NEW segments.
+ */
+export function createHistoryListener(ctx, startAfterDoc) {
+    const { db, path, doc: ydoc, onListenerError } = ctx;
+    let q;
+    if (startAfterDoc) {
+        q = query(collection(db, path, FIRESTORE_PATHS.HISTORY), orderBy('startTime', 'asc'), startAfter(startAfterDoc));
+    }
+    else {
+        // If no cursor is available (history was empty during initial sync), 
+        // we listen to the entire history collection.
+        // This ensures we catch any segments that might have been created 
+        // between the initial sync check and the listener registration.
+        // Redundant segments will be filtered out by isItemRedundant() in the callback.
+        q = query(collection(db, path, FIRESTORE_PATHS.HISTORY), orderBy('startTime', 'asc'));
+    }
+    return onSnapshot(q, (snapshot) => {
+        snapshot.docChanges().forEach((change) => {
+            if (change.type === 'added') {
+                const data = change.doc.data();
+                if (data && data.segment) {
+                    try {
+                        // Check redundancy using local state vector
+                        const localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+                        const item = {
+                            type: 'history',
+                            data: data,
+                            priority: 2
+                        };
+                        if (!isItemRedundant(item, localSVMap)) {
+                            // Apply it
+                            Y.applyUpdate(ydoc, data.segment.toUint8Array(), FIREBASE_ORIGINS.HISTORY);
+                        }
+                    }
+                    catch (err) {
+                        console.error("Failed to apply history segment from listener", err);
+                    }
+                }
+            }
+        });
+    }, (error) => {
+        console.error("History listener failed", error);
+        if (onListenerError)
+            onListenerError(error);
+    });
+}
 // --- Helper Functions ---
 /**
  * Extracts and aggregates clock values from an update document into the server state vector.
@@ -271,7 +388,16 @@ export function createUpdateListener(ctx) {
  * @param serverSVMap - Map to populate with client -> clock mappings
  */
 function processUpdateMetadata(data, serverSVMap) {
-    if (typeof data.clientID === 'number' && typeof data.clockEnd === 'number') {
+    // P1.9 FIX: Use clientIDs array if available
+    if (data.clientIDs && data.clientIDs.length > 0 && typeof data.clockEnd === 'number') {
+        data.clientIDs.forEach((cid) => {
+            const current = serverSVMap.get(cid) || 0;
+            if (data.clockEnd > current) {
+                serverSVMap.set(cid, data.clockEnd);
+            }
+        });
+    }
+    else if (typeof data.clientID === 'number' && typeof data.clockEnd === 'number') {
         const current = serverSVMap.get(data.clientID) || 0;
         if (data.clockEnd > current) {
             serverSVMap.set(data.clientID, data.clockEnd);
@@ -385,9 +511,15 @@ function isItemRedundant(item, localSVMap) {
         }
     }
     if (item.type === 'update') {
-        if (item.data.clientID !== undefined && item.data.clockEnd !== undefined) {
-            const localClock = localSVMap.get(item.data.clientID) || 0;
-            return localClock >= item.data.clockEnd;
+        const data = item.data;
+        // P1.9 FIX: Check all client IDs if available
+        if (data.clientIDs && data.clientIDs.length > 0 && typeof data.clockEnd === 'number') {
+            return isUpdateRedundant(localSVMap, data.clientIDs, data.clockEnd);
+        }
+        // Fallback to single client ID (backwards compat)
+        if (data.clientID !== undefined && data.clockEnd !== undefined) {
+            const localClock = localSVMap.get(data.clientID) || 0;
+            return localClock >= data.clockEnd;
         }
     }
     return false;

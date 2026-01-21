@@ -31,7 +31,7 @@
  *
  * @module sync
  */
-import { Firestore, Unsubscribe } from "@firebase/firestore";
+import { Firestore, Unsubscribe, QueryDocumentSnapshot } from "@firebase/firestore";
 import * as Y from "yjs";
 /**
  * Context required for sync operations.
@@ -68,6 +68,10 @@ export interface SyncResult {
     updatesApplied: number;
     /** Whether local updates were pushed */
     localUpdatesPushed: boolean;
+    /** The last document observed during sync, used as a cursor for the listener */
+    lastSyncedDoc: QueryDocumentSnapshot | null;
+    /** The last history document observed during sync, used as a cursor for history listener */
+    lastHistoryDoc: QueryDocumentSnapshot | null;
 }
 /**
  * Performs the initial sync operation.
@@ -115,7 +119,21 @@ export declare function performInitialSync(ctx: SyncContext): Promise<SyncResult
  * tracked; older updates were already processed during initial sync.
  *
  * @param ctx - Sync context
+ * @param startAfterDoc - Optional cursor to start listening from (prevents gaps)
  * @returns Unsubscribe function
  */
-export declare function createUpdateListener(ctx: SyncContext): Unsubscribe;
+export declare function createUpdateListener(ctx: SyncContext, startAfterDoc?: QueryDocumentSnapshot | null): Unsubscribe;
+/**
+ * Creates a real-time listener for the root snapshot.
+ *
+ * Ensures that if compaction replaces updates with a snapshot, this client
+ * receives the new reference state.
+ */
+export declare function createSnapshotListener(ctx: SyncContext): Unsubscribe;
+/**
+ * Creates a real-time listener for new history segments.
+ *
+ * Uses the last known history document as a cursor to only fetch NEW segments.
+ */
+export declare function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocumentSnapshot | null): Unsubscribe;
 //# sourceMappingURL=sync.d.ts.map

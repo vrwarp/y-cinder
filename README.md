@@ -10,18 +10,18 @@ Designed for efficiency and cost-optimization, y-cinder implements a smart tiere
 > [!IMPORTANT]
 > **Built with Google Antigravity**
 >
-> This project leverages **Google Antigravity**, an agentic development platform that brings the IDE into the agent-first era. Antigravity provides a "Mission Control" for managing autonomous agents capable of planning, coding, and verifying complex software tasks.
+> This project is mostly written with **Google Antigravity**, an agentic development platform that brings the IDE into the agent-first era. Antigravity provides a "Mission Control" for managing autonomous agents capable of planning, coding, and verifying complex software tasks.
 
 ## Table of Contents
 
 - [Features](#features)
+- [Comparison with y-fire](#comparison-with-y-fire)
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Usage](#usage)
-  - [Basic Setup](#basic-setup)
-  - [Tiptap Integration](#tiptap-integration)
 - [Configuration](#configuration)
 - [Firestore Rules](#firestore-rules)
+- [Production Readiness](#production-readiness)
 - [Contributors](#contributors)
 - [License](#license)
 
@@ -32,14 +32,37 @@ Designed for efficiency and cost-optimization, y-cinder implements a smart tiere
 - 🧹 **Auto-Compaction**: Automatically merges updates to maintain high read performance.
 - 📦 **Subdocument Support**: Recursive handling of subdocuments within the same provider.
 - ⚡ **Debounced Writes**: Smart buffering of updates to reduce write frequency.
+- 🔒 **Distributed Locking**: Prevents race conditions during compaction.
+
+## Comparison with y-fire
+
+`y-cinder` diverges significantly from `y-fire` in its architectural philosophy. While `y-fire` is a **Hybrid (WebRTC + Firestore)** provider, `y-cinder` is a **Pure Firestore** provider.
+
+| Feature | y-fire | y-cinder |
+| :--- | :--- | :--- |
+| **Architecture** | **Hybrid P2P**: Uses Firestore for discovery & persistence, WebRTC for real-time updates. | **Serverless**: Uses Firestore for *everything* (discovery, persistence, and real-time sync). |
+| **Real-time Latency** | **Low (< 50ms)**: Peers talk directly via WebRTC. | **Medium (500ms - 1s)**: Updates must travel to Firestore and back to listeners. |
+| **Network Requirements** | **Complex**: Requires open UDP ports, STUN/TURN servers, and NAT traversal. May be blocked by corporate firewalls. | **Simple**: Only requires standard HTTPS access to Google Cloud. Works behind strict firewalls and proxies. |
+| **Statefulness** | **Stateful**: Peers must be online to share latest state efficiently. | **Stateless**: Clients can come and go; state is always durable in the DB. |
+| **Storage Strategy** | Single document (content field) with periodic sync. | **Tiered Storage**: Snapshots, History Segments, and Updates. |
+
+**Choose `y-fire` if:**
+- You need the lowest possible latency (gaming, collaborative drawing).
+- You want to minimize database writes to near-zero during active sessions.
+- You can manage the complexity of WebRTC signaling and TURN servers.
+
+**Choose `y-cinder` if:**
+- You need a stateless, serverless architecture that "just works" (e.g., enterprise environments).
+- You prioritize data durability and history management over sub-100ms latency.
+- You want to avoid the complexity and cost of maintaining STUN/TURN infrastructure.
 
 ## Architecture
 
 y-cinder uses a unique tiered storage approach to handle Yjs updates:
 
-1.  **Snapshots**: Base documents containing the full state.
-2.  **History Segments**: Merged batches of updates for efficient retrieval.
-3.  **Updates**: Incremental changes from clients.
+1.  **Snapshots** (Tier 1): Base documents containing the full state, optimized for fast initial load.
+2.  **History Segments** (Tier 2): Merged batches of updates for efficient retrieval and history playback.
+3.  **Updates** (Tier 3): Incremental changes from clients, debounced and batched.
 
 This architecture allows y-cinder to provide fast load times and low latency while keeping Firestore billing in check.
 
@@ -53,8 +76,6 @@ npm install git+https://github.com/vrwarp/y-cinder.git#HEAD
 
 ## Usage
 
-### Basic Setup
-
 Connect your Yjs document to Firestore using the `FireProvider`.
 
 ```typescript
@@ -65,42 +86,18 @@ import { initializeApp } from "firebase/app";
 // Initialize your Firebase app
 const firebaseApp = initializeApp({ /* your config */ });
 
-export const createProvider = (documentPath: string) => {
-  const ydoc = new Y.Doc();
-
-  const provider = new FireProvider({
-    firebaseApp,
-    ydoc,
-    path: documentPath
-  });
-
-  return provider;
-};
-```
-
-### Tiptap Integration
-
-Easily integrate with the Tiptap editor using the Collaboration extension.
-
-```typescript
-import { Editor } from '@tiptap/core';
-import StarterKit from '@tiptap/starter-kit';
-import Collaboration from '@tiptap/extension-collaboration';
-import { createProvider } from './your-provider-setup';
-
-const provider = createProvider("documents/my-doc");
-
-const editor = new Editor({
-  extensions: [
-    StarterKit.configure({
-      // Disable default history to let Yjs handle it
-      history: false,
-    }),
-    Collaboration.configure({
-      document: provider.doc,
-    })
-  ],
+const ydoc = new Y.Doc();
+const provider = new FireProvider({
+  firebaseApp,
+  ydoc,
+  path: "documents/my-doc"
 });
+
+// Use ydoc as usual
+// ...
+
+// When done
+// provider.destroy();
 ```
 
 ## Configuration
@@ -119,6 +116,8 @@ The `FireProvider` constructor accepts the following configuration options:
 
 - **`provider.destroy()`**:
   Stops synchronization and cleans up resources. Call this when the provider is no longer needed (e.g., component unmount) to prevent memory leaks and duplicate connections.
+- **`provider.compact()`**:
+  Manually triggers the compaction process. Usually handled automatically.
 
 ## Firestore Rules
 
@@ -133,21 +132,26 @@ match /path/to/your/document/{document=**} {
 y-cinder writes to the following subcollections:
 - `updates`
 - `history`
-- `subdocs`
+- `subdocs` (if using subdocuments)
+
+## Production Readiness
+
+**Evaluation: Production Ready (Context Dependent)**
+
+`y-cinder` is designed to solve the specific problem of using Firestore as a Yjs backend. It successfully addresses common pitfalls like read/write costs and initial load performance through its tiered architecture.
+
+However, users should evaluate their specific constraints:
+
+- **Latency**: Firestore snapshot listeners typically have higher latency (500ms - 1s) compared to dedicated WebSocket servers (< 50ms). This makes `y-cinder` excellent for collaborative editing (docs, notes) but unsuitable for high-frequency real-time applications like gaming or cursor tracking.
+- **Cost vs. Scale**: While `y-cinder` is highly optimized, every keystroke debounced to a write is still a Firestore operation. Documents with extreme concurrency (50+ active users simultaneously) may still incur significant costs or hit Firestore's write rate limits on specific index ranges.
+- **Client-Side Maintenance**: Compaction tasks are distributed among clients. While this keeps the architecture "serverless," it means active clients must burn some CPU and bandwidth to maintain database health.
+- **Storage Limits**: Firestore has a strict 1MB limit per document. While `y-cinder` chunks history segments, the base "Snapshot" (the latest state of the document) must fit within 1MB. Extremely large documents may hit this hard limit.
 
 ## Contributors
 
-This project is made possible by **[Pod Raven](https://podraven.com)**.
+- **[vrwarp](https://github.com/vrwarp)**
 
-Special thanks to our contributors:
-- **[deathg0d](https://github.com/deathg0d)**
-- **[dorkysamurai](https://github.com/lachana)**
-- **[arbitraryvector](https://x.com/arbitraryvector)**
-- **[Benson Tsai](https://github.com/vrwarp)**
-
-### Follow Us
-- [![X (Twitter)](http://i.imgur.com/wWzX9uB.png) @pod_raven](https://x.com/pod_raven)
-- [![X (Twitter)](http://i.imgur.com/wWzX9uB.png) @arbitraryvector](https://x.com/arbitraryvector)
+Original work by **[podraven](https://github.com/podraven)**.
 
 ## License
 

@@ -187,7 +187,19 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         pendingUpdates.push({ type: 'update', data, priority: 3 });
                     }
                 });
-                lastUpdateDoc = updatesSnap.docs[updatesSnap.docs.length - 1];
+
+                // FIX: Verify cursor is committed to avoid "Invalid query" with pending serverTimestamp
+                let candidateDoc: QueryDocumentSnapshot | null = updatesSnap.docs[updatesSnap.docs.length - 1];
+                while (candidateDoc && candidateDoc.metadata.hasPendingWrites) {
+                    const idx = updatesSnap.docs.indexOf(candidateDoc);
+                    candidateDoc = idx > 0 ? updatesSnap.docs[idx - 1] : null;
+                }
+
+                // Only update lastUpdateDoc if we found a later committed doc, or if we haven't set one yet
+                if (candidateDoc) {
+                    lastUpdateDoc = candidateDoc;
+                }
+
                 hasMoreUpdates = updatesSnap.docs.length === BATCH_SIZE;
             }
         }
@@ -211,19 +223,30 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const historySnap = await getDocs(historyQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null };
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
 
             if (historySnap.empty) {
                 hasMoreHistory = false;
             } else {
                 historySnap.forEach(snap => {
                     const data = snap.data();
-                    if (data) {
+                    if (data && data.segment) {
                         processHistoryMetadata(data, serverSVMap);
                         pendingUpdates.push({ type: 'history', data, priority: 2 });
                     }
                 });
-                lastHistoryDoc = historySnap.docs[historySnap.docs.length - 1];
+
+                // FIX: Verify cursor is committed
+                let candidateDoc: QueryDocumentSnapshot | null = historySnap.docs[historySnap.docs.length - 1];
+                while (candidateDoc && candidateDoc.metadata.hasPendingWrites) {
+                    const idx = historySnap.docs.indexOf(candidateDoc);
+                    candidateDoc = idx > 0 ? historySnap.docs[idx - 1] : null;
+                }
+
+                if (candidateDoc) {
+                    lastHistoryDoc = candidateDoc;
+                }
+
                 hasMoreHistory = historySnap.docs.length === BATCH_SIZE;
             }
         }
@@ -256,9 +279,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 const applied = applyItem(item, ydoc);
                 if (applied) {
                     updatesApplied++;
-                    // P0.4 FIX: Refresh localSVMap after applying snapshot
-                    // This prevents redundant processing of history/updates already in snapshot
-                    if (item.type === 'snapshot') {
+                    // P0.4 FIX: Refresh localSVMap after applying snapshot or history
+                    // This prevents redundant processing of history/updates already in snapshot/previous segments
+                    if (item.type === 'snapshot' || item.type === 'history') {
                         localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
                     }
                 }
@@ -283,7 +306,13 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             localUpdatesPushed = true;
         }
 
-        return { success: true, updatesApplied, localUpdatesPushed, lastSyncedDoc: lastUpdateDoc };
+        return {
+            success: true,
+            updatesApplied,
+            localUpdatesPushed,
+            lastSyncedDoc: lastUpdateDoc,
+            lastHistoryDoc
+        };
     } catch (err) {
         console.error("Sync failed", err);
         return {
@@ -291,7 +320,8 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             error: err instanceof Error ? err : new Error(String(err)),
             updatesApplied: 0,
             localUpdatesPushed: false,
-            lastSyncedDoc: null
+            lastSyncedDoc: null,
+            lastHistoryDoc: null
         };
     }
 }
@@ -380,6 +410,96 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
         if (onListenerError) {
             onListenerError(error);
         }
+    });
+}
+
+/**
+ * Creates a real-time listener for the root snapshot.
+ * 
+ * Ensures that if compaction replaces updates with a snapshot, this client
+ * receives the new reference state.
+ */
+export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
+    const { db, path, doc: ydoc, onListenerError } = ctx;
+
+    return onSnapshot(doc(db, path), (snapshot) => {
+        if (!snapshot.exists()) return;
+
+        const data = snapshot.data();
+        if (data?.content && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
+            // Apply snapshot if it's from a remote origin or if we need to sync up
+            try {
+                // We should check redundancy but applying a snapshot is generally safe/idempotent in Yjs
+                // as long as we don't overwrite local pending changes that aren't in the snapshot yet.
+                // However, a snapshot represents valid state at a specific point.
+                // A safer check: if stateVector of snapshot is "ahead" or strictly different?
+                // For now, simpler approach: Apply it. Yjs handles deduplication.
+                const content = (data.content as Bytes).toUint8Array();
+                Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
+            } catch (err) {
+                console.error("Failed to apply snapshot from listener", err);
+            }
+        }
+    }, (error) => {
+        console.error("Snapshot listener failed", error);
+        if (onListenerError) onListenerError(error);
+    });
+}
+
+/**
+ * Creates a real-time listener for new history segments.
+ * 
+ * Uses the last known history document as a cursor to only fetch NEW segments.
+ */
+export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocumentSnapshot | null): Unsubscribe {
+    const { db, path, doc: ydoc, onListenerError } = ctx;
+
+    let q;
+    if (startAfterDoc) {
+        q = query(
+            collection(db, path, FIRESTORE_PATHS.HISTORY),
+            orderBy('startTime', 'asc'),
+            startAfter(startAfterDoc)
+        );
+    } else {
+        // If no cursor is available (history was empty during initial sync), 
+        // we listen to the entire history collection.
+        // This ensures we catch any segments that might have been created 
+        // between the initial sync check and the listener registration.
+        // Redundant segments will be filtered out by isItemRedundant() in the callback.
+        q = query(
+            collection(db, path, FIRESTORE_PATHS.HISTORY),
+            orderBy('startTime', 'asc')
+        );
+    }
+
+    return onSnapshot(q, (snapshot) => {
+        snapshot.docChanges().forEach((change) => {
+            if (change.type === 'added') {
+                const data = change.doc.data();
+                if (data && data.segment) {
+                    try {
+                        // Check redundancy using local state vector
+                        const localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+                        const item: PendingUpdate = {
+                            type: 'history',
+                            data: data as any,
+                            priority: 2
+                        };
+
+                        if (!isItemRedundant(item, localSVMap)) {
+                            // Apply it
+                            Y.applyUpdate(ydoc, (data.segment as Bytes).toUint8Array(), FIREBASE_ORIGINS.HISTORY);
+                        }
+                    } catch (err) {
+                        console.error("Failed to apply history segment from listener", err);
+                    }
+                }
+            }
+        });
+    }, (error) => {
+        console.error("History listener failed", error);
+        if (onListenerError) onListenerError(error);
     });
 }
 

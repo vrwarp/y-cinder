@@ -19,7 +19,13 @@
  */
 
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getFirestore, connectFirestoreEmulator, terminate, clearIndexedDbPersistence } from "firebase/firestore";
+import {
+    getFirestore,
+    connectFirestoreEmulator,
+    terminate,
+    clearIndexedDbPersistence,
+    setLogLevel,
+} from "firebase/firestore";
 
 /** Project ID for the demo Firebase project (emulator only) */
 const PROJECT_ID = "demo-test-project";
@@ -32,6 +38,37 @@ const FIRESTORE_PORT = 8080;
 
 /** Tracks whether emulator connection has been established (singleton pattern) */
 let emulatorConnected = false;
+
+/** Tracks whether log level has been set */
+let logLevelConfigured = false;
+
+/**
+ * Configure Firestore log level for debugging.
+ * 
+ * Set FIREBASE_LOG_LEVEL environment variable to control logging:
+ * - 'debug': Verbose logging for debugging
+ * - 'error': Only log errors
+ * - 'silent': No logging (default)
+ * 
+ * @example
+ * FIREBASE_LOG_LEVEL=debug npm test
+ */
+function configureLogLevel(): void {
+    if (logLevelConfigured) return;
+    logLevelConfigured = true;
+
+    const logLevel = process.env.FIREBASE_LOG_LEVEL || 'error';
+
+    if (logLevel === 'debug' || logLevel === 'error' || logLevel === 'silent') {
+        setLogLevel(logLevel);
+        if (logLevel === 'debug') {
+            console.log('[Firebase] Log level set to:', logLevel);
+        }
+    } else {
+        // Default to 'error' for cleaner test output
+        setLogLevel('error');
+    }
+}
 
 /**
  * Initializes or retrieves the Firebase app and connects to the Firestore emulator.
@@ -48,6 +85,9 @@ let emulatorConnected = false;
  * ```
  */
 export const setupEmulator = async () => {
+    // Configure logging first
+    configureLogLevel();
+
     let app;
     if (getApps().length > 0) {
         app = getApp();

@@ -58,7 +58,7 @@ describe('FireProvider Fuzz Testing (Emulator)', () => {
         for (let i = 0; i < numClients; i++) {
             const doc = new Y.Doc();
             doc.clientID = i; // Deterministic IDs for debugging if needed
-            const provider = createProvider(doc, path, { maxWaitTime: 5 });
+            const provider = createProvider(doc, path, { maxWaitTime: 50 });
             clients.push({ doc, provider, id: i });
         }
 

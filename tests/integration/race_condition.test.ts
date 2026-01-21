@@ -48,8 +48,10 @@ describe('FireProvider Race Condition Guard (Emulator)', () => {
         await new Promise(r => setTimeout(r, 1000));
 
         // How to verify no listener is attached? 
-        // We can check the internal _unsubscribeUpdates property via casting to any.
-        expect((provider as any)._unsubscribeUpdates).toBeNull();
+        // We can check the internal _unsubscribers array via casting to any.
+        expect((provider as any)._unsubscribers).toHaveLength(0);
+        // Also ensure history listener is null
+        expect((provider as any)._unsubscribeHistory).toBeNull();
     });
 
     it('should halt sync() mid-way if destroyed', async () => {
@@ -68,8 +70,8 @@ describe('FireProvider Race Condition Guard (Emulator)', () => {
 
         provider.destroy();
 
-        // If it halted, _unsubscribeUpdates should be null.
-        // We already checked this in the previous test.
-        expect((provider as any)._unsubscribeUpdates).toBeNull();
+        // If it halted, _unsubscribers should be empty.
+        expect((provider as any)._unsubscribers).toHaveLength(0);
+        expect((provider as any)._unsubscribeHistory).toBeNull();
     });
 });

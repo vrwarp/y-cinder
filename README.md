@@ -10,18 +10,18 @@ Designed for efficiency and cost-optimization, y-cinder implements a smart tiere
 > [!IMPORTANT]
 > **Built with Google Antigravity**
 >
-> This project leverages **Google Antigravity**, an agentic development platform that brings the IDE into the agent-first era. Antigravity provides a "Mission Control" for managing autonomous agents capable of planning, coding, and verifying complex software tasks.
+> This project is mostly written with **Google Antigravity**, an agentic development platform that brings the IDE into the agent-first era. Antigravity provides a "Mission Control" for managing autonomous agents capable of planning, coding, and verifying complex software tasks.
 
 ## Table of Contents
 
 - [Features](#features)
+- [Comparison with y-fire](#comparison-with-y-fire)
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Usage](#usage)
-  - [Basic Setup](#basic-setup)
-  - [Tiptap Integration](#tiptap-integration)
 - [Configuration](#configuration)
 - [Firestore Rules](#firestore-rules)
+- [Production Readiness](#production-readiness)
 - [Contributors](#contributors)
 - [License](#license)
 
@@ -32,14 +32,26 @@ Designed for efficiency and cost-optimization, y-cinder implements a smart tiere
 - 🧹 **Auto-Compaction**: Automatically merges updates to maintain high read performance.
 - 📦 **Subdocument Support**: Recursive handling of subdocuments within the same provider.
 - ⚡ **Debounced Writes**: Smart buffering of updates to reduce write frequency.
+- 🔒 **Distributed Locking**: Prevents race conditions during compaction.
+
+## Comparison with y-fire
+
+While `y-fire` provides a solid foundation for synchronizing Yjs documents with Firestore, `y-cinder` introduces several architectural enhancements designed for scale and cost control:
+
+| Feature | y-fire | y-cinder |
+| :--- | :--- | :--- |
+| **Storage Strategy** | Typically stores updates in a linear collection or single document. | **Tiered Storage**: Uses Snapshots, History Segments, and Updates. |
+| **Compaction** | Manual or non-existent in base implementation. | **Automatic & Distributed**: Merges updates into history/snapshots automatically using distributed locking. |
+| **Cost** | Costs grow linearly with update frequency and document size. | **Optimized**: Reads/writes are minimized through batching and compaction. |
+| **Scalability** | Good for small to medium documents. | **High**: Handles large document histories efficiently via segmentation. |
 
 ## Architecture
 
 y-cinder uses a unique tiered storage approach to handle Yjs updates:
 
-1.  **Snapshots**: Base documents containing the full state.
-2.  **History Segments**: Merged batches of updates for efficient retrieval.
-3.  **Updates**: Incremental changes from clients.
+1.  **Snapshots** (Tier 1): Base documents containing the full state, optimized for fast initial load.
+2.  **History Segments** (Tier 2): Merged batches of updates for efficient retrieval and history playback.
+3.  **Updates** (Tier 3): Incremental changes from clients, debounced and batched.
 
 This architecture allows y-cinder to provide fast load times and low latency while keeping Firestore billing in check.
 
@@ -53,8 +65,6 @@ npm install git+https://github.com/vrwarp/y-cinder.git#HEAD
 
 ## Usage
 
-### Basic Setup
-
 Connect your Yjs document to Firestore using the `FireProvider`.
 
 ```typescript
@@ -65,42 +75,18 @@ import { initializeApp } from "firebase/app";
 // Initialize your Firebase app
 const firebaseApp = initializeApp({ /* your config */ });
 
-export const createProvider = (documentPath: string) => {
-  const ydoc = new Y.Doc();
-
-  const provider = new FireProvider({
-    firebaseApp,
-    ydoc,
-    path: documentPath
-  });
-
-  return provider;
-};
-```
-
-### Tiptap Integration
-
-Easily integrate with the Tiptap editor using the Collaboration extension.
-
-```typescript
-import { Editor } from '@tiptap/core';
-import StarterKit from '@tiptap/starter-kit';
-import Collaboration from '@tiptap/extension-collaboration';
-import { createProvider } from './your-provider-setup';
-
-const provider = createProvider("documents/my-doc");
-
-const editor = new Editor({
-  extensions: [
-    StarterKit.configure({
-      // Disable default history to let Yjs handle it
-      history: false,
-    }),
-    Collaboration.configure({
-      document: provider.doc,
-    })
-  ],
+const ydoc = new Y.Doc();
+const provider = new FireProvider({
+  firebaseApp,
+  ydoc,
+  path: "documents/my-doc"
 });
+
+// Use ydoc as usual
+// ...
+
+// When done
+// provider.destroy();
 ```
 
 ## Configuration
@@ -119,6 +105,8 @@ The `FireProvider` constructor accepts the following configuration options:
 
 - **`provider.destroy()`**:
   Stops synchronization and cleans up resources. Call this when the provider is no longer needed (e.g., component unmount) to prevent memory leaks and duplicate connections.
+- **`provider.compact()`**:
+  Manually triggers the compaction process. Usually handled automatically.
 
 ## Firestore Rules
 
@@ -133,21 +121,26 @@ match /path/to/your/document/{document=**} {
 y-cinder writes to the following subcollections:
 - `updates`
 - `history`
-- `subdocs`
+- `subdocs` (if using subdocuments)
+
+## Production Readiness
+
+**Evaluation: High**
+
+`y-cinder` is designed with production constraints in mind. It addresses the common pitfalls of using Firestore with Yjs (read/write limits, cost explosions) through its tiered architecture.
+
+- **Reliability**: Uses Firestore transactions and distributed locking to ensure data integrity during compaction.
+- **Performance**: Optimized for fast initial loads by reading snapshots and merged history rather than thousands of individual updates.
+- **Stability**: Includes mechanisms like exponential backoff and connection error handling.
+- **Testing**: The codebase includes comprehensive tests and handles edge cases like clock skew and concurrent edits.
+
+It is recommended for applications that require robust, scalable real-time collaboration on Firestore.
 
 ## Contributors
 
-This project is made possible by **[Pod Raven](https://podraven.com)**.
+- **[vrwarp](https://github.com/vrwarp)**
 
-Special thanks to our contributors:
-- **[deathg0d](https://github.com/deathg0d)**
-- **[dorkysamurai](https://github.com/lachana)**
-- **[arbitraryvector](https://x.com/arbitraryvector)**
-- **[Benson Tsai](https://github.com/vrwarp)**
-
-### Follow Us
-- [![X (Twitter)](http://i.imgur.com/wWzX9uB.png) @pod_raven](https://x.com/pod_raven)
-- [![X (Twitter)](http://i.imgur.com/wWzX9uB.png) @arbitraryvector](https://x.com/arbitraryvector)
+Original work by **[podraven](https://github.com/podraven)**.
 
 ## License
 

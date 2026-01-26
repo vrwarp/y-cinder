@@ -1,6 +1,6 @@
 {
   "name": "y-cinder",
-  "version": "3.0.2601202216",
+  "version": "3.0.2601252309",
   "description": "A firebase (firestore) provider for Yjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -34,12 +34,12 @@
   },
   "homepage": "https://github.com/vrwarp/y-cinder#readme",
   "devDependencies": {
-    "firebase-tools": "^12.9.1",
+    "firebase-tools": "^15.4.0",
     "typescript": "^5.3.3",
     "vitest": "^4.0.17"
   },
   "peerDependencies": {
-    "firebase": "^10.7.1",
+    "firebase": "^12.8.0",
     "yjs": "^13.6.12"
   }
 }

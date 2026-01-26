@@ -1,0 +1,1252 @@
+
+> y-cinder@3.0.2601250813 test
+> ./scripts/test.sh
+
+Running all tests...
+i  emulators: Starting emulators: firestore
+i  emulators: Detected demo project ID "demo-test-project", emulated services will use a demo configuration and attempts to access non-emulated services for this project will fail.
+⚠  firestore: Cloud Firestore Emulator does not support multiple databases yet.
+⚠  firestore: Did not find a Cloud Firestore rules file specified in a firebase.json config file.
+⚠  firestore: The emulator will default to allowing all reads and writes. Learn more about this option: https://firebase.google.com/docs/emulator-suite/install_and_configure#security_rules_configuration.
+i  firestore: Firestore Emulator logging to firestore-debug.log
+✔  firestore: Firestore Emulator UI websocket is running on 9150.
+i  Running script: npx vitest run --environment node --no-file-parallelism 
+
+[1m[46m RUN [49m[22m [36mv4.0.17 [39m[90m/Users/btsai/antigravity/y-fire[39m
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mCreating 10 updates of 120000 bytes each...
+Update 0: 120020 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdate 1: 120021 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mClock offset measured: -572ms
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdate 2: 120023 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdate 3: 120023 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdate 4: 120023 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdate 5: 120023 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdate 6: 120023 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdate 7: 120023 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdate 8: 120023 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdate 9: 120023 bytes
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mGenerator doc final length: 1200000
+Triggering compaction...
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mWeb Workers not available - using main thread merge
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mCompaction result: [90mundefined[39m
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mUpdates remaining: 0
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mHistory segments created: 2
+  Segment 9wv9uybp7k5: 840090 bytes, stateVector: present
+  Segment rh8wj3dlmc: 360047 bytes, stateVector: MISSING
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mMain doc: does not exist
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mProvider 1 destroyed, creating provider 2 for sync test...
+Waiting for sync...
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39m  Sync progress: 0/1200000 (0%)
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39mClock offset measured: -19ms
+
+[90mstdout[2m | tests/integration/death_spiral.test.ts[2m > [22m[2mFireProvider Death Spiral Repro[2m > [22m[2mshould fail to compact if updates exceed 1MB without chunking
+[22m[39m  Sync progress: 1200000/1200000 (100%)
+
+ [32m✓[39m tests/integration/death_spiral.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 3363[2mms[22m[39m
+     [33m[2m✓[22m[39m should fail to compact if updates exceed 1MB without chunking [33m 3362[2mms[22m[39m
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mClock offset measured: -29ms
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mClock offset measured: -16ms
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39m[Hook] Simulating failure #1
+
+[90mstderr[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mCompaction failed (attempt 1). Retrying in 247ms... { code: [32m'aborted'[39m, message: [32m'Simulated contention'[39m }
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mStarting compaction (attempt 2)...
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39m[Hook] Simulating failure #2
+
+[90mstderr[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mCompaction failed (attempt 2). Retrying in 498ms... { code: [32m'aborted'[39m, message: [32m'Simulated contention'[39m }
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mStarting compaction (attempt 3)...
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39m[Hook] Allowing transaction to proceed
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mWeb Workers not available - using main thread merge
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mCompacted to Snapshot (Size: 2)
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould actually retry compaction after transient failure
+[22m[39mFail count: 2
+Remaining updates: 0
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mClock offset measured: -16ms
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mClock offset measured: -14ms
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39m[Hook] Failure #1
+
+[90mstderr[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mCompaction failed (attempt 1). Retrying in 229ms... { code: [32m'aborted'[39m, message: [32m'Permanent failure'[39m }
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mStarting compaction (attempt 2)...
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39m[Hook] Failure #2
+
+[90mstderr[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mCompaction failed (attempt 2). Retrying in 450ms... { code: [32m'aborted'[39m, message: [32m'Permanent failure'[39m }
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mStarting compaction (attempt 3)...
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39m[Hook] Failure #3
+
+[90mstderr[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mCompaction failed (attempt 3). Retrying in 847ms... { code: [32m'aborted'[39m, message: [32m'Permanent failure'[39m }
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mStarting compaction (attempt 4)...
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39m[Hook] Failure #4
+
+[90mstderr[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mCompaction failed (attempt 4). Retrying in 1647ms... { code: [32m'aborted'[39m, message: [32m'Permanent failure'[39m }
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mStarting compaction (attempt 5)...
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39m[Hook] Failure #5
+
+[90mstderr[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mCompaction failed permanently. { code: [32m'aborted'[39m, message: [32m'Permanent failure'[39m }
+
+[90mstdout[2m | tests/integration/repro_compaction_retry.test.ts[2m > [22m[2mIssue 2: Compaction Retry Logic[2m > [22m[2mshould eventually give up after MAX_RETRIES
+[22m[39mTotal fail count: 5
+
+ [32m✓[39m tests/integration/repro_compaction_retry.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 19810[2mms[22m[39m
+     [33m[2m✓[22m[39m should actually retry compaction after transient failure [33m 6265[2mms[22m[39m
+     [33m[2m✓[22m[39m should eventually give up after MAX_RETRIES [33m 13544[2mms[22m[39m
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould rehydrate from Full Tiered Storage (Snapshot + History + Updates)
+[22m[39mClock offset measured: -15ms
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould fallback to History Segment when Snapshot is too large (Compaction Level 2)
+[22m[39mClock offset measured: -58ms
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould sync deep recursion (Root -> Child -> Grandchild)
+[22m[39mClock offset measured: -10ms
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould sync deep recursion (Root -> Child -> Grandchild)
+[22m[39mClock offset measured: -6ms
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould sync deep recursion (Root -> Child -> Grandchild)
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould sync deep recursion (Root -> Child -> Grandchild)
+[22m[39mClock offset measured: -10ms
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould sync deep recursion (Root -> Child -> Grandchild)
+[22m[39mClock offset measured: -54ms
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould sync deep recursion (Root -> Child -> Grandchild)
+[22m[39mClock offset measured: -11ms
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould sync deep recursion (Root -> Child -> Grandchild)
+[22m[39mClock offset measured: -25ms
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould handle large payloads gracefully (reject or error)
+[22m[39mClock offset measured: -16ms
+
+[90mstdout[2m | tests/integration/comprehensive.test.ts[2m > [22m[2mFireProvider Comprehensive Integration (Emulator)[2m > [22m[2mshould handle large payloads gracefully (reject or error)
+[22m[39mPushing missing local updates to Firestore.
+
+ [32m✓[39m tests/integration/comprehensive.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 15251[2mms[22m[39m
+     [33m[2m✓[22m[39m should fallback to History Segment when Snapshot is too large (Compaction Level 2) [33m 4310[2mms[22m[39m
+     [33m[2m✓[22m[39m should sync deep recursion (Root -> Child -> Grandchild) [33m 8627[2mms[22m[39m
+     [33m[2m✓[22m[39m should handle large payloads gracefully (reject or error) [33m 2064[2mms[22m[39m
+[90mstdout[2m | tests/integration/network_partition.test.ts[2m > [22m[2mIssue 13: Network Partition During Sync[2m > [22m[2mshould recover gracefully from getDocs failure during sync
+[22m[39mClock offset measured: -36ms
+
+[90mstdout[2m | tests/integration/network_partition.test.ts[2m > [22m[2mIssue 13: Network Partition During Sync[2m > [22m[2mshould recover gracefully from getDocs failure during sync
+[22m[39mClock offset measured: -23ms
+[Mock] Failing getDocs #1
+
+[90mstderr[2m | tests/integration/network_partition.test.ts[2m > [22m[2mIssue 13: Network Partition During Sync[2m > [22m[2mshould recover gracefully from getDocs failure during sync
+[22m[39mSync failed Error: Network partition simulated
+    at getDocs [90m(/Users/btsai/antigravity/y-fire/[39mtests/integration/network_partition.test.ts:29:23[90m)[39m
+    at performInitialSync [90m(/Users/btsai/antigravity/y-fire/[39msrc/sync.ts:179:39[90m)[39m
+    at FireProvider.sync [90m(/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:365:28[90m)[39m
+
+[90mstdout[2m | tests/integration/network_partition.test.ts[2m > [22m[2mIssue 13: Network Partition During Sync[2m > [22m[2mshould recover gracefully from getDocs failure during sync
+[22m[39mFailed getDocs count: 1
+
+[90mstdout[2m | tests/integration/network_partition.test.ts[2m > [22m[2mIssue 13: Network Partition During Sync[2m > [22m[2mshould recover gracefully from getDocs failure during sync
+[22m[39mDoc2 content after partition: "DataBeforePartition"
+
+[90mstdout[2m | tests/integration/network_partition.test.ts[2m > [22m[2mIssue 13: Network Partition During Sync[2m > [22m[2mshould not corrupt local state on sync failure
+[22m[39mClock offset measured: -11ms
+[Mock] Failing getDocs #1
+
+[90mstderr[2m | tests/integration/network_partition.test.ts[2m > [22m[2mIssue 13: Network Partition During Sync[2m > [22m[2mshould not corrupt local state on sync failure
+[22m[39mSync failed Error: Network partition simulated
+    at getDocs [90m(/Users/btsai/antigravity/y-fire/[39mtests/integration/network_partition.test.ts:29:23[90m)[39m
+    at performInitialSync [90m(/Users/btsai/antigravity/y-fire/[39msrc/sync.ts:179:39[90m)[39m
+    at FireProvider.sync [90m(/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:365:28[90m)[39m
+
+ [32m✓[39m tests/integration/network_partition.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 11726[2mms[22m[39m
+     [33m[2m✓[22m[39m should recover gracefully from getDocs failure during sync [33m 9683[2mms[22m[39m
+     [33m[2m✓[22m[39m should not corrupt local state on sync failure [33m 2040[2mms[22m[39m
+[90mstdout[2m | tests/integration/advanced.test.ts[2m > [22m[2mFireProvider Advanced Integration (Emulator)[2m > [22m[2mshould sync subdocuments recursively
+[22m[39mClock offset measured: -27ms
+
+[90mstdout[2m | tests/integration/advanced.test.ts[2m > [22m[2mFireProvider Advanced Integration (Emulator)[2m > [22m[2mshould sync subdocuments recursively
+[22m[39mClock offset measured: -32ms
+
+[90mstdout[2m | tests/integration/advanced.test.ts[2m > [22m[2mFireProvider Advanced Integration (Emulator)[2m > [22m[2mshould sync subdocuments recursively
+[22m[39mClock offset measured: -32ms
+
+[90mstdout[2m | tests/integration/advanced.test.ts[2m > [22m[2mFireProvider Advanced Integration (Emulator)[2m > [22m[2mshould sync subdocuments recursively
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/advanced.test.ts[2m > [22m[2mFireProvider Advanced Integration (Emulator)[2m > [22m[2mshould sync subdocuments recursively
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/advanced.test.ts[2m > [22m[2mFireProvider Advanced Integration (Emulator)[2m > [22m[2mshould sync subdocuments recursively
+[22m[39mClock offset measured: -17ms
+
+[90mstdout[2m | tests/integration/advanced.test.ts[2m > [22m[2mFireProvider Advanced Integration (Emulator)[2m > [22m[2mshould handle concurrent edits from multiple clients
+[22m[39mClock offset measured: -28ms
+
+[90mstdout[2m | tests/integration/advanced.test.ts[2m > [22m[2mFireProvider Advanced Integration (Emulator)[2m > [22m[2mshould handle concurrent edits from multiple clients
+[22m[39mClock offset measured: -26ms
+
+[90mstdout[2m | tests/integration/advanced.test.ts[2m > [22m[2mFireProvider Advanced Integration (Emulator)[2m > [22m[2mshould handle concurrent edits from multiple clients
+[22m[39mClock offset measured: -27ms
+
+ [32m✓[39m tests/integration/advanced.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 10287[2mms[22m[39m
+     [33m[2m✓[22m[39m should sync subdocuments recursively [33m 10149[2mms[22m[39m
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould flush pending updates before destroy completes
+[22m[39mClock offset measured: -25ms
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould flush pending updates before destroy completes
+[22m[39mdestroy() returns promise: true
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould flush pending updates before destroy completes
+[22m[39mUpdates saved: 1
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould flush pending updates before destroy completes
+[22m[39mClock offset measured: -8ms
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould flush pending updates before destroy completes
+[22m[39mRecovered content: "ImportantData"
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould wait for flush even with many pending updates
+[22m[39mClock offset measured: -12ms
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould wait for flush even with many pending updates
+[22m[39mExpected content length: 100
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould wait for flush even with many pending updates
+[22m[39mClock offset measured: -12ms
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould wait for flush even with many pending updates
+[22m[39mActual content length: 100
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould handle destroy called during active write
+[22m[39mClock offset measured: -11ms
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould handle destroy called during active write
+[22m[39mClock offset measured: -7ms
+
+[90mstdout[2m | tests/integration/repro_destroy_flush.test.ts[2m > [22m[2mIssue 5: destroy() Fire-and-Forget Flush[2m > [22m[2mshould handle destroy called during active write
+[22m[39mContent after destroy during write: "Data1Data2"
+
+ [32m✓[39m tests/integration/repro_destroy_flush.test.ts [2m([22m[2m3 tests[22m[2m)[22m[33m 9191[2mms[22m[39m
+     [33m[2m✓[22m[39m should flush pending updates before destroy completes [33m 3040[2mms[22m[39m
+     [33m[2m✓[22m[39m should wait for flush even with many pending updates [33m 3078[2mms[22m[39m
+     [33m[2m✓[22m[39m should handle destroy called during active write [33m 3072[2mms[22m[39m
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.1: Initial Sync Memory (Pagination)[2m > [22m[2mshould not load all updates into memory at once
+[22m[39mClock offset measured: -17ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.1: Initial Sync Memory (Pagination)[2m > [22m[2mshould not load all updates into memory at once
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.1: Initial Sync Memory (Pagination)[2m > [22m[2mshould not load all updates into memory at once
+[22m[39mP0.1: Synced 100 updates
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.1: Initial Sync Memory (Pagination)[2m > [22m[2mshould handle thousands of history segments without OOM
+[22m[39mClock offset measured: -7ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.2: Real-time Listener Memory[2m > [22m[2mshould limit initial snapshot size for real-time listener
+[22m[39mClock offset measured: -6ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould NOT call measureClockSkew on every lock attempt
+[22m[39mClock offset measured: -11ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould NOT call measureClockSkew on every lock attempt
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould NOT call measureClockSkew on every lock attempt
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould NOT call measureClockSkew on every lock attempt
+[22m[39mWeb Workers not available - using main thread merge
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould NOT call measureClockSkew on every lock attempt
+[22m[39mCompacted to Snapshot (Size: 51)
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould NOT call measureClockSkew on every lock attempt
+[22m[39mP0.3: Found 0 maintenance docs (orphaned skew measurements)
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould reuse cached clock offset for subsequent lock attempts
+[22m[39mClock offset measured: -6ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould reuse cached clock offset for subsequent lock attempts
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould reuse cached clock offset for subsequent lock attempts
+[22m[39mCompacted to Snapshot (Size: 2)
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould reuse cached clock offset for subsequent lock attempts
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.3: Clock Skew Measurement Caching[2m > [22m[2mshould reuse cached clock offset for subsequent lock attempts
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.4: Stale State Vector During Sync[2m > [22m[2mshould sync content correctly (fix prevents redundant applies)
+[22m[39mClock offset measured: -5ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.4: Stale State Vector During Sync[2m > [22m[2mshould sync content correctly (fix prevents redundant applies)
+[22m[39mP0.4: Sync completed in 52ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.5: saveToFirestore Race Condition[2m > [22m[2mshould not lose updates arriving during save
+[22m[39mClock offset measured: -5ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.5: saveToFirestore Race Condition[2m > [22m[2mshould not lose updates arriving during save
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.5: saveToFirestore Race Condition[2m > [22m[2mshould not lose updates arriving during save
+[22m[39mClock offset measured: -8ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.5: saveToFirestore Race Condition[2m > [22m[2mshould not lose updates arriving during save
+[22m[39mP0.5: Expected 20 chars, got 20
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.5: saveToFirestore Race Condition[2m > [22m[2mshould recover correctly when addDoc fails
+[22m[39mClock offset measured: -6ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.5: saveToFirestore Race Condition[2m > [22m[2mshould recover correctly when addDoc fails
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.5: saveToFirestore Race Condition[2m > [22m[2mshould recover correctly when addDoc fails
+[22m[39mClock offset measured: -11ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.6: Subdoc Destruction Failure[2m > [22m[2mshould destroy all subdocs even if one fails
+[22m[39mClock offset measured: -7ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.6: Subdoc Destruction Failure[2m > [22m[2mshould destroy all subdocs even if one fails
+[22m[39mClock offset measured: -6ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.6: Subdoc Destruction Failure[2m > [22m[2mshould destroy all subdocs even if one fails
+[22m[39mClock offset measured: -5ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.6: Subdoc Destruction Failure[2m > [22m[2mshould destroy all subdocs even if one fails
+[22m[39mClock offset measured: -11ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.6: Subdoc Destruction Failure[2m > [22m[2mshould destroy all subdocs even if one fails
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.6: Subdoc Destruction Failure[2m > [22m[2mshould destroy all subdocs even if one fails
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.6: Subdoc Destruction Failure[2m > [22m[2mshould destroy all subdocs even if one fails
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.6: Subdoc Destruction Failure[2m > [22m[2mshould destroy all subdocs even if one fails
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.7: Non-Atomic Sync Reads[2m > [22m[2mshould not miss data during concurrent compaction
+[22m[39mClock offset measured: -5ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.7: Non-Atomic Sync Reads[2m > [22m[2mshould not miss data during concurrent compaction
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.7: Non-Atomic Sync Reads[2m > [22m[2mshould handle compaction completing between reads
+[22m[39mClock offset measured: -3ms
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.7: Non-Atomic Sync Reads[2m > [22m[2mshould handle compaction completing between reads
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.7: Non-Atomic Sync Reads[2m > [22m[2mshould handle compaction completing between reads
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.7: Non-Atomic Sync Reads[2m > [22m[2mshould handle compaction completing between reads
+[22m[39mCompacted to Snapshot (Size: 19)
+
+[90mstdout[2m | tests/validation/p0_critical.test.ts[2m > [22m[2mP0 Critical Issue Validation[2m > [22m[2mP0.7: Non-Atomic Sync Reads[2m > [22m[2mshould handle compaction completing between reads
+[22m[39mClock offset measured: -10ms
+
+ [32m✓[39m tests/validation/p0_critical.test.ts [2m([22m[2m11 tests[22m[2m)[22m[33m 5242[2mms[22m[39m
+       [33m[2m✓[22m[39m should not load all updates into memory at once [33m 696[2mms[22m[39m
+       [33m[2m✓[22m[39m should limit initial snapshot size for real-time listener [33m 323[2mms[22m[39m
+       [33m[2m✓[22m[39m should NOT call measureClockSkew on every lock attempt [33m 1039[2mms[22m[39m
+       [33m[2m✓[22m[39m should not lose updates arriving during save [33m 1168[2mms[22m[39m
+       [33m[2m✓[22m[39m should recover correctly when addDoc fails [33m 365[2mms[22m[39m
+       [33m[2m✓[22m[39m should destroy all subdocs even if one fails [33m 517[2mms[22m[39m
+       [33m[2m✓[22m[39m should handle compaction completing between reads [33m 619[2mms[22m[39m
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould not duplicate data if transaction partially fails
+[22m[39mClock offset measured: -24ms
+
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould not duplicate data if transaction partially fails
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould not duplicate data if transaction partially fails
+[22m[39mWeb Workers not available - using main thread merge
+
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould not duplicate data if transaction partially fails
+[22m[39mCompacted to Snapshot (Size: 25)
+
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould not duplicate data if transaction partially fails
+[22m[39mMain doc exists: true
+Updates remaining: 0
+History segments: 0
+
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould maintain data integrity after compaction
+[22m[39mClock offset measured: -10ms
+
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould maintain data integrity after compaction
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould maintain data integrity after compaction
+[22m[39mCompacted to Snapshot (Size: 36)
+
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould maintain data integrity after compaction
+[22m[39mClock offset measured: -10ms
+
+[90mstdout[2m | tests/integration/partial_compaction.test.ts[2m > [22m[2mIssue 12: Partial Compaction Failure[2m > [22m[2mshould maintain data integrity after compaction
+[22m[39mRecovered content: "UniqueContent123"
+
+ [32m✓[39m tests/integration/partial_compaction.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 5379[2mms[22m[39m
+     [33m[2m✓[22m[39m should not duplicate data if transaction partially fails [33m 1301[2mms[22m[39m
+     [33m[2m✓[22m[39m should maintain data integrity after compaction [33m 4077[2mms[22m[39m
+[90mstdout[2m | tests/integration/repro_mixed_sync.test.ts[2m > [22m[2mFireProvider Sync Reproduction (Non-Empty)[2m > [22m[2mshould sync local content even if remote is not empty
+[22m[39mClock offset measured: -22ms
+
+[90mstdout[2m | tests/integration/repro_mixed_sync.test.ts[2m > [22m[2mFireProvider Sync Reproduction (Non-Empty)[2m > [22m[2mshould sync local content even if remote is not empty
+[22m[39mClock offset measured: -17ms
+
+[90mstdout[2m | tests/integration/repro_mixed_sync.test.ts[2m > [22m[2mFireProvider Sync Reproduction (Non-Empty)[2m > [22m[2mshould sync local content even if remote is not empty
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/repro_mixed_sync.test.ts[2m > [22m[2mFireProvider Sync Reproduction (Non-Empty)[2m > [22m[2mshould sync local content even if remote is not empty
+[22m[39mClock offset measured: -15ms
+
+ [32m✓[39m tests/integration/repro_mixed_sync.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 4024[2mms[22m[39m
+     [33m[2m✓[22m[39m should sync local content even if remote is not empty [33m 4022[2mms[22m[39m
+[90mstdout[2m | tests/integration/repro_sync.test.ts[2m > [22m[2mFireProvider Sync Reproduction[2m > [22m[2mshould sync existing document content to empty firestore
+[22m[39mClock offset measured: -20ms
+
+[90mstdout[2m | tests/integration/repro_sync.test.ts[2m > [22m[2mFireProvider Sync Reproduction[2m > [22m[2mshould sync existing document content to empty firestore
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/repro_sync.test.ts[2m > [22m[2mFireProvider Sync Reproduction[2m > [22m[2mshould sync existing document content to empty firestore
+[22m[39mClock offset measured: -16ms
+
+ [32m✓[39m tests/integration/repro_sync.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 4016[2mms[22m[39m
+     [33m[2m✓[22m[39m should sync existing document content to empty firestore [33m 4015[2mms[22m[39m
+[90mstdout[2m | tests/integration/repro_multiclient_meta.test.ts[2m > [22m[2mIssue 3: Multi-Client Metadata Handling[2m > [22m[2mshould sync updates that contain changes from multiple clients
+[22m[39mClock offset measured: -17ms
+
+[90mstdout[2m | tests/integration/repro_multiclient_meta.test.ts[2m > [22m[2mIssue 3: Multi-Client Metadata Handling[2m > [22m[2mshould sync updates that contain changes from multiple clients
+[22m[39mReceiver content: "FromClient1FromClient2"
+
+[90mstdout[2m | tests/integration/repro_multiclient_meta.test.ts[2m > [22m[2mIssue 3: Multi-Client Metadata Handling[2m > [22m[2mshould correctly filter updates when metadata tracks all clients
+[22m[39mClock offset measured: -11ms
+
+[90mstdout[2m | tests/integration/repro_multiclient_meta.test.ts[2m > [22m[2mIssue 3: Multi-Client Metadata Handling[2m > [22m[2mshould correctly filter updates when metadata tracks all clients
+[22m[39mClock offset measured: -22ms
+
+[90mstdout[2m | tests/integration/repro_multiclient_meta.test.ts[2m > [22m[2mIssue 3: Multi-Client Metadata Handling[2m > [22m[2mshould correctly filter updates when metadata tracks all clients
+[22m[39mClock offset measured: -9ms
+
+[90mstdout[2m | tests/integration/repro_multiclient_meta.test.ts[2m > [22m[2mIssue 3: Multi-Client Metadata Handling[2m > [22m[2mshould correctly filter updates when metadata tracks all clients
+[22m[39mFinal text on C: "AB"
+
+ [32m✓[39m tests/integration/repro_multiclient_meta.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 3859[2mms[22m[39m
+     [33m[2m✓[22m[39m should sync updates that contain changes from multiple clients [33m 2140[2mms[22m[39m
+     [33m[2m✓[22m[39m should correctly filter updates when metadata tracks all clients [33m 1717[2mms[22m[39m
+[90mstdout[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould NOT lose updates when write fails and new updates arrive during recovery
+[22m[39mClock offset measured: -20ms
+
+[90mstdout[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould NOT lose updates when write fails and new updates arrive during recovery
+[22m[39mClock offset measured: -24ms
+
+[90mstdout[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould NOT lose updates when write fails and new updates arrive during recovery
+[22m[39m[Mock] Failing addDoc attempt #1
+
+[90mstderr[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould NOT lose updates when write fails and new updates arrive during recovery
+[22m[39mFailed to save update to Firestore Error: Simulated Network Failure
+    at addDoc [90m(/Users/btsai/antigravity/y-fire/[39mtests/integration/repro_save_race.test.ts:30:23[90m)[39m
+    at FireProvider.saveToFirestore [90m(/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:512:13[90m)[39m
+    at Timeout._onTimeout [90m(/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:181:14[90m)[39m
+[90m    at listOnTimeout (node:internal/timers:605:17)[39m
+[90m    at processTimers (node:internal/timers:541:7)[39m
+
+[90mstdout[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould NOT lose updates when write fails and new updates arrive during recovery
+[22m[39mDoc1 text: "FirstSecondThird"
+Doc2 text: "FirstSecondThird"
+addDoc calls: 2, successes: 1
+
+[90mstdout[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould handle rapid updates during error recovery window
+[22m[39mClock offset measured: -7ms
+
+[90mstdout[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould handle rapid updates during error recovery window
+[22m[39mClock offset measured: -11ms
+
+[90mstdout[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould handle rapid updates during error recovery window
+[22m[39m[Mock] Failing addDoc attempt #1
+
+[90mstderr[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould handle rapid updates during error recovery window
+[22m[39mFailed to save update to Firestore Error: Simulated Network Failure
+    at addDoc [90m(/Users/btsai/antigravity/y-fire/[39mtests/integration/repro_save_race.test.ts:30:23[90m)[39m
+    at FireProvider.saveToFirestore [90m(/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:512:13[90m)[39m
+    at Timeout._onTimeout [90m(/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:181:14[90m)[39m
+[90m    at listOnTimeout (node:internal/timers:605:17)[39m
+[90m    at processTimers (node:internal/timers:541:7)[39m
+
+[90mstdout[2m | tests/integration/repro_save_race.test.ts[2m > [22m[2mIssue 1: saveToFirestore Race Condition[2m > [22m[2mshould handle rapid updates during error recovery window
+[22m[39mExpected: "0123456789"
+Actual: "0123456789"
+
+ [32m✓[39m tests/integration/repro_save_race.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 3799[2mms[22m[39m
+     [33m[2m✓[22m[39m should NOT lose updates when write fails and new updates arrive during recovery [33m 1653[2mms[22m[39m
+     [33m[2m✓[22m[39m should handle rapid updates during error recovery window [33m 2145[2mms[22m[39m
+[90mstdout[2m | tests/integration/thundering_herd.test.ts[2m > [22m[2mThundering Herd Compaction Fix[2m > [22m[2mshould NOT trigger compaction when probability is 0
+[22m[39mTest Seed: thundering-herd-2026-01-26-0
+
+[90mstdout[2m | tests/integration/thundering_herd.test.ts[2m > [22m[2mThundering Herd Compaction Fix[2m > [22m[2mshould NOT trigger compaction when probability is 0
+[22m[39mClock offset measured: -17ms
+
+[90mstdout[2m | tests/integration/thundering_herd.test.ts[2m > [22m[2mThundering Herd Compaction Fix[2m > [22m[2mshould trigger compaction when probability is 1
+[22m[39mTest Seed: thundering-herd-2026-01-26-1
+
+[90mstdout[2m | tests/integration/thundering_herd.test.ts[2m > [22m[2mThundering Herd Compaction Fix[2m > [22m[2mshould trigger compaction when probability is 1
+[22m[39mClock offset measured: -7ms
+
+[90mstdout[2m | tests/integration/thundering_herd.test.ts[2m > [22m[2mThundering Herd Compaction Fix[2m > [22m[2mshould trigger compaction when probability is 1
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/thundering_herd.test.ts[2m > [22m[2mThundering Herd Compaction Fix[2m > [22m[2mshould trigger compaction when probability is 1
+[22m[39mWeb Workers not available - using main thread merge
+
+[90mstdout[2m | tests/integration/thundering_herd.test.ts[2m > [22m[2mThundering Herd Compaction Fix[2m > [22m[2mshould trigger compaction when probability is 1
+[22m[39mCompacted to Snapshot (Size: 2)
+
+ [32m✓[39m tests/integration/thundering_herd.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 3272[2mms[22m[39m
+     [33m[2m✓[22m[39m should NOT trigger compaction when probability is 0 [33m 2614[2mms[22m[39m
+     [33m[2m✓[22m[39m should trigger compaction when probability is 1 [33m 657[2mms[22m[39m
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.1: checkLockStatus Clock Skew[2m > [22m[2mshould report accurate lock status despite client clock skew
+[22m[39mP1.1: Lock age reported as -7199881ms, isExpired: false
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.1: checkLockStatus Clock Skew[2m > [22m[2mshould handle clock ahead scenario
+[22m[39mP1.1 (ahead): ageMs=7200004, isExpired=true
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.2: History Segments stateVector[2m > [22m[2mshould include stateVector in history segments after compaction
+[22m[39mClock offset measured: -6ms
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.2: History Segments stateVector[2m > [22m[2mshould include stateVector in history segments after compaction
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.2: History Segments stateVector[2m > [22m[2mshould include stateVector in history segments after compaction
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.2: History Segments stateVector[2m > [22m[2mshould include stateVector in history segments after compaction
+[22m[39mWeb Workers not available - using main thread merge
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.2: History Segments stateVector[2m > [22m[2mshould include stateVector in history segments after compaction
+[22m[39mCompacted to Snapshot (Size: 96)
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.2: History Segments stateVector[2m > [22m[2mshould be faster to sync with pre-computed stateVector
+[22m[39mClock offset measured: -7ms
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.3: isItemRedundant History Handling[2m > [22m[2mshould sync efficiently with history segments
+[22m[39mClock offset measured: -5ms
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.4: Sync Retry Backoff[2m > [22m[2mshould use exponential backoff for sync retries
+[22m[39mClock offset measured: -4ms
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.5: Debounce Timer Cleanup[2m > [22m[2mshould not fire save after destroy
+[22m[39mClock offset measured: -8ms
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.5: Debounce Timer Cleanup[2m > [22m[2mshould not fire save after destroy
+[22m[39mP1.5: Updates after destroy: 1
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.5: Debounce Timer Cleanup[2m > [22m[2mshould flush pending updates during destroy
+[22m[39mClock offset measured: -4ms
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.5: Debounce Timer Cleanup[2m > [22m[2mshould flush pending updates during destroy
+[22m[39mClock offset measured: -4ms
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.6: Lock Cleanup Document Orphans[2m > [22m[2mshould not leave orphaned documents in maintenance collection
+[22m[39mP1.6: Orphaned maintenance docs: 0
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.7: Listener Error Events[2m > [22m[2mshould emit error event when listener fails
+[22m[39mClock offset measured: -5ms
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.9: extractAllMetadata Error Handling[2m > [22m[2mshould distinguish empty update from parse error
+[22m[39mP1.9: Corrupt data result: []
+
+[90mstderr[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.9: extractAllMetadata Error Handling[2m > [22m[2mshould distinguish empty update from parse error
+[22m[39mFailed to parse update metadata: Error: Unexpected end of array
+    at Module.create [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/error.js:12:28[90m)[39m
+    at [90mfile:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/decoding.js:36:41
+[90m    at ModuleJob.run (node:internal/modules/esm/module_job:413:25)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+[90m    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:654:26)[39m
+    at VitestModuleEvaluator.runExternalModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:81:21[90m)[39m
+    at VitestModuleRunner.directRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1109:20[90m)[39m
+    at VitestModuleRunner.cachedRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1053:73[90m)[39m
+    at [90m/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:24:1
+    at VitestModuleEvaluator._runInlinedModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:197:4[90m)[39m
+
+[90mstdout[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.9: extractAllMetadata Error Handling[2m > [22m[2mshould handle various malformed inputs
+[22m[39mP1.9 Case 0: Input length 0, Result: []
+P1.9 Case 1: Input length 1, Result: []
+P1.9 Case 2: Input length 5, Result: []
+P1.9 Case 3: Input length 4, Result: []
+
+[90mstderr[2m | tests/validation/p1_high_priority.test.ts[2m > [22m[2mP1 High Priority Issue Validation[2m > [22m[2mP1.9: extractAllMetadata Error Handling[2m > [22m[2mshould handle various malformed inputs
+[22m[39mFailed to parse update metadata: Error: Unexpected end of array
+    at Module.create [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/error.js:12:28[90m)[39m
+    at [90mfile:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/decoding.js:36:41
+[90m    at ModuleJob.run (node:internal/modules/esm/module_job:413:25)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+[90m    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:654:26)[39m
+    at VitestModuleEvaluator.runExternalModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:81:21[90m)[39m
+    at VitestModuleRunner.directRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1109:20[90m)[39m
+    at VitestModuleRunner.cachedRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1053:73[90m)[39m
+    at [90m/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:24:1
+    at VitestModuleEvaluator._runInlinedModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:197:4[90m)[39m
+Failed to parse update metadata: Error: Unexpected end of array
+    at Module.create [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/error.js:12:28[90m)[39m
+    at [90mfile:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/decoding.js:36:41
+[90m    at ModuleJob.run (node:internal/modules/esm/module_job:413:25)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+[90m    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:654:26)[39m
+    at VitestModuleEvaluator.runExternalModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:81:21[90m)[39m
+    at VitestModuleRunner.directRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1109:20[90m)[39m
+    at VitestModuleRunner.cachedRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1053:73[90m)[39m
+    at [90m/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:24:1
+    at VitestModuleEvaluator._runInlinedModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:197:4[90m)[39m
+Failed to parse update metadata: Error: Unexpected end of array
+    at Module.create [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/error.js:12:28[90m)[39m
+    at [90mfile:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/decoding.js:36:41
+[90m    at ModuleJob.run (node:internal/modules/esm/module_job:413:25)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+[90m    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:654:26)[39m
+    at VitestModuleEvaluator.runExternalModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:81:21[90m)[39m
+    at VitestModuleRunner.directRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1109:20[90m)[39m
+    at VitestModuleRunner.cachedRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1053:73[90m)[39m
+    at [90m/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:24:1
+    at VitestModuleEvaluator._runInlinedModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:197:4[90m)[39m
+
+ [32m✓[39m tests/validation/p1_high_priority.test.ts [2m([22m[2m16 tests[22m[2m)[22m[33m 3112[2mms[22m[39m
+       [33m[2m✓[22m[39m should include stateVector in history segments after compaction [33m 622[2mms[22m[39m
+       [33m[2m✓[22m[39m should use exponential backoff for sync retries [33m 511[2mms[22m[39m
+       [33m[2m✓[22m[39m should not fire save after destroy [33m 729[2mms[22m[39m
+       [33m[2m✓[22m[39m should not leave orphaned documents in maintenance collection [33m 542[2mms[22m[39m
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -31ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -35ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -28ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -31ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -24ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -12ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -39ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -40ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -39ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -21ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -24ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -26ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -27ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -37ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -34ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -26ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -39ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -196ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -191ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -154ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -126ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -113ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -214ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -194ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -176ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -167ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -157ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -432ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -568ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -547ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -534ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -515ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -498ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -472ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -448ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -408ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -391ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -321ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -797ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -558ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -365ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -425ms
+
+[90mstderr[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mMax subdocument depth exceeded at depth-tests/nested-2026-01-26-0/subdocs/3a353119-97d4-4816-8e8f-a43a65589b84/subdocs/1eeab571-b941-4b74-9737-de5cdfd6bca1/subdocs/eda40f12-3ea6-4d0a-b336-2887e09778b3/subdocs/61773a94-48c0-4f4b-891a-032b17ada790/subdocs/d6ab7b5a-6b32-4494-8351-35c35513c02f/subdocs/572d3cba-ce11-4e67-a84a-684f23e1321c/subdocs/220d6f07-61bf-4f9a-a97f-ac400fce8121/subdocs/f7fa6be3-c814-411d-a79e-e387e4cf38bd/subdocs/c99a3a7f-4907-4110-a556-8db57e115899/subdocs/cfe79f69-7f99-4dbd-9441-88d4b0e8c644/subdocs/7f6b1c2d-347f-4f8e-be95-5dfdfaa157dc/subdocs/3fce13c9-2608-47e3-ad8c-837caa744d2e/subdocs/9629376b-b2b2-4fc9-bee3-9c68d939a382/subdocs/eea05754-5dd8-47b2-9bc5-d1ba3723fcbc/subdocs/5c3b42e8-367d-47db-a1ba-031712278576/subdocs/42d1d9d1-9dd2-4e39-9200-f0e68574af22/subdocs/1345bab8-336e-4d1d-92e3-c663d5e6d3e7/subdocs/2c7ad0a1-15c6-432d-992c-35363cab9d8b/subdocs/b89269d0-f6f8-480c-a3e9-7e4f917e8cb1/subdocs/3390b2f2-a592-4b01-bc53-347ae117ed2b/subdocs/5408be40-db29-4230-9dc6-64d58ac36106/subdocs/c86d912c-93e0-46fe-8b30-6d61d2688178/subdocs/1bad58cc-0ff6-40ff-8646-405b15d09cde/subdocs/701d6ff1-2998-48b5-a4af-5c1609e52474/subdocs/19de7b8e-934b-40aa-a326-cbd434dfd7f8/subdocs/c49cf9c5-f7b3-4779-8d76-80b68f98247a/subdocs/4c1cbc7a-4b91-4db6-a993-da21a1f86695/subdocs/3654b1b4-8b9b-4f68-91ba-509207be5e7f/subdocs/2997cafe-8e2a-4771-9326-a11048f03dd7/subdocs/b215fb49-26ab-4ceb-961e-b7a4fef00a1a/subdocs/54a0ce27-d000-4a72-abb0-afd2a826d2d8/subdocs/63e095fc-3e5c-4102-8225-ca413033af39/subdocs/667e4a7d-c01f-451c-b647-46cf4170373a/subdocs/0ce7a96d-e8c2-42b5-ad6c-92770901cc68/subdocs/4067e7e8-0155-4785-beb5-889d84667a84/subdocs/fe34b2dd-7532-4445-85b6-b1307f815089/subdocs/f28d60bd-3108-4bb6-82d0-526ebb5c2ead/subdocs/4fd4c16e-a5c9-4329-8f76-a570088326be/subdocs/e6224ed4-ecc1-45e2-adc1-349420a00661/subdocs/ad0f1f82-7dc1-494f-af82-45b4880a4879/subdocs/5cb262f2-88a8-4782-8b74-b1ddc05d394e/subdocs/f04f90c3-4f03-4b0d-925c-3c7fce60a5c1/subdocs/fbe54858-a04b-490f-b300-7d3ac736c94e/subdocs/6f004654-b96e-4871-ad54-5bb4b729068d/subdocs/585a663b-1557-4530-97ee-b04a640ad2bf/subdocs/e6825461-8752-45b3-adfe-4b702c240455/subdocs/759ecfde-1a90-4b5e-9234-33d272381804/subdocs/aa179029-669a-4da7-b262-99e9acd8e98c/subdocs/078c6546-4bad-4dbd-85c8-0606b4a832cd/subdocs/ecb0dcfd-f4ab-4379-b28a-333ad17b0cd4
+Max subdocument depth exceeded at depth-tests/nested-2026-01-26-0/subdocs/3a353119-97d4-4816-8e8f-a43a65589b84/subdocs/1eeab571-b941-4b74-9737-de5cdfd6bca1/subdocs/eda40f12-3ea6-4d0a-b336-2887e09778b3/subdocs/61773a94-48c0-4f4b-891a-032b17ada790/subdocs/d6ab7b5a-6b32-4494-8351-35c35513c02f/subdocs/572d3cba-ce11-4e67-a84a-684f23e1321c/subdocs/220d6f07-61bf-4f9a-a97f-ac400fce8121/subdocs/f7fa6be3-c814-411d-a79e-e387e4cf38bd/subdocs/c99a3a7f-4907-4110-a556-8db57e115899/subdocs/cfe79f69-7f99-4dbd-9441-88d4b0e8c644/subdocs/7f6b1c2d-347f-4f8e-be95-5dfdfaa157dc/subdocs/3fce13c9-2608-47e3-ad8c-837caa744d2e/subdocs/9629376b-b2b2-4fc9-bee3-9c68d939a382/subdocs/eea05754-5dd8-47b2-9bc5-d1ba3723fcbc/subdocs/5c3b42e8-367d-47db-a1ba-031712278576/subdocs/42d1d9d1-9dd2-4e39-9200-f0e68574af22/subdocs/1345bab8-336e-4d1d-92e3-c663d5e6d3e7/subdocs/2c7ad0a1-15c6-432d-992c-35363cab9d8b/subdocs/b89269d0-f6f8-480c-a3e9-7e4f917e8cb1/subdocs/3390b2f2-a592-4b01-bc53-347ae117ed2b/subdocs/5408be40-db29-4230-9dc6-64d58ac36106/subdocs/c86d912c-93e0-46fe-8b30-6d61d2688178/subdocs/1bad58cc-0ff6-40ff-8646-405b15d09cde/subdocs/701d6ff1-2998-48b5-a4af-5c1609e52474/subdocs/19de7b8e-934b-40aa-a326-cbd434dfd7f8/subdocs/c49cf9c5-f7b3-4779-8d76-80b68f98247a/subdocs/4c1cbc7a-4b91-4db6-a993-da21a1f86695/subdocs/3654b1b4-8b9b-4f68-91ba-509207be5e7f/subdocs/2997cafe-8e2a-4771-9326-a11048f03dd7/subdocs/b215fb49-26ab-4ceb-961e-b7a4fef00a1a/subdocs/54a0ce27-d000-4a72-abb0-afd2a826d2d8/subdocs/63e095fc-3e5c-4102-8225-ca413033af39/subdocs/667e4a7d-c01f-451c-b647-46cf4170373a/subdocs/0ce7a96d-e8c2-42b5-ad6c-92770901cc68/subdocs/4067e7e8-0155-4785-beb5-889d84667a84/subdocs/fe34b2dd-7532-4445-85b6-b1307f815089/subdocs/f28d60bd-3108-4bb6-82d0-526ebb5c2ead/subdocs/4fd4c16e-a5c9-4329-8f76-a570088326be/subdocs/e6224ed4-ecc1-45e2-adc1-349420a00661/subdocs/ad0f1f82-7dc1-494f-af82-45b4880a4879/subdocs/5cb262f2-88a8-4782-8b74-b1ddc05d394e/subdocs/f04f90c3-4f03-4b0d-925c-3c7fce60a5c1/subdocs/fbe54858-a04b-490f-b300-7d3ac736c94e/subdocs/6f004654-b96e-4871-ad54-5bb4b729068d/subdocs/585a663b-1557-4530-97ee-b04a640ad2bf/subdocs/e6825461-8752-45b3-adfe-4b702c240455/subdocs/759ecfde-1a90-4b5e-9234-33d272381804/subdocs/aa179029-669a-4da7-b262-99e9acd8e98c/subdocs/078c6546-4bad-4dbd-85c8-0606b4a832cd/subdocs/ecb0dcfd-f4ab-4379-b28a-333ad17b0cd4
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -1285ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -1108ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -1018ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -992ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -990ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -992ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -993ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -1291ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould limit subdocument recursion depth to 50
+[22m[39mClock offset measured: -1828ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould emit connection-error when recursion depth limit is reached
+[22m[39mReached depth: 50
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould emit connection-error when recursion depth limit is reached
+[22m[39mClock offset measured: -42ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould emit connection-error when recursion depth limit is reached
+[22m[39mClock offset measured: -39ms
+
+[90mstdout[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould emit connection-error when recursion depth limit is reached
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstderr[2m | tests/integration/recursion_depth.test.ts[2m > [22m[2mFireProvider Recursion Depth Guard (Emulator)[2m > [22m[2mshould emit connection-error when recursion depth limit is reached
+[22m[39mMax subdocument depth exceeded at depth-tests/signal-2026-01-26-1/subdocs/be64d50e-383e-4a18-a598-ca9692ff9e2d
+Max subdocument depth exceeded at depth-tests/signal-2026-01-26-1/subdocs/be64d50e-383e-4a18-a598-ca9692ff9e2d
+
+ [31m❯[39m tests/integration/recursion_depth.test.ts [2m([22m[2m2 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[33m 5526[2mms[22m[39m
+[31m     [31m×[31m should limit subdocument recursion depth to 50[39m[33m 5068[2mms[22m[39m
+     [33m[2m✓[22m[39m should emit connection-error when recursion depth limit is reached [33m 457[2mms[22m[39m
+[90mstdout[2m | tests/integration/fuzz.test.ts[2m > [22m[2mFireProvider Fuzz Testing (Emulator)[2m > [22m[2mshould converge after random operations
+[22m[39mFuzz test seed: "fuzz-2026-01-26"
+
+[90mstdout[2m | tests/integration/fuzz.test.ts[2m > [22m[2mFireProvider Fuzz Testing (Emulator)[2m > [22m[2mshould converge after random operations
+[22m[39mClock offset measured: -27ms
+
+[90mstdout[2m | tests/integration/fuzz.test.ts[2m > [22m[2mFireProvider Fuzz Testing (Emulator)[2m > [22m[2mshould converge after random operations
+[22m[39mClock offset measured: -29ms
+
+[90mstdout[2m | tests/integration/fuzz.test.ts[2m > [22m[2mFireProvider Fuzz Testing (Emulator)[2m > [22m[2mshould converge after random operations
+[22m[39mClock offset measured: -24ms
+
+[90mstdout[2m | tests/integration/fuzz.test.ts[2m > [22m[2mFireProvider Fuzz Testing (Emulator)[2m > [22m[2mshould converge after random operations
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/fuzz.test.ts[2m > [22m[2mFireProvider Fuzz Testing (Emulator)[2m > [22m[2mshould converge after random operations
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/fuzz.test.ts[2m > [22m[2mFireProvider Fuzz Testing (Emulator)[2m > [22m[2mshould converge after random operations
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/fuzz.test.ts[2m > [22m[2mFireProvider Fuzz Testing (Emulator)[2m > [22m[2mshould converge after random operations
+[22m[39mFuzz test converged to length: 98
+
+ [32m✓[39m tests/integration/fuzz.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 2248[2mms[22m[39m
+     [33m[2m✓[22m[39m should converge after random operations [33m 2247[2mms[22m[39m
+[90mstdout[2m | tests/integration/history_compaction.test.ts[2m > [22m[2mFireProvider History Compaction[2m > [22m[2mshould merge existing History Segments into Base Snapshot if total size is small
+[22m[39mClock offset measured: -14ms
+
+[90mstdout[2m | tests/integration/history_compaction.test.ts[2m > [22m[2mFireProvider History Compaction[2m > [22m[2mshould merge existing History Segments into Base Snapshot if total size is small
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/history_compaction.test.ts[2m > [22m[2mFireProvider History Compaction[2m > [22m[2mshould merge existing History Segments into Base Snapshot if total size is small
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/history_compaction.test.ts[2m > [22m[2mFireProvider History Compaction[2m > [22m[2mshould merge existing History Segments into Base Snapshot if total size is small
+[22m[39mWeb Workers not available - using main thread merge
+
+[90mstdout[2m | tests/integration/history_compaction.test.ts[2m > [22m[2mFireProvider History Compaction[2m > [22m[2mshould merge existing History Segments into Base Snapshot if total size is small
+[22m[39mCompacted to Snapshot (Size: 73)
+
+[90mstdout[2m | tests/integration/history_compaction.test.ts[2m > [22m[2mFireProvider History Compaction[2m > [22m[2mshould merge existing History Segments into Base Snapshot if total size is small
+[22m[39mClock offset measured: -6ms
+
+ [32m✓[39m tests/integration/history_compaction.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 2233[2mms[22m[39m
+     [33m[2m✓[22m[39m should merge existing History Segments into Base Snapshot if total size is small [33m 2232[2mms[22m[39m
+[90mstdout[2m | tests/integration/provider.test.ts[2m > [22m[2mFireProvider Integration (Emulator)[2m > [22m[2mshould sync updates between two clients
+[22m[39mClock offset measured: -21ms
+
+[90mstdout[2m | tests/integration/provider.test.ts[2m > [22m[2mFireProvider Integration (Emulator)[2m > [22m[2mshould sync updates between two clients
+[22m[39mClock offset measured: -23ms
+
+[90mstdout[2m | tests/integration/provider.test.ts[2m > [22m[2mFireProvider Integration (Emulator)[2m > [22m[2mshould persist data after restart
+[22m[39mClock offset measured: -7ms
+
+[90mstdout[2m | tests/integration/provider.test.ts[2m > [22m[2mFireProvider Integration (Emulator)[2m > [22m[2mshould persist data after restart
+[22m[39mClock offset measured: -10ms
+
+[90mstdout[2m | tests/integration/provider.test.ts[2m > [22m[2mFireProvider Integration (Emulator)[2m > [22m[2mshould perform compaction on emulator
+[22m[39mClock offset measured: -10ms
+
+[90mstdout[2m | tests/integration/provider.test.ts[2m > [22m[2mFireProvider Integration (Emulator)[2m > [22m[2mshould perform compaction on emulator
+[22m[39mPushing missing local updates to Firestore.
+
+[90mstdout[2m | tests/integration/provider.test.ts[2m > [22m[2mFireProvider Integration (Emulator)[2m > [22m[2mshould perform compaction on emulator
+[22m[39mClock offset measured: -5ms
+
+ [32m✓[39m tests/integration/provider.test.ts [2m([22m[2m3 tests[22m[2m)[22m[33m 1527[2mms[22m[39m
+     [33m[2m✓[22m[39m should persist data after restart [33m 611[2mms[22m[39m
+     [33m[2m✓[22m[39m should perform compaction on emulator [33m 649[2mms[22m[39m
+[90mstdout[2m | tests/integration/error_recovery.test.ts[2m > [22m[2mFireProvider Error Recovery (Emulator)[2m > [22m[2mshould retry saving updates if write fails initially
+[22m[39mClock offset measured: -21ms
+
+[90mstdout[2m | tests/integration/error_recovery.test.ts[2m > [22m[2mFireProvider Error Recovery (Emulator)[2m > [22m[2mshould retry saving updates if write fails initially
+[22m[39mClock offset measured: -22ms
+
+[90mstdout[2m | tests/integration/error_recovery.test.ts[2m > [22m[2mFireProvider Error Recovery (Emulator)[2m > [22m[2mshould retry saving updates if write fails initially
+[22m[39m[Mock] Intercepting addDoc to integration-tests/error-recovery-2026-01-26-0/updates - Simulation Failure
+
+[90mstderr[2m | tests/integration/error_recovery.test.ts[2m > [22m[2mFireProvider Error Recovery (Emulator)[2m > [22m[2mshould retry saving updates if write fails initially
+[22m[39mFailed to save update to Firestore Error: Simulated Network Error
+    at addDoc [90m(/Users/btsai/antigravity/y-fire/[39mtests/integration/error_recovery.test.ts:26:23[90m)[39m
+    at FireProvider.saveToFirestore [90m(/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:512:13[90m)[39m
+    at Timeout._onTimeout [90m(/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:181:14[90m)[39m
+[90m    at listOnTimeout (node:internal/timers:605:17)[39m
+[90m    at processTimers (node:internal/timers:541:7)[39m
+
+ [32m✓[39m tests/integration/error_recovery.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 1250[2mms[22m[39m
+     [33m[2m✓[22m[39m should retry saving updates if write fails initially [33m 1249[2mms[22m[39m
+[90mstdout[2m | tests/integration/sync_gap.test.ts[2m > [22m[2mSync Gap Race Condition[2m > [22m[2mshould receive updates that occur between sync and listener (The "Sync Gap")
+[22m[39mSimulating gap: Injecting 250 updates (Limit is 200)...
+
+[90mstdout[2m | tests/integration/sync_gap.test.ts[2m > [22m[2mSync Gap Race Condition[2m > [22m[2mshould receive updates that occur between sync and listener (The "Sync Gap")
+[22m[39mUpdates received: 250 / 250
+
+ [32m✓[39m tests/integration/sync_gap.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 1177[2mms[22m[39m
+     [33m[2m✓[22m[39m should receive updates that occur between sync and listener (The "Sync Gap") [33m 919[2mms[22m[39m
+[90mstdout[2m | tests/integration/race_condition.test.ts[2m > [22m[2mFireProvider Race Condition Guard (Emulator)[2m > [22m[2mshould not attach listeners if destroyed during sync
+[22m[39mClock offset measured: -18ms
+
+ [32m✓[39m tests/integration/race_condition.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 1021[2mms[22m[39m
+     [33m[2m✓[22m[39m should not attach listeners if destroyed during sync [33m 1013[2mms[22m[39m
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould handle concurrent compaction safely (Thundering Herd)
+[22m[39mClock offset measured: -30ms
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould handle concurrent compaction safely (Thundering Herd)
+[22m[39mClock offset measured: -32ms
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould handle concurrent compaction safely (Thundering Herd)
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould handle concurrent compaction safely (Thundering Herd)
+[22m[39mCompacted to Snapshot (Size: 2)
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould handle concurrent compaction safely (Thundering Herd)
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould respect existing valid lock (Mutual Exclusion)
+[22m[39mClock offset measured: -8ms
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould steal expired lock (Crash Recovery)
+[22m[39mClock offset measured: -5ms
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould steal expired lock (Crash Recovery)
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould abort if lock is lost during transaction (Kill Switch)
+[22m[39mClock offset measured: -4ms
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould abort if lock is lost during transaction (Kill Switch)
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/distributed_lock.test.ts[2m > [22m[2mDistributed Compaction Lock[2m > [22m[2mshould abort if lock is lost during transaction (Kill Switch)
+[22m[39mCompacted to Snapshot (Size: 2)
+
+ [32m✓[39m tests/integration/distributed_lock.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 1558[2mms[22m[39m
+     [33m[2m✓[22m[39m should handle concurrent compaction safely (Thundering Herd) [33m 1436[2mms[22m[39m
+[90mstdout[2m | tests/integration/flush_on_destroy.test.ts[2m > [22m[2mFireProvider Destroy Flush (Emulator)[2m > [22m[2mshould flush pending updates on destroy
+[22m[39mClock offset measured: -17ms
+
+ [32m✓[39m tests/integration/flush_on_destroy.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 519[2mms[22m[39m
+     [33m[2m✓[22m[39m should flush pending updates on destroy [33m 519[2mms[22m[39m
+ [32m✓[39m tests/unit/utils.test.ts [2m([22m[2m15 tests[22m[2m)[22m[33m 435[2mms[22m[39m
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould respect lock even when client clock is behind server
+[22m[39mClock offset measured: 60123ms
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould respect lock even when client clock is behind server
+[22m[39mLock owner: other-client-holding-lock
+Client time (mocked): 2026-01-26T06:01:29.960Z
+Lock expiry: 2026-01-26T06:02:59.960Z
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould respect lock even when client clock is ahead of server
+[22m[39mClock offset measured: -119969ms
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould prevent concurrent compaction due to clock skew
+[22m[39mClock offset measured: -15ms
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould prevent concurrent compaction due to clock skew
+[22m[39mProvider1 entering compact, concurrent: 1
+Provider2 entering compact, concurrent: 2
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould prevent concurrent compaction due to clock skew
+[22m[39mClock offset measured: -19ms
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould prevent concurrent compaction due to clock skew
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould prevent concurrent compaction due to clock skew
+[22m[39mWeb Workers not available - using main thread merge
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould prevent concurrent compaction due to clock skew
+[22m[39mCompacted to Snapshot (Size: 2)
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould prevent concurrent compaction due to clock skew
+[22m[39mTotal entries: 2, Concurrent: true
+
+[90mstdout[2m | tests/integration/repro_clock_skew.test.ts[2m > [22m[2mIssue 4: Clock Skew in Distributed Lock[2m > [22m[2mshould prevent concurrent compaction due to clock skew
+[22m[39mUpdates remaining: 0
+
+ [32m✓[39m tests/integration/repro_clock_skew.test.ts [2m([22m[2m3 tests[22m[2m)[22m[33m 357[2mms[22m[39m
+[90mstdout[2m | tests/integration/repro_zombie.test.ts[2m > [22m[2mZombie Update Reproduction (Index Misalignment)[2m > [22m[2mshould correctly handle concurrent deletion of an update during compaction (No Zombie Updates)
+[22m[39mClock offset measured: -16ms
+
+[90mstdout[2m | tests/integration/repro_zombie.test.ts[2m > [22m[2mZombie Update Reproduction (Index Misalignment)[2m > [22m[2mshould correctly handle concurrent deletion of an update during compaction (No Zombie Updates)
+[22m[39mTarget to delete (concurrently): 1GyJe205aTRluNeKbvYc
+
+[90mstdout[2m | tests/integration/repro_zombie.test.ts[2m > [22m[2mZombie Update Reproduction (Index Misalignment)[2m > [22m[2mshould correctly handle concurrent deletion of an update during compaction (No Zombie Updates)
+[22m[39mClock offset measured: -8ms
+
+[90mstdout[2m | tests/integration/repro_zombie.test.ts[2m > [22m[2mZombie Update Reproduction (Index Misalignment)[2m > [22m[2mshould correctly handle concurrent deletion of an update during compaction (No Zombie Updates)
+[22m[39mStarting compaction (attempt 1)...
+
+[90mstdout[2m | tests/integration/repro_zombie.test.ts[2m > [22m[2mZombie Update Reproduction (Index Misalignment)[2m > [22m[2mshould correctly handle concurrent deletion of an update during compaction (No Zombie Updates)
+[22m[39mHOOK TRIGGERED: Deleting Doc A to simulate concurrent removal...
+
+[90mstdout[2m | tests/integration/repro_zombie.test.ts[2m > [22m[2mZombie Update Reproduction (Index Misalignment)[2m > [22m[2mshould correctly handle concurrent deletion of an update during compaction (No Zombie Updates)
+[22m[39mWeb Workers not available - using main thread merge
+
+[90mstdout[2m | tests/integration/repro_zombie.test.ts[2m > [22m[2mZombie Update Reproduction (Index Misalignment)[2m > [22m[2mshould correctly handle concurrent deletion of an update during compaction (No Zombie Updates)
+[22m[39mCompacted to Snapshot (Size: 2)
+
+[90mstdout[2m | tests/integration/repro_zombie.test.ts[2m > [22m[2mZombie Update Reproduction (Index Misalignment)[2m > [22m[2mshould correctly handle concurrent deletion of an update during compaction (No Zombie Updates)
+[22m[39mRemaining updates: []
+
+ [32m✓[39m tests/integration/repro_zombie.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 270[2mms[22m[39m
+ [32m✓[39m tests/unit/fuzz-compaction.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 266[2mms[22m[39m
+ [32m✓[39m tests/unit/wait.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 267[2mms[22m[39m
+ [32m✓[39m tests/unit/fuzz-state-vector.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 230[2mms[22m[39m
+ [32m✓[39m tests/unit/fuzz-update-merge.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 229[2mms[22m[39m
+[90mstdout[2m | tests/provider.test.ts[2m > [22m[2mFireProvider[2m > [22m[2mshould initialize and start sync
+[22m[39mClock offset measured: 0ms
+
+[90mstderr[2m | tests/provider.test.ts[2m > [22m[2mFireProvider[2m > [22m[2mshould debounce updates and save to firestore
+[22m[39mFailed to parse update metadata: Error: Unexpected end of array
+    at Module.create [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/error.js:12:28[90m)[39m
+    at [90mfile:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/decoding.js:36:41
+[90m    at ModuleJob.run (node:internal/modules/esm/module_job:413:25)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+[90m    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:654:26)[39m
+    at VitestModuleEvaluator.runExternalModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:81:21[90m)[39m
+    at VitestModuleRunner.directRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1109:20[90m)[39m
+    at VitestModuleRunner.cachedRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1053:73[90m)[39m
+    at [90m/Users/btsai/antigravity/y-fire/[39msrc/provider.ts:24:1
+    at VitestModuleEvaluator._runInlinedModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:197:4[90m)[39m
+
+[90mstdout[2m | tests/provider.test.ts[2m > [22m[2mFireProvider[2m > [22m[2mshould debounce updates and save to firestore
+[22m[39mClock offset measured: 0ms
+
+[90mstdout[2m | tests/provider.test.ts[2m > [22m[2mFireProvider[2m > [22m[2mshould trigger compaction when updates exceed threshold
+[22m[39mClock offset measured: 0ms
+
+[90mstdout[2m | tests/provider.test.ts[2m > [22m[2mFireProvider[2m > [22m[2mshould trigger compaction when updates exceed threshold
+[22m[39mStarting compaction (attempt 1)...
+
+ [32m✓[39m tests/provider.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 122[2mms[22m[39m
+[90mstderr[2m | tests/unit/update-metadata.test.ts[2m > [22m[2mupdate-metadata[2m > [22m[2mextractAllMetadata[2m > [22m[2mshould return empty array for malformed update
+[22m[39mFailed to parse update metadata: Error: Unexpected end of array
+    at Module.create [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/error.js:12:28[90m)[39m
+    at [90mfile:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mlib0[24m/decoding.js:36:41
+[90m    at ModuleJob.run (node:internal/modules/esm/module_job:413:25)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+[90m    at onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:654:26)[39m
+    at VitestModuleEvaluator.runExternalModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:81:21[90m)[39m
+    at VitestModuleRunner.directRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1109:20[90m)[39m
+    at VitestModuleRunner.cachedRequest [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvite[24m/dist/node/module-runner.js:1053:73[90m)[39m
+    at [90m/Users/btsai/antigravity/y-fire/[39msrc/update-metadata.ts:32:1
+    at VitestModuleEvaluator._runInlinedModule [90m(file:///Users/btsai/antigravity/y-fire/[39mnode_modules/[4mvitest[24m/dist/module-evaluator.js:197:4[90m)[39m
+
+ [32m✓[39m tests/unit/update-metadata.test.ts [2m([22m[2m12 tests[22m[2m)[22m[32m 23[2mms[22m[39m
+ [32m✓[39m tests/unit/provider_validation.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+
+[31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m tests/integration/recursion_depth.test.ts[2m > [22mFireProvider Recursion Depth Guard (Emulator)[2m > [22mshould limit subdocument recursion depth to 50
+[31m[1mError[22m: Test timed out in 5000ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".[39m
+[36m [2m❯[22m tests/integration/recursion_depth.test.ts:[2m31:5[22m[39m
+    [90m 29| [39m    [35mlet[39m counter [33m=[39m [34m0[39m[33m;[39m
+    [90m 30| [39m
+    [90m 31| [39m    [34mit[39m([32m'should limit subdocument recursion depth to 50'[39m[33m,[39m [35masync[39m () [33m=>[39m {
+    [90m   | [39m    [31m^[39m
+    [90m 32| [39m        const path = `depth-tests/nested-${getStableDate()}-${counter+…
+    [90m 33| [39m        [35mconst[39m rootDoc [33m=[39m [35mnew[39m [33mY[39m[33m.[39m[33mDoc[39m()[33m;[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m32 passed[39m[22m[90m (33)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m134 passed[39m[22m[90m (135)[39m
+[2m   Start at [22m 22:00:19
+[2m   Duration [22m 134.70s[2m (transform 578ms, setup 0ms, import 4.76s, tests 121.60s, environment 3ms)[22m
+
+⚠  Script exited unsuccessfully (code 1)
+i  emulators: Shutting down emulators.
+i  firestore: Stopping Firestore Emulator
+i  hub: Stopping emulator hub
+i  logging: Stopping Logging Emulator
+
+Error: Script "npx vitest run --environment node --no-file-parallelism " exited with code 1

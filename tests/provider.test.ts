@@ -86,7 +86,7 @@ describe('FireProvider', () => {
     });
 
     it('should trigger compaction when updates exceed threshold', async () => {
-        const provider = new FireProvider({ firebaseApp, ydoc, path, maxUpdatesThreshold: 5, compactionProbability: 1 });
+        const provider = new FireProvider({ firebaseApp, ydoc, path, maxUpdatesThreshold: 5 });
         const compactSpy = vi.spyOn(provider, 'compact');
 
         // Wait for sync to reach onSnapshot subscribe (includes clock skew measurement)

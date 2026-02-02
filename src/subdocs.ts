@@ -49,8 +49,6 @@ export interface SubdocContext {
     maxUpdatesThreshold: number;
     /** Maximum wait time (inherited) */
     maxWaitTime: number;
-    /** Compaction probability (inherited) */
-    compactionProbability: number;
     /** Lock TTL (inherited) */
     lockTTL: number;
     /** Compaction limit (inherited) */
@@ -177,7 +175,6 @@ export function startSubdocProvider(
         maxUpdatesThreshold: ctx.maxUpdatesThreshold,
         maxWaitTime: ctx.maxWaitTime,
         depth: ctx.depth + 1,
-        compactionProbability: ctx.compactionProbability,
         lockTTL: ctx.lockTTL,
         compactionLimit: ctx.compactionLimit,
     });

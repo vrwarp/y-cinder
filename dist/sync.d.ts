@@ -47,8 +47,6 @@ export interface SyncContext {
     uid: string;
     /** Maximum updates before triggering compaction consideration */
     maxUpdatesThreshold: number;
-    /** Probability of attempting compaction */
-    compactionProbability: number;
     /** Callback to trigger compaction */
     onCompactionNeeded?: () => void;
     /** P1.7 FIX: Callback when listener encounters an error */
@@ -105,7 +103,6 @@ export interface SyncResult {
  * const result = await performInitialSync({
  *   db, path, doc: ydoc, uid,
  *   maxUpdatesThreshold: 50,
- *   compactionProbability: 0.01,
  *   isDestroyed: () => false
  * });
  * ```

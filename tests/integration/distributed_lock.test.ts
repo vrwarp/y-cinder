@@ -46,8 +46,7 @@ describe('Distributed Compaction Lock', () => {
             firebaseApp: app,
             ydoc: doc1,
             path,
-            lockTTL: 5000,
-            compactionProbability: 0
+            lockTTL: 5000
         });
 
         const doc2 = new Y.Doc();
@@ -55,8 +54,7 @@ describe('Distributed Compaction Lock', () => {
             firebaseApp: app,
             ydoc: doc2,
             path,
-            lockTTL: 5000,
-            compactionProbability: 0
+            lockTTL: 5000
         });
 
         mainProvider = p1;
@@ -159,8 +157,7 @@ describe('Distributed Compaction Lock', () => {
             firebaseApp: app,
             ydoc,
             path,
-            maxUpdatesThreshold: 1, // Force work
-            compactionProbability: 1 // Manual trigger
+            maxUpdatesThreshold: 1 // Force work
         });
         mainProvider = provider;
 

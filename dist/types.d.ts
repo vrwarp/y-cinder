@@ -53,12 +53,6 @@ export interface FireProviderConfig {
      */
     maxWaitTime?: number;
     /**
-     * Probability (0-1) that a client will attempt compaction when threshold is exceeded.
-     * Used to prevent thundering herd problem.
-     * @default 0.01 (1%)
-     */
-    compactionProbability?: number;
-    /**
      * Current subdocument depth. Used internally for recursion limiting.
      * @default 0
      */
@@ -104,7 +98,6 @@ export declare const FIRESTORE_PATHS: {
 export declare const DEFAULTS: {
     readonly MAX_UPDATES_THRESHOLD: 50;
     readonly MAX_WAIT_TIME: 500;
-    readonly COMPACTION_PROBABILITY: 0.01;
     readonly DEPTH: 0;
     readonly LOCK_TTL: 60000;
     readonly COMPACTION_LIMIT: 200;

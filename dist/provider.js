@@ -109,7 +109,6 @@ export class FireProvider extends ObservableV2 {
                 depth: this.depth,
                 maxUpdatesThreshold: this.maxUpdatesThreshold,
                 maxWaitTime: this.maxWaitTime,
-                compactionProbability: this.compactionProbability,
                 lockTTL: this.lockTTL,
                 compactionLimit: this.compactionLimit,
                 createProvider: (config) => new FireProvider(config),
@@ -154,7 +153,7 @@ export class FireProvider extends ObservableV2 {
             // that accepts navigator.sendBeacon data and writes to Firestore.
         };
         // Initialize from config
-        const { firebaseApp, ydoc, path, maxUpdatesThreshold = DEFAULTS.MAX_UPDATES_THRESHOLD, maxWaitTime = DEFAULTS.MAX_WAIT_TIME, compactionProbability = DEFAULTS.COMPACTION_PROBABILITY, depth = DEFAULTS.DEPTH, lockTTL = DEFAULTS.LOCK_TTL, compactionLimit = DEFAULTS.COMPACTION_LIMIT, testHooks, } = config;
+        const { firebaseApp, ydoc, path, maxUpdatesThreshold = DEFAULTS.MAX_UPDATES_THRESHOLD, maxWaitTime = DEFAULTS.MAX_WAIT_TIME, depth = DEFAULTS.DEPTH, lockTTL = DEFAULTS.LOCK_TTL, compactionLimit = DEFAULTS.COMPACTION_LIMIT, testHooks, } = config;
         // P1.8 / P2.20 FIX: Validate path and config BEFORE any Firebase SDK calls
         // This ensures validation errors are thrown with clear messages before
         // getFirestore() which could fail with cryptic errors on invalid app.
@@ -175,7 +174,6 @@ export class FireProvider extends ObservableV2 {
         this.depth = depth;
         this.maxUpdatesThreshold = maxUpdatesThreshold;
         this.maxWaitTime = maxWaitTime;
-        this.compactionProbability = compactionProbability;
         this.lockTTL = lockTTL;
         this.compactionLimit = compactionLimit;
         this._testHooks = testHooks;
@@ -258,7 +256,6 @@ export class FireProvider extends ObservableV2 {
                         doc: this.doc,
                         uid: this.uid,
                         maxUpdatesThreshold: this.maxUpdatesThreshold,
-                        compactionProbability: this.compactionProbability,
                         onCompactionNeeded: () => this.compact(),
                         isDestroyed: () => this._isDestroyed,
                         onListenerError: (error) => {
@@ -347,7 +344,6 @@ export class FireProvider extends ObservableV2 {
                 doc: this.doc,
                 uid: this.uid,
                 maxUpdatesThreshold: this.maxUpdatesThreshold,
-                compactionProbability: this.compactionProbability,
                 onCompactionNeeded: () => this.compact(),
                 isDestroyed: () => this._isDestroyed,
                 // FIX: Wire listener error to event emitter

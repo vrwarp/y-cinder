@@ -53,7 +53,6 @@ describe('Issue 12: Partial Compaction Failure', () => {
             firebaseApp: app,
             ydoc,
             path,
-            compactionProbability: 0,
             maxUpdatesThreshold: 1000
         });
 
@@ -98,7 +97,7 @@ describe('Issue 12: Partial Compaction Failure', () => {
             firebaseApp: app,
             ydoc,
             path,
-            compactionProbability: 0
+            maxUpdatesThreshold: 10000 // Prevent auto-compaction
         });
 
         // Wait for sync

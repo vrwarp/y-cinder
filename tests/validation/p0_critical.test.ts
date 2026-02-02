@@ -214,7 +214,6 @@ describe('P0 Critical Issue Validation', () => {
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path, {
-                compactionProbability: 1.0, // Always try to compact
                 maxUpdatesThreshold: 1,     // Low threshold
             });
 
@@ -247,7 +246,7 @@ describe('P0 Critical Issue Validation', () => {
 
             // First, manually trigger multiple compactions
             const provider = createProvider(ydoc, path, {
-                compactionProbability: 0, // Don't auto-compact
+                maxUpdatesThreshold: 10000, // Don't auto-compact
             });
 
             // Add work
@@ -489,7 +488,7 @@ describe('P0 Critical Issue Validation', () => {
             // Create initial data
             const doc1 = new Y.Doc();
             const provider1 = createProvider(doc1, path, {
-                compactionProbability: 0,
+                maxUpdatesThreshold: 10000,
             });
 
             doc1.getText('x').insert(0, 'DataA');

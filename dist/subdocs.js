@@ -115,7 +115,6 @@ export function startSubdocProvider(subdoc, ctx, subProviders) {
         maxUpdatesThreshold: ctx.maxUpdatesThreshold,
         maxWaitTime: ctx.maxWaitTime,
         depth: ctx.depth + 1,
-        compactionProbability: ctx.compactionProbability,
         lockTTL: ctx.lockTTL,
         compactionLimit: ctx.compactionLimit,
     });

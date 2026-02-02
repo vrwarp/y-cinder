@@ -94,7 +94,6 @@ export class FireProvider extends ObservableV2<any> {
   // Configuration
   private readonly maxUpdatesThreshold: number;
   private readonly maxWaitTime: number;
-  private readonly compactionProbability: number;
   private readonly compactionLimit: number;
   private readonly depth: number;
   private readonly lockTTL: number;
@@ -135,7 +134,6 @@ export class FireProvider extends ObservableV2<any> {
       path,
       maxUpdatesThreshold = DEFAULTS.MAX_UPDATES_THRESHOLD,
       maxWaitTime = DEFAULTS.MAX_WAIT_TIME,
-      compactionProbability = DEFAULTS.COMPACTION_PROBABILITY,
       depth = DEFAULTS.DEPTH,
       lockTTL = DEFAULTS.LOCK_TTL,
       compactionLimit = DEFAULTS.COMPACTION_LIMIT,
@@ -166,7 +164,6 @@ export class FireProvider extends ObservableV2<any> {
 
     this.maxUpdatesThreshold = maxUpdatesThreshold;
     this.maxWaitTime = maxWaitTime;
-    this.compactionProbability = compactionProbability;
     this.lockTTL = lockTTL;
     this.compactionLimit = compactionLimit;
     this._testHooks = testHooks;
@@ -256,7 +253,6 @@ export class FireProvider extends ObservableV2<any> {
           doc: this.doc,
           uid: this.uid,
           maxUpdatesThreshold: this.maxUpdatesThreshold,
-          compactionProbability: this.compactionProbability,
           onCompactionNeeded: () => this.compact(),
           isDestroyed: () => this._isDestroyed,
           onListenerError: (error) => {
@@ -350,7 +346,6 @@ export class FireProvider extends ObservableV2<any> {
       doc: this.doc,
       uid: this.uid,
       maxUpdatesThreshold: this.maxUpdatesThreshold,
-      compactionProbability: this.compactionProbability,
       onCompactionNeeded: () => this.compact(),
       isDestroyed: () => this._isDestroyed,
       // FIX: Wire listener error to event emitter
@@ -436,7 +431,6 @@ export class FireProvider extends ObservableV2<any> {
       depth: this.depth,
       maxUpdatesThreshold: this.maxUpdatesThreshold,
       maxWaitTime: this.maxWaitTime,
-      compactionProbability: this.compactionProbability,
       lockTTL: this.lockTTL,
       compactionLimit: this.compactionLimit,
       createProvider: (config) => new FireProvider(config),

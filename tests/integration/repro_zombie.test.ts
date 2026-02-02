@@ -51,7 +51,6 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
             firebaseApp: app,
             ydoc: ydoc,
             path: path,
-            compactionProbability: 0, // Manual compaction only
             maxUpdatesThreshold: 1000
         });
 
@@ -128,7 +127,7 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
             firebaseApp: app,
             ydoc: new Y.Doc(), // Use dummy doc for compaction-only provider
             path,
-            compactionProbability: 0,
+            maxUpdatesThreshold: 10000,
             testHooks: {
                 beforeTransaction: async () => {
                     console.log("HOOK TRIGGERED: Deleting Doc A to simulate concurrent removal...");

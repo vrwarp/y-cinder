@@ -75,8 +75,6 @@ export interface SyncContext {
     uid: string;
     /** Maximum updates before triggering compaction consideration */
     maxUpdatesThreshold: number;
-    /** Probability of attempting compaction */
-    compactionProbability: number;
     /** Callback to trigger compaction */
     onCompactionNeeded?: () => void;
     /** P1.7 FIX: Callback when listener encounters an error */
@@ -144,7 +142,6 @@ interface PendingUpdate {
  * const result = await performInitialSync({
  *   db, path, doc: ydoc, uid,
  *   maxUpdatesThreshold: 50,
- *   compactionProbability: 0.01,
  *   isDestroyed: () => false
  * });
  * ```
@@ -340,7 +337,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
  * @returns Unsubscribe function
  */
 export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocumentSnapshot | null = null): Unsubscribe {
-    const { db, path, doc: ydoc, uid, maxUpdatesThreshold, compactionProbability, onCompactionNeeded, onListenerError, isDestroyed } = ctx;
+    const { db, path, doc: ydoc, uid, maxUpdatesThreshold, onCompactionNeeded, onListenerError, isDestroyed } = ctx;
 
     let liveUpdatesQ;
 
@@ -367,13 +364,9 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
         // Note: snapshot.size may be capped by limitToLast, so we check docChanges for additions
         if (snapshot.size >= DEFAULTS.REALTIME_LIMIT && onCompactionNeeded) {
             // At capacity - definitely need compaction
-            if (Math.random() < compactionProbability) {
-                onCompactionNeeded();
-            }
+            onCompactionNeeded();
         } else if (snapshot.size > maxUpdatesThreshold && onCompactionNeeded) {
-            if (Math.random() < compactionProbability) {
-                onCompactionNeeded();
-            }
+            onCompactionNeeded();
         }
 
         snapshot.docChanges().forEach((change) => {

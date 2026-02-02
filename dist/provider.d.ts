@@ -55,7 +55,6 @@ export declare class FireProvider extends ObservableV2<any> {
     private updateCache;
     private readonly maxUpdatesThreshold;
     private readonly maxWaitTime;
-    private readonly compactionProbability;
     private readonly compactionLimit;
     private readonly depth;
     private readonly lockTTL;

@@ -71,8 +71,8 @@ describe('Issue 4: Clock Skew in Distributed Lock', () => {
             firebaseApp: app,
             ydoc,
             path,
-            compactionProbability: 0,
-            lockTTL: 60000
+            lockTTL: 60000,
+            maxUpdatesThreshold: 10000 // Prevent auto-compaction
         });
 
         // Add work
@@ -125,8 +125,8 @@ describe('Issue 4: Clock Skew in Distributed Lock', () => {
             firebaseApp: app,
             ydoc,
             path,
-            compactionProbability: 0,
-            lockTTL: 60000
+            lockTTL: 60000,
+            maxUpdatesThreshold: 10000 // Prevent auto-compaction
         });
 
         await addDoc(collection(db, path, 'updates'), {
@@ -164,16 +164,16 @@ describe('Issue 4: Clock Skew in Distributed Lock', () => {
             firebaseApp: app,
             ydoc: ydoc1,
             path,
-            compactionProbability: 0,
-            lockTTL: 30000
+            lockTTL: 30000,
+            maxUpdatesThreshold: 10000 // Prevent auto-compaction
         });
 
         const provider2 = new FireProvider({
             firebaseApp: app,
             ydoc: ydoc2,
             path,
-            compactionProbability: 0,
-            lockTTL: 30000
+            lockTTL: 30000,
+            maxUpdatesThreshold: 10000 // Prevent auto-compaction
         });
 
         // Add work

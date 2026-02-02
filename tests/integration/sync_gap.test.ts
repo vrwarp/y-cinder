@@ -36,7 +36,6 @@ describe('Sync Gap Race Condition', () => {
             doc: ydoc,
             uid,
             maxUpdatesThreshold: 1000, // High threshold to avoid compaction interference
-            compactionProbability: 0,
             onCompactionNeeded: vi.fn(),
             isDestroyed: () => false
         };
@@ -145,7 +144,6 @@ describe('Sync Gap Race Condition', () => {
             doc: ydoc,
             uid,
             maxUpdatesThreshold: 1000,
-            compactionProbability: 0,
             onCompactionNeeded: vi.fn(),
             isDestroyed: () => false
         };

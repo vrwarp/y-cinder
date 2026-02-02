@@ -58,7 +58,6 @@ describe('Issue 2: Compaction Retry Logic', () => {
             firebaseApp: app,
             ydoc,
             path,
-            compactionProbability: 0, // Manual only
             maxUpdatesThreshold: 1000
         });
 
@@ -77,7 +76,6 @@ describe('Issue 2: Compaction Retry Logic', () => {
             firebaseApp: app,
             ydoc,
             path,
-            compactionProbability: 0,
             maxUpdatesThreshold: 1000,
             testHooks: {
                 beforeTransaction: async () => {
@@ -118,7 +116,7 @@ describe('Issue 2: Compaction Retry Logic', () => {
             firebaseApp: app,
             ydoc,
             path,
-            compactionProbability: 0
+            maxUpdatesThreshold: 10000 // Manual only
         });
 
         // Add updates
@@ -133,7 +131,7 @@ describe('Issue 2: Compaction Retry Logic', () => {
             firebaseApp: app,
             ydoc,
             path,
-            compactionProbability: 0,
+            maxUpdatesThreshold: 10000,
             testHooks: {
                 beforeTransaction: async () => {
                     failCount++;

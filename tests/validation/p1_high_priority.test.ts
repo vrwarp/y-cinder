@@ -154,7 +154,7 @@ describe('P1 High Priority Issue Validation', () => {
 
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path, {
-                compactionProbability: 0,
+                maxUpdatesThreshold: 10000,
                 maxWaitTime: 10,
             });
 

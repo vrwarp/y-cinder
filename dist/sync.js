@@ -78,7 +78,6 @@ import { extractAllMetadata, aggregateMetadata, isUpdateRedundant } from "./upda
  * const result = await performInitialSync({
  *   db, path, doc: ydoc, uid,
  *   maxUpdatesThreshold: 50,
- *   compactionProbability: 0.01,
  *   isDestroyed: () => false
  * });
  * ```
@@ -235,7 +234,7 @@ export function performInitialSync(ctx) {
  * @returns Unsubscribe function
  */
 export function createUpdateListener(ctx, startAfterDoc = null) {
-    const { db, path, doc: ydoc, uid, maxUpdatesThreshold, compactionProbability, onCompactionNeeded, onListenerError, isDestroyed } = ctx;
+    const { db, path, doc: ydoc, uid, maxUpdatesThreshold, onCompactionNeeded, onListenerError, isDestroyed } = ctx;
     let liveUpdatesQ;
     if (startAfterDoc) {
         // P1.9 FIX: Continue exactly where sync left off to prevent "Sync Gap"
@@ -253,14 +252,10 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
         // Note: snapshot.size may be capped by limitToLast, so we check docChanges for additions
         if (snapshot.size >= DEFAULTS.REALTIME_LIMIT && onCompactionNeeded) {
             // At capacity - definitely need compaction
-            if (Math.random() < compactionProbability) {
-                onCompactionNeeded();
-            }
+            onCompactionNeeded();
         }
         else if (snapshot.size > maxUpdatesThreshold && onCompactionNeeded) {
-            if (Math.random() < compactionProbability) {
-                onCompactionNeeded();
-            }
+            onCompactionNeeded();
         }
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {

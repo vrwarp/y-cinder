@@ -77,6 +77,12 @@ export interface FireProviderConfig {
      * @internal
      */
     testHooks?: TestHooks;
+    /**
+     * Whether to enable Firestore offline persistence.
+     */
+    persistence?: {
+        enabled: boolean;
+    };
 }
 
 /**
@@ -115,6 +121,10 @@ export const DEFAULTS = {
     SYNC_BATCH_SIZE: 100,
     /** Maximum updates to track in real-time listener (P0.2 fix) */
     REALTIME_LIMIT: 200,
+    /** Firestore maximum document size in bytes (1MB) */
+    FIRESTORE_DOC_LIMIT: 1_048_576,
+    /** Maximum consecutive save failures before emitting save-rejected */
+    MAX_SAVE_RETRIES: 5,
 } as const;
 
 // Type augmentation for internal Yjs API

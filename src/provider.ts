@@ -14,6 +14,8 @@
 import { FirebaseApp } from "@firebase/app";
 import {
   getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
   Firestore,
   Unsubscribe,
   collection,
@@ -112,6 +114,8 @@ export class FireProvider extends ObservableV2<any> {
   private _cachedClockOffset: number | undefined = undefined;
   /** P0.5 FIX: Flag to prevent race condition during save */
   private _isSaving = false;
+  /** Consecutive save failure counter for circuit breaker */
+  private _saveRetryCount = 0;
   /** P1.4 FIX: Sync retry counter for exponential backoff */
   private _syncRetryCount = 0;
   /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
@@ -156,7 +160,25 @@ export class FireProvider extends ObservableV2<any> {
     }
 
     this.firebaseApp = firebaseApp;
-    this.db = getFirestore(firebaseApp);
+
+    // Check if offline persistence is enabled
+    if (config.persistence?.enabled) {
+      try {
+        this.db = initializeFirestore(firebaseApp, {
+          localCache: persistentLocalCache({})
+        });
+      } catch (err: any) {
+        if (err.code === 'failed-precondition') {
+          // Firestore has already been initialized in another tab/instance
+          this.db = getFirestore(firebaseApp);
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      this.db = getFirestore(firebaseApp);
+    }
+
     this.path = path;
     this.doc = ydoc;
     this.uid = generateSessionId();
@@ -484,6 +506,9 @@ export class FireProvider extends ObservableV2<any> {
    * Saves the cached update to Firestore.
    * P0.5 FIX: Uses _isSaving flag to prevent race condition where
    * updates arriving during save could be duplicated or lost.
+   * 
+   * Circuit breaker: Detects oversized documents and generic persistent
+   * failures. Emits 'save-rejected' event instead of retrying forever.
    */
   private async saveToFirestore(): Promise<void> {
     if (!this.updateCache || this._isSaving) return;
@@ -493,6 +518,24 @@ export class FireProvider extends ObservableV2<any> {
     // Take the current cache for this save operation
     const update = this.updateCache;
     this.updateCache = null;
+
+    // Proactive size check: reject before even attempting the write
+    if (update.byteLength > DEFAULTS.FIRESTORE_DOC_LIMIT) {
+      this._isSaving = false;
+      console.error(
+        `Update rejected: ${update.byteLength} bytes exceeds Firestore limit of ${DEFAULTS.FIRESTORE_DOC_LIMIT} bytes`
+      );
+      this.emit('save-rejected', [{
+        code: 'document-too-large' as const,
+        sizeBytes: update.byteLength,
+        limitBytes: DEFAULTS.FIRESTORE_DOC_LIMIT,
+        error: new Error(
+          `Update size (${update.byteLength} bytes) exceeds Firestore document limit (${DEFAULTS.FIRESTORE_DOC_LIMIT} bytes)`
+        ),
+        update,
+      }]);
+      return;
+    }
 
     const metas = extractAllMetadata(update);
     const docData: any = {
@@ -505,13 +548,51 @@ export class FireProvider extends ObservableV2<any> {
     try {
       await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), docData);
 
+      // Reset retry counter on success
+      this._saveRetryCount = 0;
+
       // P0.5 FIX: Check if new updates arrived during save
       // If so, schedule another save
       if (this.updateCache) {
         this._debouncedSave();
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Failed to save update to Firestore", err);
+
+      // Detect Firestore size-limit error (server-side rejection)
+      const isDocTooLarge =
+        err?.code === 'invalid-argument' ||
+        err?.message?.includes('exceeds the maximum') ||
+        err?.message?.includes('too large');
+
+      if (isDocTooLarge) {
+        // Terminal: the data will never fit, do not retry
+        this.emit('save-rejected', [{
+          code: 'document-too-large' as const,
+          sizeBytes: update.byteLength,
+          limitBytes: DEFAULTS.FIRESTORE_DOC_LIMIT,
+          error: err instanceof Error ? err : new Error(String(err)),
+          update,
+        }]);
+        return;
+      }
+
+      // Generic failure: apply retry cap
+      this._saveRetryCount++;
+
+      if (this._saveRetryCount >= DEFAULTS.MAX_SAVE_RETRIES) {
+        console.error(
+          `Save failed after ${this._saveRetryCount} consecutive attempts, giving up.`
+        );
+        this.emit('save-rejected', [{
+          code: 'max-retries-exceeded' as const,
+          retries: this._saveRetryCount,
+          error: err instanceof Error ? err : new Error(String(err)),
+          update,
+        }]);
+        this._saveRetryCount = 0;
+        return;
+      }
 
       // Recovery: Merge back the update we failed to save
       // with any new updates that arrived during the attempt

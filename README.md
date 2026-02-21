@@ -119,6 +119,40 @@ The `FireProvider` constructor accepts the following configuration options:
 - **`provider.compact()`**:
   Manually triggers the compaction process. Usually handled automatically.
 
+### Events
+
+The provider extends `ObservableV2` and emits the following events:
+
+| Event | Payload | Description |
+| :--- | :--- | :--- |
+| `connection-error` | `{ code: string, message: string, error: Error }` | Emitted when a Firestore listener encounters an error. |
+| `sync-failure` | `Error` | Emitted when initial sync fails after all retry attempts. |
+| `save-rejected` | See below | Emitted when a local update **cannot** be persisted to Firestore. |
+
+**`save-rejected` payload:**
+
+```typescript
+{
+  code: 'document-too-large' | 'max-retries-exceeded';
+  sizeBytes?: number;    // Present for document-too-large
+  limitBytes?: number;   // Present for document-too-large (1MB)
+  retries?: number;      // Present for max-retries-exceeded
+  error: Error;          // The underlying error
+  update: Uint8Array;    // The rejected Yjs update (for recovery)
+}
+```
+
+**Example — handling oversized documents:**
+
+```typescript
+provider.on('save-rejected', (event) => {
+  if (event.code === 'document-too-large') {
+    console.error(`Document too large (${event.sizeBytes} bytes)`);
+    // Recovery: save to IndexedDB, alert user, etc.
+  }
+});
+```
+
 ## Firestore Rules
 
 To ensure proper functionality, your Firestore security rules must allow **read and write** access to the document path and its subcollections.
@@ -145,7 +179,7 @@ However, users should evaluate their specific constraints:
 - **Latency**: Firestore snapshot listeners typically have higher latency (500ms - 1s) compared to dedicated WebSocket servers (< 50ms). This makes `y-cinder` excellent for collaborative editing (docs, notes) but unsuitable for high-frequency real-time applications like gaming or cursor tracking.
 - **Cost vs. Scale**: While `y-cinder` is highly optimized, every keystroke debounced to a write is still a Firestore operation. Documents with extreme concurrency (50+ active users simultaneously) may still incur significant costs or hit Firestore's write rate limits on specific index ranges.
 - **Client-Side Maintenance**: Compaction tasks are distributed among clients. While this keeps the architecture "serverless," it means active clients must burn some CPU and bandwidth to maintain database health.
-- **Storage Limits**: Firestore has a strict 1MB limit per document. While `y-cinder` chunks history segments, the base "Snapshot" (the latest state of the document) must fit within 1MB. Extremely large documents may hit this hard limit.
+- **Storage Limits**: Firestore has a strict 1MB limit per document. While `y-cinder` chunks history segments, individual updates and the base snapshot must each fit within 1MB. If an update exceeds this limit, the provider emits a `save-rejected` event with `code: 'document-too-large'` and includes the rejected update for consumer recovery.
 
 ## Contributors
 

@@ -73,6 +73,12 @@ export interface FireProviderConfig {
      * @internal
      */
     testHooks?: TestHooks;
+    /**
+     * Whether to enable Firestore offline persistence.
+     */
+    persistence?: {
+        enabled: boolean;
+    };
 }
 /**
  * Origins used to tag updates from Firebase.
@@ -108,6 +114,10 @@ export declare const DEFAULTS: {
     readonly SYNC_BATCH_SIZE: 100;
     /** Maximum updates to track in real-time listener (P0.2 fix) */
     readonly REALTIME_LIMIT: 200;
+    /** Firestore maximum document size in bytes (1MB) */
+    readonly FIRESTORE_DOC_LIMIT: 1048576;
+    /** Maximum consecutive save failures before emitting save-rejected */
+    readonly MAX_SAVE_RETRIES: 5;
 };
 declare module 'yjs' {
     function decodeUpdate(update: Uint8Array): {

@@ -68,6 +68,8 @@ export declare class FireProvider extends ObservableV2<any> {
     private _cachedClockOffset;
     /** P0.5 FIX: Flag to prevent race condition during save */
     private _isSaving;
+    /** Consecutive save failure counter for circuit breaker */
+    private _saveRetryCount;
     /** P1.4 FIX: Sync retry counter for exponential backoff */
     private _syncRetryCount;
     /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
@@ -137,6 +139,9 @@ export declare class FireProvider extends ObservableV2<any> {
      * Saves the cached update to Firestore.
      * P0.5 FIX: Uses _isSaving flag to prevent race condition where
      * updates arriving during save could be duplicated or lost.
+     *
+     * Circuit breaker: Detects oversized documents and generic persistent
+     * failures. Emits 'save-rejected' event instead of retrying forever.
      */
     private saveToFirestore;
 }

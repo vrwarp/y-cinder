@@ -43,12 +43,13 @@ import {
     query,
     orderBy,
     getDocs,
+    getDoc,
     serverTimestamp,
     limit,
     DocumentReference,
     Timestamp,
 } from "@firebase/firestore";
-import { ref, uploadBytes, deleteObject, FirebaseStorage } from "@firebase/storage";
+import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
@@ -96,8 +97,6 @@ export interface CompactionResult {
     historySegmentsMerged: number;
     /** Error if compaction failed */
     error?: Error;
-    /** Previous version integer if a snapshot was created */
-    previousVersion?: number;
 }
 
 /**
@@ -170,17 +169,95 @@ export async function compact(
             await testHooks.beforeTransaction();
         }
 
+        // === STEP 2: Read current state outside transaction to prepare upload ===
+        // This avoids uploading files inside a potentially repeating transaction block
+        const mainRef = doc(db, path);
+        const mainSnap = await getDoc(mainRef);
+
+        let baseSnapshot: Uint8Array | null = null;
+        let currentVersion = 0;
+
+        if (mainSnap.exists()) {
+            const data = mainSnap.data();
+            // Fetch from Cloud Storage if configured
+            if (data?.snapshotStoragePath) {
+                try {
+                    const storageRef = ref(storage, data.snapshotStoragePath);
+                    const buffer = await getBytes(storageRef);
+                    baseSnapshot = new Uint8Array(buffer);
+                } catch (e) {
+                    console.error("Compaction failed to download base snapshot from storage", e);
+                    throw e; // Cannot safely compact without base state
+                }
+            } else if (data?.content) {
+                baseSnapshot = (data.content as Bytes).toUint8Array();
+            }
+            if (typeof data?.version === 'number') {
+                currentVersion = data.version;
+            }
+        }
+
+        // Read updates
+        const updatesToProcess: { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp }[] = [];
+        for (const uDoc of updateDocs) {
+            const freshSnap = await getDoc(uDoc.ref);
+            if (freshSnap.exists()) {
+                const data = freshSnap.data() as Record<string, any>;
+                if (data?.update) {
+                    updatesToProcess.push({
+                        ref: uDoc.ref,
+                        data: (data.update as Bytes).toUint8Array(),
+                        createdAt: data.createdAt,
+                    });
+                }
+            }
+        }
+
+        // Read history
+        const historyToMerge: { ref: DocumentReference; val: Uint8Array }[] = [];
+        for (const hDoc of historyDocs) {
+            const freshSnap = await getDoc(hDoc.ref);
+            if (freshSnap.exists()) {
+                const data = freshSnap.data() as Record<string, any>;
+                if (data?.segment) {
+                    historyToMerge.push({
+                        ref: hDoc.ref,
+                        val: (data.segment as Bytes).toUint8Array(),
+                    });
+                }
+            }
+        }
+
+        if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
+             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
+        }
+
+        // === STEP 3: Merge and Upload (Outside Transaction) ===
+        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
+        const candidate = await mergeUpdatesAsync(allContent);
+
+        const nextVersion = currentVersion + 1;
+        const snapshotFilename = `snapshot_v${nextVersion}.bin`;
+        const storagePath = `${path}/${snapshotFilename}`;
+        const storageRef = ref(storage, storagePath);
+
+        // Upload candidate blob to Cloud Storage first
+        // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
+        await uploadBytes(storageRef, candidate);
+
+        // === STEP 4: Transaction ===
         const result = await performCompactionTransaction({
             db,
             path,
             uid,
             updateDocs,
             historyDocs,
-            storage,
+            storagePath,
+            candidate,
+            expectedVersion: currentVersion,
         });
 
         // Garbage Collect Old Storage Snapshot
-        // If compaction succeeded and produced a new snapshot, delete the previous one to prevent accumulation.
         if (result.success && result.type === 'snapshot' && result.previousVersion !== undefined && result.previousVersion > 0) {
             try {
                 const oldSnapshotPath = `${path}/snapshot_v${result.previousVersion}.bin`;
@@ -188,7 +265,6 @@ export async function compact(
                 await deleteObject(oldStorageRef);
                 console.log(`Garbage collected old snapshot: ${oldSnapshotPath}`);
             } catch (err) {
-                // We shouldn't fail compaction if GC fails, as the new data is safe.
                 console.warn(`Failed to garbage collect old snapshot for ${path}`, err);
             }
         }
@@ -205,6 +281,8 @@ export async function compact(
 
 /**
  * Performs the actual compaction within a Firestore transaction.
+ *
+ * Verifies the version and deletes processed documents.
  */
 async function performCompactionTransaction(params: {
     db: Firestore;
@@ -212,14 +290,14 @@ async function performCompactionTransaction(params: {
     uid: string;
     updateDocs: any[];
     historyDocs: any[];
-    storage: FirebaseStorage;
+    storagePath: string;
+    candidate: Uint8Array;
+    expectedVersion: number;
 }): Promise<CompactionResult> {
-    const { db, path, uid, updateDocs, historyDocs, storage } = params;
+    const { db, path, uid, updateDocs, historyDocs, storagePath, candidate, expectedVersion } = params;
 
     return await runTransaction(db, async (transaction) => {
-
         // === STEP A: THE KILL SWITCH ===
-        // Re-read the lock to ensure we still own it
         const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
         const lockSnap = await transaction.get(lockRef);
 
@@ -227,51 +305,36 @@ async function performCompactionTransaction(params: {
             throw new Error("Lock lost or expired during compaction phase - Aborting write.");
         }
 
-        // === STEP B: Read current state ===
+        // === STEP B: Read current state & verify version ===
         const mainRef = doc(db, path);
         const mainSnap = await transaction.get(mainRef);
 
-        let baseSnapshot: Uint8Array | null = null;
         let currentVersion = 0;
-
         if (mainSnap.exists()) {
             const data = mainSnap.data();
-            if (data?.content) {
-                baseSnapshot = (data.content as Bytes).toUint8Array();
-            }
             if (typeof data?.version === 'number') {
                 currentVersion = data.version;
             }
         }
 
-        // Read updates to merge (re-read in transaction for consistency)
-        const updatesToProcess: { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp }[] = [];
+        if (currentVersion !== expectedVersion) {
+            throw new Error("Document version changed during compaction upload. Aborting to retry.");
+        }
+
+        // Verify updates still exist (avoid zombie bugs)
+        const updatesToProcess: { ref: DocumentReference }[] = [];
         for (const uDoc of updateDocs) {
             const freshSnap = await transaction.get(uDoc.ref);
             if (freshSnap.exists()) {
-                const data = freshSnap.data() as Record<string, any>;
-                if (data?.update) {
-                    updatesToProcess.push({
-                        ref: uDoc.ref,
-                        data: (data.update as Bytes).toUint8Array(),
-                        createdAt: data.createdAt,
-                    });
-                }
+                updatesToProcess.push({ ref: uDoc.ref });
             }
         }
 
-        // Read history segments
-        const historyToMerge: { ref: DocumentReference; val: Uint8Array }[] = [];
+        const historyToMerge: { ref: DocumentReference }[] = [];
         for (const hDoc of historyDocs) {
             const freshSnap = await transaction.get(hDoc.ref);
             if (freshSnap.exists()) {
-                const data = freshSnap.data() as Record<string, any>;
-                if (data?.segment) {
-                    historyToMerge.push({
-                        ref: hDoc.ref,
-                        val: (data.segment as Bytes).toUint8Array(),
-                    });
-                }
+                historyToMerge.push({ ref: hDoc.ref });
             }
         }
 
@@ -279,25 +342,7 @@ async function performCompactionTransaction(params: {
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
         }
 
-        // === STEP C: Perform Merge ===
-        // CRITICAL FIX: Use async merge to avoid blocking main thread
-        // Note: Inside transaction, this may fall back to sync if worker unavailable
-        // We always merge everything into a single Cloud Storage snapshot now.
-        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
-
-        const candidate = await mergeUpdatesAsync(allContent);
-
-        // Upload to Cloud Storage
-        const nextVersion = currentVersion + 1;
-        const snapshotFilename = `snapshot_v${nextVersion}.bin`;
-        // Using full path including the document path
-        const storagePath = `${path}/${snapshotFilename}`;
-        const storageRef = ref(storage, storagePath);
-
-        // Upload candidate blob to Cloud Storage first (outside transaction, but before we commit it)
-        // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
-        await uploadBytes(storageRef, candidate);
-
+        // === STEP C: Commit Pointers ===
         return compactToSnapshot({
             transaction,
             mainRef,
@@ -341,10 +386,8 @@ function compactToSnapshot(params: {
         type: 'snapshot',
         updatesCompacted: updatesToProcess.length,
         historySegmentsMerged: historyToMerge.length,
-        previousVersion: currentVersion,
     };
 }
-
 
 /**
  * Handles compaction errors with exponential backoff retry.

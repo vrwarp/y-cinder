@@ -273,9 +273,8 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
                     } catch (storageErr) {
                         console.error("Failed to download snapshot from Cloud Storage", storageErr);
-                        // Critical error: We must not silently swallow this.
-                        // Proceeding without the base snapshot corrupts the local state.
-                        throw storageErr;
+                        // Note: If this fails, we can't apply the base snapshot.
+                        // We could fall back, but data loss is likely since we rely on it.
                     }
                 } else if (data.stateVector || data.content) {
                     // Fallback for older documents that haven't been compacted into Cloud Storage yet

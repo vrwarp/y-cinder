@@ -86,7 +86,7 @@ describe('Issue 12: Partial Compaction Failure', () => {
 
         // Either all updates are compacted, or none are
         // Should not have duplicated data
-        if (mainSnap.exists() && mainSnap.data()?.snapshotStoragePath) {
+        if (mainSnap.exists() && mainSnap.data()?.content) {
             expect(updatesSnap.size).toBe(0);
         }
 

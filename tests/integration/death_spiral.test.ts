@@ -99,8 +99,7 @@ describe('FireProvider Death Spiral Repro', () => {
             console.log(`Main doc: does not exist`);
         }
 
-        // We removed chunking so it will just be 1 big snapshot now
-        // But previously it expected history chunks. We will expect main snap or history chunks.
+        // History size might be 0 now since we do full snapshots.
         expect(mainSnap.data()?.snapshotStoragePath || historySnap.size >= 1).toBeTruthy();
 
         // 4. Verify data integrity

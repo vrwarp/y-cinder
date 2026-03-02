@@ -4,6 +4,10 @@ import * as Y from 'yjs';
 import * as firestore from '@firebase/firestore';
 
 // Mock Firestore
+vi.mock('@firebase/storage', () => ({
+    getStorage: vi.fn(() => ({})),
+}));
+
 vi.mock('@firebase/firestore', () => ({
     getFirestore: vi.fn(),
     doc: vi.fn((db, path, ...segments) => ({ path: [path, ...segments].join('/') })),

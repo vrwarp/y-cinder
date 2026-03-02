@@ -33,7 +33,9 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
         const seed = `destroy-flush-${getStableDate()}-${counter++}`;
         // console.log(`Test Seed: ${seed}`);
         const rng = seedFromString(seed);
-        app = initializeApp({ projectId: PROJECT_ID }, `app-${seed}-${rng.string(5)}`);
+        const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
+        app = a;
+        db = d;
         db = getFirestore(app);
         connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
         path = `tests/${seed}`;

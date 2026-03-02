@@ -15,6 +15,14 @@ vi.mock('@firebase/firestore', async (importOriginal) => {
     };
 });
 
+vi.mock('@firebase/storage', async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        getStorage: vi.fn(() => ({ type: 'storage-mock' })),
+    };
+});
+
 describe('FireProvider Persistence', () => {
     let mockApp: any;
     let doc: Y.Doc;

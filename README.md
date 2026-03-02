@@ -163,6 +163,16 @@ match /path/to/your/document/{document=**} {
 }
 ```
 
+You must also configure your Cloud Storage security rules to match:
+
+```
+match /b/{bucket}/o {
+  match /path/to/your/document/{allPaths=**} {
+    allow read, write: if <your-auth-condition>;
+  }
+}
+```
+
 y-cinder writes to the following subcollections:
 - `updates`
 - `history`

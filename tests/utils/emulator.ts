@@ -95,18 +95,23 @@ export const setupEmulator = async () => {
         app = initializeApp({
             projectId: PROJECT_ID,
             apiKey: "fake-api-key",
+            storageBucket: `${PROJECT_ID}.appspot.com`,
         });
     }
 
     const db = getFirestore(app);
 
+    const { getStorage, connectStorageEmulator } = await import("firebase/storage");
+    const storage = getStorage(app);
+
     // Only connect once per process to avoid "already started" error
     if (!emulatorConnected) {
         connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
+        connectStorageEmulator(storage, EMULATOR_HOST, 9199);
         emulatorConnected = true;
     }
 
-    return { app, db };
+    return { app, db, storage };
 };
 
 /**

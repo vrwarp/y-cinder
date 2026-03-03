@@ -12,7 +12,8 @@
     "test": "./scripts/test.sh",
     "version-bump": "node scripts/bump-version.js",
     "emulators:start": "firebase emulators:start",
-    "emulators:stop": "lsof -t -i:5001 -i:5002 -i:8080 -i:9000 -i:9099 -i:9199 -i:9090 | xargs kill -9"
+    "emulators:stop": "lsof -t -i:5001 -i:5002 -i:8080 -i:9000 -i:9099 -i:9199 -i:9090 | xargs kill -9",
+    "debugger": "cd debugger && npm run dev"
   },
   "repository": {
     "type": "git",

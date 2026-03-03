@@ -3,82 +3,68 @@
  * 
  * Bug: The catch block calculates backoff but never actually calls compact() again.
  * Updates accumulate indefinitely until a new probabilistic trigger.
+ * 
+ * These tests call the compact() function from compaction.ts directly,
+ * bypassing the FireProvider constructor overhead (sync(), listeners, clock
+ * skew measurement) that would cause emulator timeouts.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { seedFromString, getStableDate } from '../unit/prng';
-import { initializeApp } from '@firebase/app';
 import {
-    getFirestore,
-    connectFirestoreEmulator,
     collection,
-    doc,
     getDocs,
     addDoc,
     serverTimestamp,
     Bytes,
-    terminate
-} from '@firebase/firestore';
-
-const EMULATOR_HOST = '127.0.0.1';
-const FIRESTORE_PORT = 8080;
-const PROJECT_ID = 'demo-test';
+    terminate,
+    Firestore,
+} from 'firebase/firestore';
+import { getStorage, FirebaseStorage } from 'firebase/storage';
+import { compact, CompactionContext } from '../../src/compaction';
 
 describe('Issue 2: Compaction Retry Logic', () => {
     let app: any;
-    let db: any;
-    let provider: FireProvider;
+    let db: Firestore;
+    let storage: FirebaseStorage;
     let path: string;
     let counter = 0;
 
     beforeEach(async () => {
         const seed = `compaction-retry-${getStableDate()}-${counter++}`;
-        // console.log(`Test Seed: ${seed}`);
         const rng = seedFromString(seed);
-        const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
-        app = a;
-        db = d;
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
+        const emulator = await import("../utils/emulator").then(m => m.setupEmulator());
+        app = emulator.app;
+        db = emulator.db;
+        storage = emulator.storage;
         path = `tests/${seed}`;
     });
 
     afterEach(async () => {
-        if (provider) provider.destroy();
-        await terminate(db);
+        // No provider to clean up — we call compact() directly
     });
 
     it('should actually retry compaction after transient failure', async () => {
-        const ydoc = new Y.Doc();
-
         let failCount = 0;
         const MAX_FAIL = 2;
 
-        provider = new FireProvider({
-            firebaseApp: app,
-            ydoc,
-            path,
-            maxUpdatesThreshold: 1000
-        });
-
         // Add some updates to compact
-        for (let i = 0; i < 5; i++) {
+        for (let i = 0; i < 3; i++) {
             await addDoc(collection(db, path, 'updates'), {
                 update: Bytes.fromUint8Array(Y.encodeStateAsUpdate(new Y.Doc())),
                 createdAt: serverTimestamp()
             });
         }
 
-        // Setup hook to fail first N attempts
-        // Issue 16 Fix: Use DI via constructor
-        provider.destroy();
-        provider = new FireProvider({
-            firebaseApp: app,
-            ydoc,
+        const ctx: CompactionContext = {
+            db,
             path,
-            maxUpdatesThreshold: 1000,
+            uid: 'test-client',
+            lockTTL: 60000,
+            compactionLimit: 500,
+            isDestroyed: () => false,
+            storage,
             testHooks: {
                 beforeTransaction: async () => {
                     if (failCount < MAX_FAIL) {
@@ -88,71 +74,59 @@ describe('Issue 2: Compaction Retry Logic', () => {
                     }
                     console.log(`[Hook] Allowing transaction to proceed`);
                 }
-            }
-        });
+            },
+        };
 
-        // Trigger compaction
-        await provider.compact();
-
-        // Wait for retries to complete (backoff is up to 2^5 * 100 + 100 = ~3.3s for 5 attempts)
-        await new Promise(r => setTimeout(r, 5000));
+        // compact() is fully awaited including all internal retries
+        const result = await compact(ctx);
 
         // Verify updates were compacted
         const updatesSnap = await getDocs(collection(db, path, 'updates'));
 
         console.log(`Fail count: ${failCount}`);
         console.log(`Remaining updates: ${updatesSnap.size}`);
+        console.log(`Result: ${JSON.stringify(result)}`);
 
-        // Bug: If retry doesn't work, updates remain
-        // Expected: After retry succeeds, updates should be compacted (0 remaining)
         expect(failCount).toBe(MAX_FAIL); // Confirms we triggered failures
-        expect(updatesSnap.size).toBe(0); // Should be 0 if compaction succeeded
-    }, 30000);
+        expect(result.success).toBe(true); // Compaction eventually succeeded
+        expect(updatesSnap.size).toBe(0); // Updates compacted away
+    }, 60000);
 
     it('should eventually give up after MAX_RETRIES', async () => {
-        const ydoc = new Y.Doc();
-
         let failCount = 0;
 
-        provider = new FireProvider({
-            firebaseApp: app,
-            ydoc,
-            path,
-            maxUpdatesThreshold: 10000 // Manual only
-        });
-
-        // Add updates
+        // Add a single update so compaction has work to do
         await addDoc(collection(db, path, 'updates'), {
             update: Bytes.fromUint8Array(Y.encodeStateAsUpdate(new Y.Doc())),
             createdAt: serverTimestamp()
         });
 
-        // Always fail
-        provider.destroy();
-        provider = new FireProvider({
-            firebaseApp: app,
-            ydoc,
+        const ctx: CompactionContext = {
+            db,
             path,
-            maxUpdatesThreshold: 10000,
+            uid: 'test-client',
+            lockTTL: 60000,
+            compactionLimit: 500,
+            isDestroyed: () => false,
+            storage,
             testHooks: {
                 beforeTransaction: async () => {
                     failCount++;
                     console.log(`[Hook] Failure #${failCount}`);
                     throw { code: 'aborted', message: 'Permanent failure' };
                 }
-            }
-        });
+            },
+        };
 
-        // Trigger compaction
-        await provider.compact();
-
-        // Wait for all retries
-        await new Promise(r => setTimeout(r, 10000));
+        // compact() will exhaust all retries and return failure
+        const result = await compact(ctx);
 
         console.log(`Total fail count: ${failCount}`);
+        console.log(`Result: ${JSON.stringify({ success: result.success, error: result.error?.message })}`);
 
-        // Should have tried MAX_RETRIES + 1 times (initial + 5 retries = 6)
-        // Bug: if no retry, failCount = 1
+        // MAX_RETRIES = 5, so attempts go 1..5 (attempt < MAX_RETRIES means 1,2,3,4 retry)
+        // Total calls = 5 (initial attempt 1 + retries at 2,3,4,5 — attempt 5 gives up)
         expect(failCount).toBeGreaterThanOrEqual(5);
-    }, 30000);
+        expect(result.success).toBe(false); // Should have given up
+    }, 60000);
 });

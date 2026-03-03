@@ -37,7 +37,9 @@ describe('Issue 12: Partial Compaction Failure', () => {
         const seed = `partial-compact-${getStableDate()}-${counter++}`;
         // console.log(`Test Seed: ${seed}`);
         const rng = seedFromString(seed);
-        app = initializeApp({ projectId: PROJECT_ID }, `app-${seed}-${rng.string(5)}`);
+        const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
+        app = a;
+        db = d;
         db = getFirestore(app);
         connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
         path = `tests/${seed}`;

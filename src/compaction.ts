@@ -43,11 +43,13 @@ import {
     query,
     orderBy,
     getDocs,
+    getDoc,
     serverTimestamp,
     limit,
     DocumentReference,
     Timestamp,
 } from "@firebase/firestore";
+import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
@@ -77,6 +79,8 @@ export interface CompactionContext {
     onCompactionStateChange?: (isCompacting: boolean) => void;
     /** P0.3 FIX: Cached clock offset to pass to locking */
     cachedClockOffset?: number;
+    /** Firebase Storage instance */
+    storage: FirebaseStorage;
 }
 
 /**
@@ -125,7 +129,7 @@ export async function compact(
     ctx: CompactionContext,
     attempt: number = 1
 ): Promise<CompactionResult> {
-    const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange, cachedClockOffset } = ctx;
+    const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange, cachedClockOffset, storage } = ctx;
 
     // 1. Distributed Gate: Try to become the Leader
     // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
@@ -165,13 +169,105 @@ export async function compact(
             await testHooks.beforeTransaction();
         }
 
+        // === STEP 2: Read current state outside transaction to prepare upload ===
+        // This avoids uploading files inside a potentially repeating transaction block
+        const mainRef = doc(db, path);
+        const mainSnap = await getDoc(mainRef);
+
+        let baseSnapshot: Uint8Array | null = null;
+        let currentVersion = 0;
+
+        if (mainSnap.exists()) {
+            const data = mainSnap.data();
+            // Fetch from Cloud Storage if configured
+            if (data?.snapshotStoragePath) {
+                try {
+                    const storageRef = ref(storage, data.snapshotStoragePath);
+                    const buffer = await getBytes(storageRef);
+                    baseSnapshot = new Uint8Array(buffer);
+                } catch (e) {
+                    console.error("Compaction failed to download base snapshot from storage", e);
+                    throw e; // Cannot safely compact without base state
+                }
+            } else if (data?.content) {
+                baseSnapshot = (data.content as Bytes).toUint8Array();
+            }
+            if (typeof data?.version === 'number') {
+                currentVersion = data.version;
+            }
+        }
+
+        // Read updates
+        const updatesToProcess: { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp }[] = [];
+        for (const uDoc of updateDocs) {
+            const freshSnap = await getDoc(uDoc.ref);
+            if (freshSnap.exists()) {
+                const data = freshSnap.data() as Record<string, any>;
+                if (data?.update) {
+                    updatesToProcess.push({
+                        ref: uDoc.ref,
+                        data: (data.update as Bytes).toUint8Array(),
+                        createdAt: data.createdAt,
+                    });
+                }
+            }
+        }
+
+        // Read history
+        const historyToMerge: { ref: DocumentReference; val: Uint8Array }[] = [];
+        for (const hDoc of historyDocs) {
+            const freshSnap = await getDoc(hDoc.ref);
+            if (freshSnap.exists()) {
+                const data = freshSnap.data() as Record<string, any>;
+                if (data?.segment) {
+                    historyToMerge.push({
+                        ref: hDoc.ref,
+                        val: (data.segment as Bytes).toUint8Array(),
+                    });
+                }
+            }
+        }
+
+        if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
+             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
+        }
+
+        // === STEP 3: Merge and Upload (Outside Transaction) ===
+        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
+        const candidate = await mergeUpdatesAsync(allContent);
+
+        const nextVersion = currentVersion + 1;
+        const snapshotFilename = `snapshot_v${nextVersion}.bin`;
+        const storagePath = `${path}/${snapshotFilename}`;
+        const storageRef = ref(storage, storagePath);
+
+        // Upload candidate blob to Cloud Storage first
+        // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
+        await uploadBytes(storageRef, candidate);
+
+        // === STEP 4: Transaction ===
         const result = await performCompactionTransaction({
             db,
             path,
             uid,
             updateDocs,
             historyDocs,
+            storagePath,
+            candidate,
+            expectedVersion: currentVersion,
         });
+
+        // Garbage Collect Old Storage Snapshot
+        if (result.success && result.type === 'snapshot' && result.previousVersion !== undefined && result.previousVersion > 0) {
+            try {
+                const oldSnapshotPath = `${path}/snapshot_v${result.previousVersion}.bin`;
+                const oldStorageRef = ref(storage, oldSnapshotPath);
+                await deleteObject(oldStorageRef);
+                console.log(`Garbage collected old snapshot: ${oldSnapshotPath}`);
+            } catch (err) {
+                console.warn(`Failed to garbage collect old snapshot for ${path}`, err);
+            }
+        }
 
         return result;
 
@@ -185,6 +281,8 @@ export async function compact(
 
 /**
  * Performs the actual compaction within a Firestore transaction.
+ *
+ * Verifies the version and deletes processed documents.
  */
 async function performCompactionTransaction(params: {
     db: Firestore;
@@ -192,13 +290,14 @@ async function performCompactionTransaction(params: {
     uid: string;
     updateDocs: any[];
     historyDocs: any[];
+    storagePath: string;
+    candidate: Uint8Array;
+    expectedVersion: number;
 }): Promise<CompactionResult> {
-    const { db, path, uid, updateDocs, historyDocs } = params;
+    const { db, path, uid, updateDocs, historyDocs, storagePath, candidate, expectedVersion } = params;
 
     return await runTransaction(db, async (transaction) => {
-
         // === STEP A: THE KILL SWITCH ===
-        // Re-read the lock to ensure we still own it
         const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
         const lockSnap = await transaction.get(lockRef);
 
@@ -206,51 +305,36 @@ async function performCompactionTransaction(params: {
             throw new Error("Lock lost or expired during compaction phase - Aborting write.");
         }
 
-        // === STEP B: Read current state ===
+        // === STEP B: Read current state & verify version ===
         const mainRef = doc(db, path);
         const mainSnap = await transaction.get(mainRef);
 
-        let baseSnapshot: Uint8Array | null = null;
         let currentVersion = 0;
-
         if (mainSnap.exists()) {
             const data = mainSnap.data();
-            if (data?.content) {
-                baseSnapshot = (data.content as Bytes).toUint8Array();
-            }
             if (typeof data?.version === 'number') {
                 currentVersion = data.version;
             }
         }
 
-        // Read updates to merge (re-read in transaction for consistency)
-        const updatesToProcess: { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp }[] = [];
+        if (currentVersion !== expectedVersion) {
+            throw new Error("Document version changed during compaction upload. Aborting to retry.");
+        }
+
+        // Verify updates still exist (avoid zombie bugs)
+        const updatesToProcess: { ref: DocumentReference }[] = [];
         for (const uDoc of updateDocs) {
             const freshSnap = await transaction.get(uDoc.ref);
             if (freshSnap.exists()) {
-                const data = freshSnap.data() as Record<string, any>;
-                if (data?.update) {
-                    updatesToProcess.push({
-                        ref: uDoc.ref,
-                        data: (data.update as Bytes).toUint8Array(),
-                        createdAt: data.createdAt,
-                    });
-                }
+                updatesToProcess.push({ ref: uDoc.ref });
             }
         }
 
-        // Read history segments
-        const historyToMerge: { ref: DocumentReference; val: Uint8Array }[] = [];
+        const historyToMerge: { ref: DocumentReference }[] = [];
         for (const hDoc of historyDocs) {
             const freshSnap = await transaction.get(hDoc.ref);
             if (freshSnap.exists()) {
-                const data = freshSnap.data() as Record<string, any>;
-                if (data?.segment) {
-                    historyToMerge.push({
-                        ref: hDoc.ref,
-                        val: (data.segment as Bytes).toUint8Array(),
-                    });
-                }
+                historyToMerge.push({ ref: hDoc.ref });
             }
         }
 
@@ -258,34 +342,16 @@ async function performCompactionTransaction(params: {
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
         }
 
-        // === STEP C: Perform Merge ===
-        // CRITICAL FIX: Use async merge to avoid blocking main thread
-        // Note: Inside transaction, this may fall back to sync if worker unavailable
-        // Try to merge everything
-        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
-
-        const candidate = await mergeUpdatesAsync(allContent);
-        const sizeInBytes = candidate.byteLength;
-
-        if (candidate.byteLength <= DEFAULTS.TARGET_SNAPSHOT_SIZE) {
-            // Path 1: Compact to Snapshot
-            return await compactToSnapshot({
-                transaction,
-                mainRef,
-                candidate,
-                currentVersion,
-                updatesToProcess,
-                historyToMerge,
-            });
-        } else {
-            // Path 2: Compact to History Segments
-            return await compactToHistory({
-                transaction,
-                db,
-                path,
-                updatesToProcess,
-            });
-        }
+        // === STEP C: Commit Pointers ===
+        return compactToSnapshot({
+            transaction,
+            mainRef,
+            storagePath,
+            candidate,
+            currentVersion,
+            updatesToProcess,
+            historyToMerge,
+        });
     });
 }
 
@@ -295,17 +361,18 @@ async function performCompactionTransaction(params: {
 function compactToSnapshot(params: {
     transaction: any;
     mainRef: DocumentReference;
+    storagePath: string;
     candidate: Uint8Array;
     currentVersion: number;
     updatesToProcess: { ref: DocumentReference }[];
     historyToMerge: { ref: DocumentReference }[];
 }): CompactionResult {
-    const { transaction, mainRef, candidate, currentVersion, updatesToProcess, historyToMerge } = params;
+    const { transaction, mainRef, storagePath, candidate, currentVersion, updatesToProcess, historyToMerge } = params;
 
     console.log(`Compacted to Snapshot (Size: ${candidate.byteLength})`);
 
     transaction.set(mainRef, {
-        content: Bytes.fromUint8Array(candidate),
+        snapshotStoragePath: storagePath,
         stateVector: calculateStateVector(candidate),
         version: currentVersion + 1,
         updatedAt: serverTimestamp(),
@@ -319,178 +386,6 @@ function compactToSnapshot(params: {
         type: 'snapshot',
         updatesCompacted: updatesToProcess.length,
         historySegmentsMerged: historyToMerge.length,
-    };
-}
-
-/**
- * Compacts updates into history segments (with chunking for large updates).
- * CRITICAL FIX: Now async to support off-main-thread merge.
- */
-async function compactToHistory(params: {
-    transaction: any;
-    db: Firestore;
-    path: string;
-    updatesToProcess: { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp }[];
-}): Promise<CompactionResult> {
-    const { transaction, db, path, updatesToProcess } = params;
-
-    if (updatesToProcess.length === 0) {
-        return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
-    }
-
-    const MAX_SEGMENT_SIZE = DEFAULTS.TARGET_SNAPSHOT_SIZE;
-
-    // Try merging all first (optimistic) - CRITICAL FIX: async merge
-    const allUpdates = updatesToProcess.map(u => u.data);
-    const pendingMerge = await mergeUpdatesAsync(allUpdates);
-
-    if (pendingMerge.byteLength < MAX_SEGMENT_SIZE) {
-        // Fast path: It fits in one segment
-        const segmentId = Math.random().toString(36).substring(2);
-        const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
-
-        // P1.2 FIX: Calculate and store stateVector for efficient sync redundancy checks
-        const tempDoc = new Y.Doc();
-        Y.applyUpdate(tempDoc, pendingMerge);
-        const stateVector = toBase64(Y.encodeStateVector(tempDoc));
-
-        transaction.set(historyRef, {
-            segment: Bytes.fromUint8Array(pendingMerge),
-            startTime: updatesToProcess[0].createdAt,
-            endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
-            stateVector, // P1.2 FIX: Pre-computed stateVector
-        });
-
-        for (const item of updatesToProcess) {
-            transaction.delete(item.ref);
-        }
-
-        return {
-            success: true,
-            type: 'history',
-            updatesCompacted: updatesToProcess.length,
-            historySegmentsMerged: 0,
-        };
-    }
-
-    // Slow path: Chunk into multiple segments
-    return await chunkIntoHistorySegments({ transaction, db, path, updatesToProcess, maxSegmentSize: MAX_SEGMENT_SIZE });
-}
-
-/**
- * Chunks updates into multiple history segments when they exceed size limits.
- * 
- * STRATEGY: We keep adding updates to a batch until the ESTIMATED merged size
- * would exceed the limit. Then we flush that batch as a segment.
- * 
- * IMPORTANT: Each segment is independently mergeable because Y.mergeUpdates
- * combines updates with shared history correctly. The sync will apply segments
- * in order, building up the state progressively.
- */
-async function chunkIntoHistorySegments(params: {
-    transaction: any;
-    db: Firestore;
-    path: string;
-    updatesToProcess: { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp }[];
-    maxSegmentSize: number;
-}): Promise<CompactionResult> {
-    const { transaction, db, path, updatesToProcess, maxSegmentSize } = params;
-
-    let currentBatch: Uint8Array[] = [];
-    let batchStartIndex = 0;
-    let segmentsCreated = 0;
-
-    for (let i = 0; i < updatesToProcess.length; i++) {
-        const item = updatesToProcess[i];
-
-        // Add to current batch
-        currentBatch.push(item.data);
-
-        // Check if we should flush (estimate by trying merge)
-        // This is expensive but accurate
-        const merged = await mergeUpdatesAsync(currentBatch);
-        const mergedSize = merged.byteLength;
-
-        // If we exceed limit and have more than 1 item, flush all but the last
-        if (mergedSize >= maxSegmentSize && currentBatch.length > 1) {
-            // Remove the last item (the one that pushed us over)
-            currentBatch.pop();
-
-            // Merge the remaining items
-            const segmentData = await mergeUpdatesAsync(currentBatch);
-            const segmentId = Math.random().toString(36).substring(2);
-            const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
-
-            // FIX: Calculate and store stateVector for efficient sync redundancy checks
-            const tempDoc = new Y.Doc();
-            Y.applyUpdate(tempDoc, segmentData);
-            const encodedSV = Y.encodeStateVector(tempDoc);
-            // Only store SV if it's not empty (length > 1 or non-zero). 
-            // An empty SV ([0]) implies the updates were not applied (e.g. pending dependencies),
-            // so we shouldn't claim to "know" the state is empty.
-            let stateVector: string | undefined;
-            if (encodedSV.length > 1 || encodedSV[0] !== 0) {
-                stateVector = toBase64(encodedSV);
-            }
-
-            const historyData: any = {
-                segment: Bytes.fromUint8Array(segmentData),
-                startTime: updatesToProcess[batchStartIndex].createdAt,
-                endTime: updatesToProcess[i - 1].createdAt,
-            };
-
-            if (stateVector) {
-                historyData.stateVector = stateVector;
-            }
-
-            transaction.set(historyRef, historyData);
-            segmentsCreated++;
-
-            // Start new batch with just the current item
-            currentBatch = [item.data];
-            batchStartIndex = i;
-        }
-    }
-
-    // Flush remaining batch
-    if (currentBatch.length > 0) {
-        const segmentData = await mergeUpdatesAsync(currentBatch);
-        const segmentId = Math.random().toString(36).substring(2);
-        const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
-
-        const tempDoc = new Y.Doc();
-        Y.applyUpdate(tempDoc, segmentData);
-        const encodedSV = Y.encodeStateVector(tempDoc);
-
-        let stateVector: string | undefined;
-        if (encodedSV.length > 1 || encodedSV[0] !== 0) {
-            stateVector = toBase64(encodedSV);
-        }
-
-        const historyData: any = {
-            segment: Bytes.fromUint8Array(segmentData),
-            startTime: updatesToProcess[batchStartIndex].createdAt,
-            endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
-        };
-
-        if (stateVector) {
-            historyData.stateVector = stateVector;
-        }
-
-        transaction.set(historyRef, historyData);
-        segmentsCreated++;
-    }
-
-    // Delete all processed updates
-    for (const item of updatesToProcess) {
-        transaction.delete(item.ref);
-    }
-
-    return {
-        success: true,
-        type: 'history',
-        updatesCompacted: updatesToProcess.length,
-        historySegmentsMerged: segmentsCreated,
     };
 }
 

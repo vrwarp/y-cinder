@@ -1,0 +1,18 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /path/to/your/document/{allPaths=**} {
+      allow read, write: if request.auth != null;
+    }
+    // Emulator test path fallback (safe for testing)
+    match /tests/{allPaths=**} {
+      allow read, write: if true;
+    }
+    match /validation/{allPaths=**} {
+      allow read, write: if true;
+    }
+    match /depth-tests/{allPaths=**} {
+      allow read, write: if true;
+    }
+  }
+}

@@ -13,6 +13,9 @@ vi.mock('firebase/firestore', () => ({
     addDoc: vi.fn(),
     query: vi.fn(),
 }));
+vi.mock('firebase/storage', () => ({
+    getStorage: vi.fn(),
+}));
 
 describe('FireProvider Configuration Validation', () => {
     const mockApp: any = {};

@@ -99,7 +99,8 @@ describe('FireProvider Death Spiral Repro', () => {
             console.log(`Main doc: does not exist`);
         }
 
-        expect(historySnap.size).toBeGreaterThanOrEqual(1);
+        // History size might be 0 now since we do full snapshots.
+        expect(mainSnap.data()?.snapshotStoragePath || historySnap.size >= 1).toBeTruthy();
 
         // 4. Verify data integrity
         await provider.destroy();

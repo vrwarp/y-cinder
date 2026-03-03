@@ -79,8 +79,8 @@ describe('Distributed Compaction Lock', () => {
 
         // Updates should be gone (compacted)
         expect(updates.empty).toBe(true);
-        // Should have result in main or history
-        expect(main.data()?.content || !history.empty).toBeTruthy();
+        // Should have result in main (via Cloud Storage) or history
+        expect(main.data()?.snapshotStoragePath || !history.empty).toBeTruthy();
 
         // Lock should be released
         const lockRef = doc(db, path, 'metadata/lock_compaction');

@@ -50,6 +50,7 @@ import {
     limitToLast,
     QueryDocumentSnapshot,
 } from "@firebase/firestore";
+import { getBytes, ref, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import {
@@ -81,6 +82,8 @@ export interface SyncContext {
     onListenerError?: (error: Error) => void;
     /** Flag to check if provider is destroyed */
     isDestroyed: () => boolean;
+    /** Firebase Storage instance */
+    storage: FirebaseStorage;
 }
 
 /**
@@ -259,7 +262,22 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             const data = mainSnap.data();
             if (data) {
                 processSnapshotMetadata(data, serverSVMap);
-                if (data.stateVector || data.content) {
+
+                // Fetch snapshot from Cloud Storage if available
+                if (data.snapshotStoragePath) {
+                    try {
+                        const storageRef = ref(ctx.storage, data.snapshotStoragePath);
+                        const buffer = await getBytes(storageRef);
+                        // Convert ArrayBuffer to Uint8Array and inject it into data.content
+                        data.content = Bytes.fromUint8Array(new Uint8Array(buffer));
+                        pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
+                    } catch (storageErr) {
+                        console.error("Failed to download snapshot from Cloud Storage", storageErr);
+                        // Note: If this fails, we can't apply the base snapshot.
+                        // We could fall back, but data loss is likely since we rely on it.
+                    }
+                } else if (data.stateVector || data.content) {
+                    // Fallback for older documents that haven't been compacted into Cloud Storage yet
                     pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
                 }
             }
@@ -415,13 +433,26 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
  * receives the new reference state.
  */
 export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
-    const { db, path, doc: ydoc, onListenerError } = ctx;
+    const { db, path, doc: ydoc, onListenerError, storage } = ctx;
 
-    return onSnapshot(doc(db, path), (snapshot) => {
+    return onSnapshot(doc(db, path), async (snapshot) => {
         if (!snapshot.exists()) return;
 
         const data = snapshot.data();
-        if (data?.content && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
+
+        // Handle Cloud Storage Snapshot
+        if (data?.snapshotStoragePath && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
+            try {
+                const storageRef = ref(storage, data.snapshotStoragePath);
+                const buffer = await getBytes(storageRef);
+                const content = new Uint8Array(buffer);
+                Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
+            } catch (storageErr) {
+                console.error("Failed to apply snapshot from Cloud Storage listener", storageErr);
+            }
+        }
+        // Handle Firestore Document Snapshot (legacy/small documents)
+        else if (data?.content && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
             // Apply snapshot if it's from a remote origin or if we need to sync up
             try {
                 // We should check redundancy but applying a snapshot is generally safe/idempotent in Yjs

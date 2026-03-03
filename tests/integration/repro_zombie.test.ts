@@ -42,9 +42,9 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
 
     beforeEach(async () => {
         path = `tests/repro_zombie_${getStableDate()}-${counter++}`;
-        app = initializeApp({ projectId: PROJECT_ID });
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
+        const { app: a, db: d } = await import('../utils/emulator').then(m => m.setupEmulator());
+        app = a;
+        db = d;
 
         ydoc = new Y.Doc();
         provider = new FireProvider({

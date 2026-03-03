@@ -23,6 +23,7 @@ import {
   Bytes,
   serverTimestamp,
 } from "@firebase/firestore";
+import { getStorage, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
 
@@ -80,6 +81,9 @@ export class FireProvider extends ObservableV2<any> {
 
   /** Firebase app instance */
   readonly firebaseApp: FirebaseApp;
+
+  /** Firebase Storage instance */
+  readonly storage: FirebaseStorage;
 
   /** Unique session ID for this provider instance */
   readonly uid: string;
@@ -160,6 +164,7 @@ export class FireProvider extends ObservableV2<any> {
     }
 
     this.firebaseApp = firebaseApp;
+    this.storage = getStorage(firebaseApp);
 
     // Check if offline persistence is enabled
     if (config.persistence?.enabled) {
@@ -253,6 +258,7 @@ export class FireProvider extends ObservableV2<any> {
       },
       // P0.3 FIX: Pass cached clock offset to avoid re-measuring
       cachedClockOffset: this._cachedClockOffset,
+      storage: this.storage,
     };
 
     // FIX: Pause history listener during compaction to avoid contention/deadlock in emulator
@@ -281,6 +287,7 @@ export class FireProvider extends ObservableV2<any> {
             console.error('Listener error (resumed):', error);
             this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
           },
+          storage: this.storage,
         };
 
         // We resume listening from the last known checkpoint.
@@ -375,6 +382,7 @@ export class FireProvider extends ObservableV2<any> {
         console.error('Listener error:', error);
         this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
       },
+      storage: this.storage,
     };
 
     try {

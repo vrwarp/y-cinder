@@ -1,27 +1,103 @@
-import React, { useState } from 'react';
-import { initializeApp } from 'firebase/app';
+import React, { useState, useEffect } from 'react';
+import { initializeApp, getApps, getApp, deleteApp } from 'firebase/app';
 import { getFirestore, doc, getDoc, collection, getDocs, connectFirestoreEmulator } from 'firebase/firestore';
-
-// Initialize Firebase
-const app = initializeApp({ projectId: 'demo-y-cinder' });
-const db = getFirestore(app);
-
-// In a real app, you might want to configure this based on environment
-try {
-  connectFirestoreEmulator(db, '127.0.0.1', 8080);
-} catch (e) {
-  // Ignore error if already connected
-}
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 
 function App() {
   const [docPath, setDocPath] = useState('test/doc1');
+  const [projectId, setProjectId] = useState('demo-y-cinder');
+  const [apiKey, setApiKey] = useState('');
+  const [appId, setAppId] = useState('');
+  const [authDomain, setAuthDomain] = useState('');
+  const [useEmulator, setUseEmulator] = useState(true);
+  const [db, setDb] = useState(null);
+
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [user, setUser] = useState(null);
+  const [authError, setAuthError] = useState(null);
+  const [authInstance, setAuthInstance] = useState(null);
+
   const [baseDoc, setBaseDoc] = useState(null);
   const [updates, setUpdates] = useState([]);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  useEffect(() => {
+    let app;
+    // Clean up existing apps
+    if (getApps().length) {
+       app = getApp();
+       // Cannot easily reconfigure an app or emulator, so we just use the first initialized one
+       // For a robust tool, you might need to handle deleting the app and re-initializing,
+       // but for this demo, we'll try to delete and re-create.
+       deleteApp(app).catch(console.error);
+    }
+
+    try {
+        const config = { projectId };
+        if (!useEmulator) {
+           if (apiKey) config.apiKey = apiKey;
+           if (appId) config.appId = appId;
+           if (authDomain) config.authDomain = authDomain;
+        }
+
+        app = initializeApp(config);
+        const firestore = getFirestore(app);
+
+        if (useEmulator) {
+           connectFirestoreEmulator(firestore, '127.0.0.1', 8080);
+        }
+
+        setDb(firestore);
+
+        if (!useEmulator) {
+            const auth = getAuth(app);
+            setAuthInstance(auth);
+
+            const unsubscribe = onAuthStateChanged(auth, (u) => {
+                setUser(u);
+            });
+
+            return () => unsubscribe();
+        } else {
+            setAuthInstance(null);
+            setUser(null);
+        }
+
+        setError(null);
+    } catch (err) {
+        console.error("Firebase init error:", err);
+        setError(`Failed to initialize Firebase: ${err.message}`);
+        setDb(null);
+    }
+  }, [projectId, apiKey, appId, authDomain, useEmulator]);
+
+  const handleLogin = async () => {
+      if (!authInstance) return;
+      setAuthError(null);
+      try {
+          await signInWithEmailAndPassword(authInstance, email, password);
+      } catch (err) {
+          setAuthError(err.message);
+      }
+  };
+
+  const handleLogout = async () => {
+      if (!authInstance) return;
+      try {
+          await signOut(authInstance);
+      } catch (err) {
+          console.error(err);
+      }
+  };
+
   const loadData = async () => {
+    if (!db) {
+        setError("Database not initialized.");
+        return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -58,7 +134,6 @@ function App() {
         if (value && value instanceof Uint8Array) {
             return `<Uint8Array ${value.length} bytes>`;
         }
-        // Handle Firestore Bytes
         if (value && typeof value === 'object' && value.toBase64) {
             return `<Bytes ${value.toUint8Array().length} bytes>`;
         }
@@ -72,6 +147,61 @@ function App() {
   return (
     <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
       <h1>y-cinder Debugger</h1>
+
+      <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #ccc', borderRadius: '5px' }}>
+        <h3>Configuration</h3>
+        <label>
+          <input
+            type="checkbox"
+            checked={useEmulator}
+            onChange={(e) => setUseEmulator(e.target.checked)}
+          />
+          Use Local Emulator (127.0.0.1:8080)
+        </label>
+
+        <div style={{ marginTop: '10px', display: 'grid', gridTemplateColumns: '150px 1fr', gap: '10px', maxWidth: '500px' }}>
+            <label>Project ID:</label>
+            <input value={projectId} onChange={e => setProjectId(e.target.value)} />
+
+            {!useEmulator && (
+                <>
+                    <label>API Key:</label>
+                    <input value={apiKey} onChange={e => setApiKey(e.target.value)} />
+
+                    <label>App ID:</label>
+                    <input value={appId} onChange={e => setAppId(e.target.value)} />
+
+                    <label>Auth Domain:</label>
+                    <input value={authDomain} onChange={e => setAuthDomain(e.target.value)} />
+                </>
+            )}
+        </div>
+      </div>
+
+      {!useEmulator && (
+          <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #ccc', borderRadius: '5px' }}>
+            <h3>Authentication</h3>
+            {user ? (
+                <div>
+                    <p>Logged in as: {user.email}</p>
+                    <button onClick={handleLogout}>Sign Out</button>
+                </div>
+            ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: '10px', maxWidth: '500px' }}>
+                    <label>Email:</label>
+                    <input type="email" value={email} onChange={e => setEmail(e.target.value)} />
+
+                    <label>Password:</label>
+                    <input type="password" value={password} onChange={e => setPassword(e.target.value)} />
+
+                    <div></div>
+                    <button onClick={handleLogin}>Sign In</button>
+                </div>
+            )}
+            {authError && <div style={{ color: 'red', marginTop: '10px' }}>{authError}</div>}
+          </div>
+      )}
+
       <div style={{ marginBottom: '20px' }}>
         <input
           value={docPath}
@@ -79,7 +209,7 @@ function App() {
           placeholder="Firestore Document Path"
           style={{ padding: '5px', width: '300px', marginRight: '10px' }}
         />
-        <button onClick={loadData} disabled={loading} style={{ padding: '5px 10px' }}>
+        <button onClick={loadData} disabled={loading || !db || (!useEmulator && !user)} style={{ padding: '5px 10px' }}>
           {loading ? 'Loading...' : 'Load'}
         </button>
       </div>

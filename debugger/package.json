@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "firebase": "^12.10.0",
-    "y-cinder": "file:.."
+    "y-cinder": "file:..",
+    "yjs": "^13.6.29"
   }
 }

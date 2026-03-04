@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { initializeApp, getApps, getApp, deleteApp } from 'firebase/app';
 import { getFirestore, doc, getDoc, collection, getDocs, connectFirestoreEmulator } from 'firebase/firestore';
-import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 
 function App() {
   const [docPath, setDocPath] = useState('test/doc1');
@@ -9,11 +9,10 @@ function App() {
   const [apiKey, setApiKey] = useState('');
   const [appId, setAppId] = useState('');
   const [authDomain, setAuthDomain] = useState('');
+  const [pastedConfig, setPastedConfig] = useState('');
   const [useEmulator, setUseEmulator] = useState(true);
   const [db, setDb] = useState(null);
 
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
   const [user, setUser] = useState(null);
   const [authError, setAuthError] = useState(null);
   const [authInstance, setAuthInstance] = useState(null);
@@ -23,6 +22,32 @@ function App() {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const handlePasteConfig = () => {
+      try {
+          // Try to extract the object part if they pasted the whole code block
+          const match = pastedConfig.match(/const\s+\w+\s*=\s*({[\s\S]*?});/);
+          let jsonStr = match ? match[1] : pastedConfig;
+
+          // Relaxed JSON parsing to handle unquoted keys and single quotes
+          jsonStr = jsonStr
+            .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":') // Quote keys
+            .replace(/:\s*'([^']*)'/g, ':"$1"') // Replace single quotes with double
+            .replace(/,(\s*[}\]])/g, '$1'); // Remove trailing commas
+
+          const config = JSON.parse(jsonStr);
+
+          if (config.projectId) setProjectId(config.projectId);
+          if (config.apiKey) setApiKey(config.apiKey);
+          if (config.appId) setAppId(config.appId);
+          if (config.authDomain) setAuthDomain(config.authDomain);
+
+          setPastedConfig(''); // Clear after successful parse
+      } catch (e) {
+          setError("Failed to parse configuration. Please ensure it is valid JSON or a valid JavaScript object literal.");
+          console.error("Parse error:", e);
+      }
+  };
 
   useEffect(() => {
     let app;
@@ -78,7 +103,8 @@ function App() {
       if (!authInstance) return;
       setAuthError(null);
       try {
-          await signInWithEmailAndPassword(authInstance, email, password);
+          const provider = new GoogleAuthProvider();
+          await signInWithPopup(authInstance, provider);
       } catch (err) {
           setAuthError(err.message);
       }
@@ -173,6 +199,17 @@ function App() {
 
                     <label>Auth Domain:</label>
                     <input value={authDomain} onChange={e => setAuthDomain(e.target.value)} />
+
+                    <div style={{ gridColumn: '1 / -1', marginTop: '10px', borderTop: '1px solid #eee', paddingTop: '10px' }}>
+                        <label style={{ display: 'block', marginBottom: '5px' }}>Or paste Firebase config object:</label>
+                        <textarea
+                            value={pastedConfig}
+                            onChange={e => setPastedConfig(e.target.value)}
+                            placeholder={`const firebaseConfig = {\n  apiKey: "...",\n  authDomain: "...",\n  ...\n};`}
+                            style={{ width: '100%', height: '100px', fontFamily: 'monospace', padding: '5px' }}
+                        />
+                        <button onClick={handlePasteConfig} style={{ marginTop: '5px' }}>Populate Fields</button>
+                    </div>
                 </>
             )}
         </div>
@@ -187,15 +224,8 @@ function App() {
                     <button onClick={handleLogout}>Sign Out</button>
                 </div>
             ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: '10px', maxWidth: '500px' }}>
-                    <label>Email:</label>
-                    <input type="email" value={email} onChange={e => setEmail(e.target.value)} />
-
-                    <label>Password:</label>
-                    <input type="password" value={password} onChange={e => setPassword(e.target.value)} />
-
-                    <div></div>
-                    <button onClick={handleLogin}>Sign In</button>
+                <div>
+                    <button onClick={handleLogin}>Sign In with Google</button>
                 </div>
             )}
             {authError && <div style={{ color: 'red', marginTop: '10px' }}>{authError}</div>}

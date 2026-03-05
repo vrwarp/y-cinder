@@ -13,4 +13,4 @@ fi
 
 #  Run firebase emulators, passing the arguments INSIDE the quoted command string
 #  This ensures vitest receives the file paths/options
-npx firebase emulators:exec --project demo-test-project "npx vitest run --environment node --no-file-parallelism $TEST_ARGS"
+npx firebase emulators:exec --project demo-test-project "npx vitest run --environment node --no-file-parallelism --exclude debugger/tests/**/* $TEST_ARGS"

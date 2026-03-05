@@ -22,6 +22,8 @@ function App() {
   const [updates, setUpdates] = useState([]);
   const [history, setHistory] = useState([]);
   const [combinedDocData, setCombinedDocData] = useState(null);
+  const [selectedUpdateIds, setSelectedUpdateIds] = useState(new Set());
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [sortOrder, setSortOrder] = useState('desc');
@@ -29,15 +31,13 @@ function App() {
 
   const handlePasteConfig = () => {
       try {
-          // Try to extract the object part if they pasted the whole code block
           const match = pastedConfig.match(/const\s+\w+\s*=\s*({[\s\S]*?});/);
           let jsonStr = match ? match[1] : pastedConfig;
 
-          // Relaxed JSON parsing to handle unquoted keys and single quotes
           jsonStr = jsonStr
-            .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":') // Quote keys
-            .replace(/:\s*'([^']*)'/g, ':"$1"') // Replace single quotes with double
-            .replace(/,(\s*[}\]])/g, '$1'); // Remove trailing commas
+            .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
+            .replace(/:\s*'([^']*)'/g, ':"$1"')
+            .replace(/,(\s*[}\]])/g, '$1');
 
           const config = JSON.parse(jsonStr);
 
@@ -46,7 +46,7 @@ function App() {
           if (config.appId) setAppId(config.appId);
           if (config.authDomain) setAuthDomain(config.authDomain);
 
-          setPastedConfig(''); // Clear after successful parse
+          setPastedConfig('');
       } catch (e) {
           setError("Failed to parse configuration. Please ensure it is valid JSON or a valid JavaScript object literal.");
           console.error("Parse error:", e);
@@ -55,12 +55,8 @@ function App() {
 
   useEffect(() => {
     let app;
-    // Clean up existing apps
     if (getApps().length) {
        app = getApp();
-       // Cannot easily reconfigure an app or emulator, so we just use the first initialized one
-       // For a robust tool, you might need to handle deleting the app and re-initializing,
-       // but for this demo, we'll try to delete and re-create.
        deleteApp(app).catch(console.error);
     }
 
@@ -143,45 +139,73 @@ function App() {
       const updatesSnap = await getDocs(updatesRef);
       const updatesList = updatesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
       setUpdates(updatesList);
+      setSelectedUpdateIds(new Set(updatesList.map(u => u.id)));
 
       const historyRef = collection(db, `${docPath}/history`);
       const historySnap = await getDocs(historyRef);
       const historyList = historySnap.docs.map(d => ({ id: d.id, ...d.data() }));
       setHistory(historyList);
-
-      // Compute Combined Yjs Document
-      const ydoc = new Y.Doc();
-
-      const applyUpdateData = (updateData) => {
-        if (!updateData) return;
-        let uint8Arr;
-        if (updateData.type === 'Buffer') {
-          uint8Arr = new Uint8Array(updateData.data);
-        } else if (updateData instanceof Uint8Array) {
-          uint8Arr = updateData;
-        } else if (updateData.toUint8Array) {
-          uint8Arr = updateData.toUint8Array();
-        }
-
-        if (uint8Arr) {
-          Y.applyUpdate(ydoc, uint8Arr);
-        }
-      };
-
-      if (docSnap.exists() && docSnap.data().content) applyUpdateData(docSnap.data().content);
-
-      // Sort history to apply chronologically if possible, though Yjs handles out of order
-      historyList.forEach(h => applyUpdateData(h.segment));
-
-      // Apply individual updates
-      updatesList.forEach(u => applyUpdateData(u.update));
-
-      setCombinedDocData(ydoc.toJSON());
     } catch (e) {
       console.error(e);
       setError(e.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!baseDoc && history.length === 0 && updates.length === 0) {
+      setCombinedDocData(null);
+      return;
+    }
+
+    const ydoc = new Y.Doc();
+    const applyUpdateData = (updateData) => {
+      if (!updateData) return;
+      let uint8Arr;
+      if (updateData.type === 'Buffer') {
+        uint8Arr = new Uint8Array(updateData.data);
+      } else if (updateData instanceof Uint8Array) {
+        uint8Arr = updateData;
+      } else if (updateData.toUint8Array) {
+        uint8Arr = updateData.toUint8Array();
+      }
+
+      if (uint8Arr) {
+        try {
+          Y.applyUpdate(ydoc, uint8Arr);
+        } catch (err) {
+          console.error("Failed applying update to Y.Doc", err);
+        }
+      }
+    };
+
+    if (baseDoc && baseDoc.content) applyUpdateData(baseDoc.content);
+    history.forEach(h => applyUpdateData(h.segment));
+    updates.forEach(u => {
+      if (selectedUpdateIds.has(u.id)) {
+        applyUpdateData(u.update);
+      }
+    });
+
+    setCombinedDocData(ydoc.toJSON());
+  }, [baseDoc, history, updates, selectedUpdateIds]);
+
+  const toggleUpdateSelection = (id) => {
+    const newSet = new Set(selectedUpdateIds);
+    if (newSet.has(id)) {
+      newSet.delete(id);
+    } else {
+      newSet.add(id);
+    }
+    setSelectedUpdateIds(newSet);
+  };
+
+  const toggleAllUpdates = () => {
+    if (selectedUpdateIds.size === updates.length) {
+      setSelectedUpdateIds(new Set());
+    } else {
+      setSelectedUpdateIds(new Set(updates.map(u => u.id)));
     }
   };
 
@@ -201,158 +225,280 @@ function App() {
         }
         return value;
       }, 2);
-  }
+  };
+
+  // Modern UI Styles
+  const theme = {
+    bg: '#f3f4f6',
+    panelBg: '#ffffff',
+    border: '#e5e7eb',
+    text: '#1f2937',
+    textMuted: '#6b7280',
+    primary: '#3b82f6',
+    primaryHover: '#2563eb',
+    danger: '#ef4444',
+    success: '#10b981',
+    headerBg: '#1f2937',
+    headerText: '#ffffff',
+    radius: '8px',
+    shadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)'
+  };
+
+  const panelStyle = {
+    background: theme.panelBg,
+    borderRadius: theme.radius,
+    boxShadow: theme.shadow,
+    padding: '20px',
+    border: `1px solid ${theme.border}`,
+    marginBottom: '20px'
+  };
+
+  const inputStyle = {
+    padding: '8px 12px',
+    borderRadius: '4px',
+    border: `1px solid ${theme.border}`,
+    fontSize: '14px',
+    width: '100%',
+    boxSizing: 'border-box',
+    marginBottom: '10px'
+  };
+
+  const btnStyle = {
+    background: theme.primary,
+    color: '#fff',
+    border: 'none',
+    padding: '10px 16px',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontWeight: 'bold',
+    fontSize: '14px',
+    transition: 'background 0.2s'
+  };
+
+  const preStyle = {
+    background: '#f8fafc',
+    padding: '12px',
+    borderRadius: '4px',
+    border: `1px solid ${theme.border}`,
+    overflowX: 'auto',
+    fontSize: '13px',
+    fontFamily: 'monospace',
+    color: '#334155'
+  };
 
   return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif', maxWidth: '1400px', margin: '0 auto' }}>
-      <h1 style={{ borderBottom: '2px solid #ccc', paddingBottom: '10px' }}>y-cinder Debugger</h1>
+    <div style={{ background: theme.bg, minHeight: '100vh', color: theme.text, fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+      <header style={{ background: theme.headerBg, color: theme.headerText, padding: '16px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+        <h1 style={{ margin: 0, fontSize: '20px', fontWeight: '600' }}>y-cinder Debugger</h1>
+        {useEmulator ? (
+          <span style={{ background: theme.success, padding: '4px 8px', borderRadius: '12px', fontSize: '12px', fontWeight: 'bold' }}>Emulator Mode</span>
+        ) : (
+          <span style={{ background: theme.primary, padding: '4px 8px', borderRadius: '12px', fontSize: '12px', fontWeight: 'bold' }}>Production Mode</span>
+        )}
+      </header>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
-      <div style={{ padding: '15px', border: '1px solid #ccc', borderRadius: '5px', background: '#f9f9f9' }}>
-        <h3>Configuration</h3>
-        <label>
-          <input
-            type="checkbox"
-            checked={useEmulator}
-            onChange={(e) => setUseEmulator(e.target.checked)}
-          />
-          Use Local Emulator (127.0.0.1:8080)
-        </label>
+      <div style={{ maxWidth: '1600px', margin: '0 auto', padding: '24px', display: 'grid', gridTemplateColumns: '300px 1fr', gap: '24px' }}>
 
-        <div style={{ marginTop: '10px', display: 'grid', gridTemplateColumns: '150px 1fr', gap: '10px', maxWidth: '500px' }}>
-            <label>Project ID:</label>
-            <input value={projectId} onChange={e => setProjectId(e.target.value)} />
+        {/* Left Sidebar: Config & Controls */}
+        <aside style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
-            {!useEmulator && (
-                <>
-                    <label>API Key:</label>
-                    <input value={apiKey} onChange={e => setApiKey(e.target.value)} />
+          <div style={panelStyle}>
+            <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '8px' }}>Environment</h3>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', cursor: 'pointer', fontSize: '14px' }}>
+              <input type="checkbox" checked={useEmulator} onChange={(e) => setUseEmulator(e.target.checked)} style={{ width: '16px', height: '16px' }} />
+              Use Local Emulator
+            </label>
 
-                    <label>App ID:</label>
-                    <input value={appId} onChange={e => setAppId(e.target.value)} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>Project ID</label>
+              <input style={inputStyle} value={projectId} onChange={e => setProjectId(e.target.value)} />
 
-                    <label>Auth Domain:</label>
-                    <input value={authDomain} onChange={e => setAuthDomain(e.target.value)} />
+              {!useEmulator && (
+                  <>
+                      <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>API Key</label>
+                      <input style={inputStyle} value={apiKey} onChange={e => setApiKey(e.target.value)} />
 
-                    <div style={{ gridColumn: '1 / -1', marginTop: '10px', borderTop: '1px solid #eee', paddingTop: '10px' }}>
-                        <label style={{ display: 'block', marginBottom: '5px' }}>Or paste Firebase config object:</label>
-                        <textarea
-                            value={pastedConfig}
-                            onChange={e => setPastedConfig(e.target.value)}
-                            placeholder={`const firebaseConfig = {\n  apiKey: "...",\n  authDomain: "...",\n  ...\n};`}
-                            style={{ width: '100%', height: '100px', fontFamily: 'monospace', padding: '5px' }}
-                        />
-                        <button onClick={handlePasteConfig} style={{ marginTop: '5px' }}>Populate Fields</button>
-                    </div>
-                </>
-            )}
-        </div>
-      </div>
+                      <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>App ID</label>
+                      <input style={inputStyle} value={appId} onChange={e => setAppId(e.target.value)} />
 
-      {!useEmulator && (
-          <div style={{ padding: '15px', border: '1px solid #ccc', borderRadius: '5px', background: '#f9f9f9' }}>
-            <h3>Authentication</h3>
-            {user ? (
-                <div>
-                    <p>Logged in as: {user.email}</p>
-                    <button onClick={handleLogout}>Sign Out</button>
-                </div>
-            ) : (
-                <div>
-                    <button onClick={handleLogin}>Sign In with Google</button>
-                </div>
-            )}
-            {authError && <div style={{ color: 'red', marginTop: '10px' }}>{authError}</div>}
-          </div>
-      )}
-      </div>
+                      <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>Auth Domain</label>
+                      <input style={inputStyle} value={authDomain} onChange={e => setAuthDomain(e.target.value)} />
 
-      <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid #ccc', borderRadius: '5px', background: '#eef' }}>
-        <h3>Document Loader</h3>
-        <input
-          value={docPath}
-          onChange={e => setDocPath(e.target.value)}
-          placeholder="Firestore Document Path"
-          style={{ padding: '5px', width: '300px', marginRight: '10px' }}
-        />
-        <button onClick={loadData} disabled={loading || !db || (!useEmulator && !user)} style={{ padding: '5px 10px' }}>
-          {loading ? 'Loading...' : 'Load'}
-        </button>
-      </div>
-
-      {error && <div style={{ color: 'red', marginBottom: '20px' }}>Error: {error}</div>}
-
-      <div style={{ display: 'flex', gap: '20px' }}>
-        <div style={{ flex: 1 }}>
-          <h2>Base Document</h2>
-          <pre style={{ background: '#f0f0f0', padding: '10px', overflowX: 'auto', maxHeight: '600px', overflowY: 'auto' }}>
-            {baseDoc ? renderData(baseDoc) : 'Not found'}
-          </pre>
-        </div>
-
-        <div style={{ flex: 1 }}>
-          <h2>History ({history.length})</h2>
-          <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
-            {history.map(h => (
-              <div key={h.id} style={{ border: '1px solid #ccc', padding: '10px', marginBottom: '10px' }}>
-                <strong>ID: {h.id}</strong>
-                <pre style={{ background: '#f0f0f0', padding: '10px', overflowX: 'auto', marginTop: '5px', whiteSpace: 'pre-wrap', wordWrap: 'break-word' }}>
-                  {renderData(h)}
-                </pre>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ flex: 1 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '10px' }}>
-            <h2 style={{ margin: 0 }}>Updates ({updates.length})</h2>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <select value={sortOrder} onChange={e => setSortOrder(e.target.value)} style={{ padding: '5px' }}>
-                <option value="desc">Newest First</option>
-                <option value="asc">Oldest First</option>
-              </select>
-              <input
-                value={clientFilter}
-                onChange={e => setClientFilter(e.target.value)}
-                placeholder="Filter by Client ID..."
-                style={{ padding: '5px', width: '150px' }}
-              />
+                      <div style={{ marginTop: '12px', borderTop: `1px solid ${theme.border}`, paddingTop: '12px' }}>
+                          <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, display: 'block', marginBottom: '4px' }}>Paste Config Object</label>
+                          <textarea
+                              value={pastedConfig}
+                              onChange={e => setPastedConfig(e.target.value)}
+                              placeholder={`const firebaseConfig = {\n  apiKey: "...",\n  ...\n};`}
+                              style={{ ...inputStyle, height: '80px', fontFamily: 'monospace', resize: 'vertical' }}
+                          />
+                          <button onClick={handlePasteConfig} style={{ ...btnStyle, width: '100%', background: theme.textMuted }}>Parse Config</button>
+                      </div>
+                  </>
+              )}
             </div>
           </div>
-          <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
-            {updates
-              .filter(u => {
-                if (!clientFilter) return true;
-                const filterLower = clientFilter.toLowerCase();
-                // Check if clientFilter matches the createdBy property or any key in the root
-                if (u.createdBy && u.createdBy.toLowerCase().includes(filterLower)) return true;
-                return false;
-              })
-              .sort((a, b) => {
-                const timeA = a.createdAt?.seconds || 0;
-                const timeB = b.createdAt?.seconds || 0;
-                return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
-              })
-              .map(u => (
-              <div key={u.id} style={{ border: '1px solid #ccc', padding: '10px', marginBottom: '10px' }}>
-                <strong>ID: {u.id}</strong>
-                <pre style={{ background: '#f0f0f0', padding: '10px', overflowX: 'auto', marginTop: '5px', whiteSpace: 'pre-wrap', wordWrap: 'break-word' }}>
-                  {renderData(u)}
-                </pre>
-              </div>
-            ))}
+
+          {!useEmulator && (
+            <div style={panelStyle}>
+              <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '8px' }}>Authentication</h3>
+              {user ? (
+                  <div>
+                      <p style={{ fontSize: '14px', marginBottom: '12px', wordBreak: 'break-all' }}>Logged in: <strong>{user.email}</strong></p>
+                      <button onClick={handleLogout} style={{ ...btnStyle, background: theme.danger, width: '100%' }}>Sign Out</button>
+                  </div>
+              ) : (
+                  <div>
+                      <button onClick={handleLogin} style={{ ...btnStyle, width: '100%' }}>Sign In with Google</button>
+                  </div>
+              )}
+              {authError && <div style={{ color: theme.danger, marginTop: '12px', fontSize: '13px' }}>{authError}</div>}
+            </div>
+          )}
+
+          <div style={panelStyle}>
+            <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '8px' }}>Document Loader</h3>
+            <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, display: 'block', marginBottom: '4px' }}>Firestore Document Path</label>
+            <input
+              style={inputStyle}
+              value={docPath}
+              onChange={e => setDocPath(e.target.value)}
+              placeholder="e.g. test/doc1"
+            />
+            <button
+              onClick={loadData}
+              disabled={loading || !db || (!useEmulator && !user)}
+              style={{ ...btnStyle, width: '100%', opacity: (loading || !db || (!useEmulator && !user)) ? 0.7 : 1 }}
+            >
+              {loading ? 'Loading...' : 'Load Document'}
+            </button>
+            {error && <div style={{ color: theme.danger, marginTop: '12px', fontSize: '13px', padding: '8px', background: '#fef2f2', borderRadius: '4px' }}>{error}</div>}
           </div>
-        </div>
-      </div>
+        </aside>
 
-      <div style={{ marginTop: '20px', padding: '15px', border: '1px solid #ccc', borderRadius: '5px', background: '#f0fff0' }}>
-        <h2>Fully Combined Document State</h2>
-        <pre style={{ background: '#fff', padding: '15px', overflowX: 'auto', maxHeight: '500px', overflowY: 'auto', border: '1px solid #ddd' }}>
-          {combinedDocData ? JSON.stringify(combinedDocData, null, 2) : 'No combined data (load a document first)'}
-        </pre>
-      </div>
+        {/* Right Main Area: Data Viewer */}
+        <main style={{ display: 'flex', flexDirection: 'column', gap: '24px', minWidth: 0 }}>
 
+          {/* Top Row: Components View */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px' }}>
+
+            {/* Base Document */}
+            <div style={{ ...panelStyle, display: 'flex', flexDirection: 'column', marginBottom: 0 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '8px' }}>
+                <h2 style={{ margin: 0, fontSize: '16px' }}>Base Document</h2>
+              </div>
+              <div style={{ flex: 1, overflowY: 'auto', maxHeight: '500px' }}>
+                {baseDoc ? (
+                  <pre style={{ ...preStyle, margin: 0 }}>{renderData(baseDoc)}</pre>
+                ) : (
+                  <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>Not loaded or not found</div>
+                )}
+              </div>
+            </div>
+
+            {/* History */}
+            <div style={{ ...panelStyle, display: 'flex', flexDirection: 'column', marginBottom: 0 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '8px' }}>
+                <h2 style={{ margin: 0, fontSize: '16px' }}>History <span style={{ background: '#e5e7eb', padding: '2px 8px', borderRadius: '10px', fontSize: '12px' }}>{history.length}</span></h2>
+              </div>
+              <div style={{ flex: 1, overflowY: 'auto', maxHeight: '500px' }}>
+                {history.length > 0 ? history.map(h => (
+                  <div key={h.id} style={{ border: `1px solid ${theme.border}`, borderRadius: '6px', padding: '12px', marginBottom: '12px', background: '#fff' }}>
+                    <div style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, marginBottom: '6px' }}>ID: {h.id}</div>
+                    <pre style={{ ...preStyle, margin: 0, padding: '8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                      {renderData(h)}
+                    </pre>
+                  </div>
+                )) : (
+                  <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>No history segments</div>
+                )}
+              </div>
+            </div>
+
+            {/* Updates */}
+            <div style={{ ...panelStyle, display: 'flex', flexDirection: 'column', marginBottom: 0 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '12px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h2 style={{ margin: 0, fontSize: '16px' }}>Updates <span style={{ background: '#e5e7eb', padding: '2px 8px', borderRadius: '10px', fontSize: '12px' }}>{updates.length}</span></h2>
+                  {updates.length > 0 && (
+                    <button onClick={toggleAllUpdates} style={{ background: 'transparent', border: `1px solid ${theme.border}`, padding: '4px 8px', borderRadius: '4px', fontSize: '12px', cursor: 'pointer' }}>
+                      {selectedUpdateIds.size === updates.length ? 'Deselect All' : 'Select All'}
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <select value={sortOrder} onChange={e => setSortOrder(e.target.value)} style={{ padding: '6px', borderRadius: '4px', border: `1px solid ${theme.border}`, fontSize: '13px', background: '#fff' }}>
+                    <option value="desc">Newest First</option>
+                    <option value="asc">Oldest First</option>
+                  </select>
+                  <input
+                    value={clientFilter}
+                    onChange={e => setClientFilter(e.target.value)}
+                    placeholder="Filter Client ID..."
+                    style={{ padding: '6px', borderRadius: '4px', border: `1px solid ${theme.border}`, fontSize: '13px', width: '100%', boxSizing: 'border-box' }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ flex: 1, overflowY: 'auto', maxHeight: '450px' }}>
+                {updates.length > 0 ? updates
+                  .filter(u => {
+                    if (!clientFilter) return true;
+                    const filterLower = clientFilter.toLowerCase();
+                    if (u.createdBy && u.createdBy.toLowerCase().includes(filterLower)) return true;
+                    return false;
+                  })
+                  .sort((a, b) => {
+                    const timeA = a.createdAt?.seconds || 0;
+                    const timeB = b.createdAt?.seconds || 0;
+                    return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
+                  })
+                  .map(u => (
+                  <div key={u.id} style={{
+                      border: `1px solid ${selectedUpdateIds.has(u.id) ? theme.primary : theme.border}`,
+                      borderRadius: '6px',
+                      padding: '12px',
+                      marginBottom: '12px',
+                      background: selectedUpdateIds.has(u.id) ? '#eff6ff' : '#fff',
+                      transition: 'all 0.2s'
+                    }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '8px' }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedUpdateIds.has(u.id)}
+                        onChange={() => toggleUpdateSelection(u.id)}
+                        style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+                      />
+                      <span style={{ fontSize: '13px', fontWeight: 'bold', color: theme.textMuted }}>ID: {u.id}</span>
+                    </label>
+                    <pre style={{ ...preStyle, margin: 0, padding: '8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', opacity: selectedUpdateIds.has(u.id) ? 1 : 0.6 }}>
+                      {renderData(u)}
+                    </pre>
+                  </div>
+                )) : (
+                  <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>No pending updates</div>
+                )}
+              </div>
+            </div>
+
+          </div>
+
+          {/* Bottom Row: Combined Result */}
+          <div style={{ ...panelStyle, background: '#f8fafc', border: `1px solid ${theme.primary}`, boxShadow: `0 4px 6px -1px rgba(59, 130, 246, 0.1)` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '12px' }}>
+              <h2 style={{ margin: 0, fontSize: '18px', color: theme.primary }}>Fully Combined Document State</h2>
+              <div style={{ fontSize: '13px', color: theme.textMuted }}>
+                Applying: Base + History + {selectedUpdateIds.size} Selected Update(s)
+              </div>
+            </div>
+            <pre style={{ ...preStyle, background: '#fff', maxHeight: '400px', border: `1px solid ${theme.border}` }}>
+              {combinedDocData ? JSON.stringify(combinedDocData, null, 2) : 'No combined data (load a document first)'}
+            </pre>
+          </div>
+
+        </main>
+      </div>
     </div>
   );
 }

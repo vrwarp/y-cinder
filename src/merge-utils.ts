@@ -144,13 +144,14 @@ function initWorker(): boolean {
  * ```
  */
 export async function mergeUpdatesAsync(updates: Uint8Array[]): Promise<Uint8Array> {
-    // Edge case: empty or single update
+    // Edge case: empty array
     if (updates.length === 0) {
         return new Uint8Array(0);
     }
-    if (updates.length === 1) {
-        return updates[0];
-    }
+    // NOTE: We intentionally do NOT short-circuit for length === 1.
+    // Passing a single update through Y.mergeUpdates validates its
+    // internal structure. Without this, a corrupted or zero-byte
+    // payload bypasses Yjs validation and can overwrite canonical state.
 
     // Try to use worker
     if (initWorker() && mergeWorker) {

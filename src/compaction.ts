@@ -229,12 +229,22 @@ export async function compact(
         }
 
         if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
-             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
+            return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
         }
 
         // === STEP 3: Merge and Upload (Outside Transaction) ===
         const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
         const candidate = await mergeUpdatesAsync(allContent);
+
+        // Validate candidate before committing — a corrupted merge must never
+        // overwrite the canonical snapshot.
+        try {
+            Y.decodeUpdate(candidate);
+        } catch (decodeErr) {
+            throw new Error(
+                `Compaction candidate failed validation (${candidate.byteLength} bytes): ${decodeErr}`
+            );
+        }
 
         const nextVersion = currentVersion + 1;
         const snapshotFilename = `snapshot_v${nextVersion}.bin`;

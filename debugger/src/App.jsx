@@ -23,6 +23,7 @@ function App() {
   const [history, setHistory] = useState([]);
   const [combinedDocData, setCombinedDocData] = useState(null);
   const [selectedUpdateIds, setSelectedUpdateIds] = useState(new Set());
+  const [corruptedIds, setCorruptedIds] = useState(new Map()); // id -> error message
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -30,107 +31,133 @@ function App() {
   const [clientFilter, setClientFilter] = useState('');
 
   const handlePasteConfig = () => {
-      try {
-          const match = pastedConfig.match(/const\s+\w+\s*=\s*({[\s\S]*?});/);
-          let jsonStr = match ? match[1] : pastedConfig;
+    try {
+      const match = pastedConfig.match(/const\s+\w+\s*=\s*({[\s\S]*?});/);
+      let jsonStr = match ? match[1] : pastedConfig;
 
-          jsonStr = jsonStr
-            .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
-            .replace(/:\s*'([^']*)'/g, ':"$1"')
-            .replace(/,(\s*[}\]])/g, '$1');
+      jsonStr = jsonStr
+        .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
+        .replace(/:\s*'([^']*)'/g, ':"$1"')
+        .replace(/,(\s*[}\]])/g, '$1');
 
-          const config = JSON.parse(jsonStr);
+      const config = JSON.parse(jsonStr);
 
-          if (config.projectId) setProjectId(config.projectId);
-          if (config.apiKey) setApiKey(config.apiKey);
-          if (config.appId) setAppId(config.appId);
-          if (config.authDomain) setAuthDomain(config.authDomain);
+      if (config.projectId) setProjectId(config.projectId);
+      if (config.apiKey) setApiKey(config.apiKey);
+      if (config.appId) setAppId(config.appId);
+      if (config.authDomain) setAuthDomain(config.authDomain);
 
-          setPastedConfig('');
-      } catch (e) {
-          setError("Failed to parse configuration. Please ensure it is valid JSON or a valid JavaScript object literal.");
-          console.error("Parse error:", e);
-      }
+      setPastedConfig('');
+    } catch (e) {
+      setError("Failed to parse configuration. Please ensure it is valid JSON or a valid JavaScript object literal.");
+      console.error("Parse error:", e);
+    }
   };
 
   useEffect(() => {
     let app;
     if (getApps().length) {
-       app = getApp();
-       deleteApp(app).catch(console.error);
+      app = getApp();
+      deleteApp(app).catch(console.error);
     }
 
     try {
-        const config = { projectId };
-        if (!useEmulator) {
-           if (apiKey) config.apiKey = apiKey;
-           if (appId) config.appId = appId;
-           if (authDomain) config.authDomain = authDomain;
-        }
+      const config = { projectId };
+      if (!useEmulator) {
+        if (apiKey) config.apiKey = apiKey;
+        if (appId) config.appId = appId;
+        if (authDomain) config.authDomain = authDomain;
+      }
 
-        app = initializeApp(config);
-        const firestore = getFirestore(app);
+      app = initializeApp(config);
+      const firestore = getFirestore(app);
 
-        if (useEmulator) {
-           connectFirestoreEmulator(firestore, '127.0.0.1', 8080);
-        }
+      if (useEmulator) {
+        connectFirestoreEmulator(firestore, '127.0.0.1', 8080);
+      }
 
-        setDb(firestore);
+      setDb(firestore);
 
-        if (!useEmulator) {
-            const auth = getAuth(app);
-            setAuthInstance(auth);
+      if (!useEmulator) {
+        const auth = getAuth(app);
+        setAuthInstance(auth);
 
-            const unsubscribe = onAuthStateChanged(auth, (u) => {
-                setUser(u);
-            });
+        const unsubscribe = onAuthStateChanged(auth, (u) => {
+          setUser(u);
+        });
 
-            return () => unsubscribe();
-        } else {
-            setAuthInstance(null);
-            setUser(null);
-        }
+        return () => unsubscribe();
+      } else {
+        setAuthInstance(null);
+        setUser(null);
+      }
 
-        setError(null);
+      setError(null);
     } catch (err) {
-        console.error("Firebase init error:", err);
-        setError(`Failed to initialize Firebase: ${err.message}`);
-        setDb(null);
+      console.error("Firebase init error:", err);
+      setError(`Failed to initialize Firebase: ${err.message}`);
+      setDb(null);
     }
   }, [projectId, apiKey, appId, authDomain, useEmulator]);
 
   const handleLogin = async () => {
-      if (!authInstance) return;
-      setAuthError(null);
-      try {
-          const provider = new GoogleAuthProvider();
-          await signInWithPopup(authInstance, provider);
-      } catch (err) {
-          setAuthError(err.message);
-      }
+    if (!authInstance) return;
+    setAuthError(null);
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(authInstance, provider);
+    } catch (err) {
+      setAuthError(err.message);
+    }
   };
 
   const handleLogout = async () => {
-      if (!authInstance) return;
-      try {
-          await signOut(authInstance);
-      } catch (err) {
-          console.error(err);
+    if (!authInstance) return;
+    try {
+      await signOut(authInstance);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // Validate a Yjs blob — returns error message or null
+  const validateBlob = (blobData) => {
+    try {
+      let uint8Arr;
+      if (blobData?.type === 'Buffer') {
+        uint8Arr = new Uint8Array(blobData.data);
+      } else if (blobData instanceof Uint8Array) {
+        uint8Arr = blobData;
+      } else if (blobData?.toUint8Array) {
+        uint8Arr = blobData.toUint8Array();
       }
+      if (!uint8Arr || uint8Arr.length === 0) return 'Empty or missing blob';
+      Y.decodeUpdate(uint8Arr);
+      return null; // valid
+    } catch (err) {
+      return err.message || 'Invalid Yjs update';
+    }
   };
 
   const loadData = async () => {
     if (!db) {
-        setError("Database not initialized.");
-        return;
+      setError("Database not initialized.");
+      return;
     }
     setLoading(true);
     setError(null);
+    const newCorrupted = new Map();
     try {
       const docRef = doc(db, docPath);
       const docSnap = await getDoc(docRef);
       if (docSnap.exists()) {
-        setBaseDoc(docSnap.data());
+        const data = docSnap.data();
+        setBaseDoc(data);
+        // Validate base snapshot
+        if (data.content) {
+          const err = validateBlob(data.content);
+          if (err) newCorrupted.set('__base__', err);
+        }
       } else {
         setBaseDoc(null);
       }
@@ -139,12 +166,25 @@ function App() {
       const updatesSnap = await getDocs(updatesRef);
       const updatesList = updatesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
       setUpdates(updatesList);
-      setSelectedUpdateIds(new Set(updatesList.map(u => u.id)));
+      // Validate each update
+      updatesList.forEach(u => {
+        const err = validateBlob(u.update);
+        if (err) newCorrupted.set(u.id, err);
+      });
+      // Select only non-corrupted updates by default
+      setSelectedUpdateIds(new Set(updatesList.filter(u => !newCorrupted.has(u.id)).map(u => u.id)));
 
       const historyRef = collection(db, `${docPath}/history`);
       const historySnap = await getDocs(historyRef);
       const historyList = historySnap.docs.map(d => ({ id: d.id, ...d.data() }));
       setHistory(historyList);
+      // Validate each history segment
+      historyList.forEach(h => {
+        const err = validateBlob(h.segment);
+        if (err) newCorrupted.set(h.id, err);
+      });
+
+      setCorruptedIds(newCorrupted);
     } catch (e) {
       console.error(e);
       setError(e.message);
@@ -210,21 +250,21 @@ function App() {
   };
 
   const renderData = (data) => {
-      return JSON.stringify(data, (key, value) => {
-        if (value && value.type === 'Buffer') {
-          return `<Buffer ${value.data.length} bytes>`;
-        }
-        if (value && value instanceof Uint8Array) {
-            return `<Uint8Array ${value.length} bytes>`;
-        }
-        if (value && typeof value === 'object' && value.toBase64) {
-            return `<Bytes ${value.toUint8Array().length} bytes>`;
-        }
-        if (value && typeof value === 'object' && value.seconds !== undefined && value.nanoseconds !== undefined) {
-             return new Date(value.seconds * 1000).toISOString();
-        }
-        return value;
-      }, 2);
+    return JSON.stringify(data, (key, value) => {
+      if (value && value.type === 'Buffer') {
+        return `<Buffer ${value.data.length} bytes>`;
+      }
+      if (value && value instanceof Uint8Array) {
+        return `<Uint8Array ${value.length} bytes>`;
+      }
+      if (value && typeof value === 'object' && value.toBase64) {
+        return `<Bytes ${value.toUint8Array().length} bytes>`;
+      }
+      if (value && typeof value === 'object' && value.seconds !== undefined && value.nanoseconds !== undefined) {
+        return new Date(value.seconds * 1000).toISOString();
+      }
+      return value;
+    }, 2);
   };
 
   // Modern UI Styles
@@ -314,27 +354,27 @@ function App() {
               <input style={inputStyle} value={projectId} onChange={e => setProjectId(e.target.value)} />
 
               {!useEmulator && (
-                  <>
-                      <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>API Key</label>
-                      <input style={inputStyle} value={apiKey} onChange={e => setApiKey(e.target.value)} />
+                <>
+                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>API Key</label>
+                  <input style={inputStyle} value={apiKey} onChange={e => setApiKey(e.target.value)} />
 
-                      <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>App ID</label>
-                      <input style={inputStyle} value={appId} onChange={e => setAppId(e.target.value)} />
+                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>App ID</label>
+                  <input style={inputStyle} value={appId} onChange={e => setAppId(e.target.value)} />
 
-                      <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>Auth Domain</label>
-                      <input style={inputStyle} value={authDomain} onChange={e => setAuthDomain(e.target.value)} />
+                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>Auth Domain</label>
+                  <input style={inputStyle} value={authDomain} onChange={e => setAuthDomain(e.target.value)} />
 
-                      <div style={{ marginTop: '12px', borderTop: `1px solid ${theme.border}`, paddingTop: '12px' }}>
-                          <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, display: 'block', marginBottom: '4px' }}>Paste Config Object</label>
-                          <textarea
-                              value={pastedConfig}
-                              onChange={e => setPastedConfig(e.target.value)}
-                              placeholder={`const firebaseConfig = {\n  apiKey: "...",\n  ...\n};`}
-                              style={{ ...inputStyle, height: '80px', fontFamily: 'monospace', resize: 'vertical' }}
-                          />
-                          <button onClick={handlePasteConfig} style={{ ...btnStyle, width: '100%', background: theme.textMuted }}>Parse Config</button>
-                      </div>
-                  </>
+                  <div style={{ marginTop: '12px', borderTop: `1px solid ${theme.border}`, paddingTop: '12px' }}>
+                    <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, display: 'block', marginBottom: '4px' }}>Paste Config Object</label>
+                    <textarea
+                      value={pastedConfig}
+                      onChange={e => setPastedConfig(e.target.value)}
+                      placeholder={`const firebaseConfig = {\n  apiKey: "...",\n  ...\n};`}
+                      style={{ ...inputStyle, height: '80px', fontFamily: 'monospace', resize: 'vertical' }}
+                    />
+                    <button onClick={handlePasteConfig} style={{ ...btnStyle, width: '100%', background: theme.textMuted }}>Parse Config</button>
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -343,14 +383,14 @@ function App() {
             <div style={panelStyle}>
               <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '8px' }}>Authentication</h3>
               {user ? (
-                  <div>
-                      <p style={{ fontSize: '14px', marginBottom: '12px', wordBreak: 'break-all' }}>Logged in: <strong>{user.email}</strong></p>
-                      <button onClick={handleLogout} style={{ ...btnStyle, background: theme.danger, width: '100%' }}>Sign Out</button>
-                  </div>
+                <div>
+                  <p style={{ fontSize: '14px', marginBottom: '12px', wordBreak: 'break-all' }}>Logged in: <strong>{user.email}</strong></p>
+                  <button onClick={handleLogout} style={{ ...btnStyle, background: theme.danger, width: '100%' }}>Sign Out</button>
+                </div>
               ) : (
-                  <div>
-                      <button onClick={handleLogin} style={{ ...btnStyle, width: '100%' }}>Sign In with Google</button>
-                  </div>
+                <div>
+                  <button onClick={handleLogin} style={{ ...btnStyle, width: '100%' }}>Sign In with Google</button>
+                </div>
               )}
               {authError && <div style={{ color: theme.danger, marginTop: '12px', fontSize: '13px' }}>{authError}</div>}
             </div>
@@ -380,16 +420,46 @@ function App() {
         <main style={{ display: 'flex', flexDirection: 'column', gap: '24px', minWidth: 0 }}>
 
           {/* Top Row: Components View */}
+          {/* Corruption Summary Banner */}
+          {corruptedIds.size > 0 && (
+            <div style={{ ...panelStyle, background: '#fef2f2', border: `1px solid ${theme.danger}`, marginBottom: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                <span style={{ fontSize: '18px' }}>⚠️</span>
+                <h3 style={{ margin: 0, fontSize: '16px', color: theme.danger }}>Corrupted Documents Detected ({corruptedIds.size})</h3>
+              </div>
+              <div style={{ fontSize: '13px', color: '#991b1b' }}>
+                {Array.from(corruptedIds.entries()).map(([id, err]) => (
+                  <div key={id} style={{ padding: '4px 0', borderBottom: '1px solid #fecaca' }}>
+                    <strong>{id === '__base__' ? 'Base Snapshot' : `ID: ${id}`}</strong> — {err}
+                  </div>
+                ))}
+              </div>
+              <div style={{ fontSize: '12px', color: '#9ca3af', marginTop: '8px' }}>
+                Corrupted items are excluded from the combined state and marked below.
+              </div>
+            </div>
+          )}
+
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px' }}>
 
             {/* Base Document */}
             <div style={{ ...panelStyle, display: 'flex', flexDirection: 'column', marginBottom: 0 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '8px' }}>
-                <h2 style={{ margin: 0, fontSize: '16px' }}>Base Document</h2>
+                <h2 style={{ margin: 0, fontSize: '16px' }}>
+                  Base Document
+                  {corruptedIds.has('__base__') && <span style={{ background: theme.danger, color: '#fff', padding: '2px 6px', borderRadius: '10px', fontSize: '10px', marginLeft: '8px', fontWeight: 'bold' }}>CORRUPTED</span>}
+                </h2>
               </div>
               <div style={{ flex: 1, overflowY: 'auto', maxHeight: '500px' }}>
                 {baseDoc ? (
-                  <pre style={{ ...preStyle, margin: 0 }}>{renderData(baseDoc)}</pre>
+                  <>
+                    {corruptedIds.has('__base__') && (
+                      <div style={{ background: '#fef2f2', border: `1px solid #fecaca`, borderRadius: '4px', padding: '8px', marginBottom: '8px', fontSize: '12px', color: '#991b1b' }}>
+                        ⚠ {corruptedIds.get('__base__')}
+                      </div>
+                    )}
+                    <pre style={{ ...preStyle, margin: 0 }}>{renderData(baseDoc)}</pre>
+                  </>
                 ) : (
                   <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>Not loaded or not found</div>
                 )}
@@ -399,12 +469,29 @@ function App() {
             {/* History */}
             <div style={{ ...panelStyle, display: 'flex', flexDirection: 'column', marginBottom: 0 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '8px' }}>
-                <h2 style={{ margin: 0, fontSize: '16px' }}>History <span style={{ background: '#e5e7eb', padding: '2px 8px', borderRadius: '10px', fontSize: '12px' }}>{history.length}</span></h2>
+                <h2 style={{ margin: 0, fontSize: '16px' }}>
+                  History <span style={{ background: '#e5e7eb', padding: '2px 8px', borderRadius: '10px', fontSize: '12px' }}>{history.length}</span>
+                  {history.some(h => corruptedIds.has(h.id)) && <span style={{ background: theme.danger, color: '#fff', padding: '2px 6px', borderRadius: '10px', fontSize: '10px', marginLeft: '8px', fontWeight: 'bold' }}>{history.filter(h => corruptedIds.has(h.id)).length} CORRUPTED</span>}
+                </h2>
               </div>
               <div style={{ flex: 1, overflowY: 'auto', maxHeight: '500px' }}>
                 {history.length > 0 ? history.map(h => (
-                  <div key={h.id} style={{ border: `1px solid ${theme.border}`, borderRadius: '6px', padding: '12px', marginBottom: '12px', background: '#fff' }}>
-                    <div style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, marginBottom: '6px' }}>ID: {h.id}</div>
+                  <div key={h.id} style={{
+                    border: `1px solid ${corruptedIds.has(h.id) ? theme.danger : theme.border}`,
+                    borderRadius: '6px',
+                    padding: '12px',
+                    marginBottom: '12px',
+                    background: corruptedIds.has(h.id) ? '#fef2f2' : '#fff'
+                  }}>
+                    <div style={{ fontSize: '12px', fontWeight: 'bold', color: corruptedIds.has(h.id) ? theme.danger : theme.textMuted, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      ID: {h.id}
+                      {corruptedIds.has(h.id) && <span style={{ background: theme.danger, color: '#fff', padding: '1px 5px', borderRadius: '8px', fontSize: '10px' }}>⚠ CORRUPTED</span>}
+                    </div>
+                    {corruptedIds.has(h.id) && (
+                      <div style={{ background: '#fff5f5', border: '1px solid #fecaca', borderRadius: '4px', padding: '6px', marginBottom: '6px', fontSize: '11px', color: '#991b1b' }}>
+                        {corruptedIds.get(h.id)}
+                      </div>
+                    )}
                     <pre style={{ ...preStyle, margin: 0, padding: '8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
                       {renderData(h)}
                     </pre>
@@ -419,7 +506,10 @@ function App() {
             <div style={{ ...panelStyle, display: 'flex', flexDirection: 'column', marginBottom: 0 }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '12px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <h2 style={{ margin: 0, fontSize: '16px' }}>Updates <span style={{ background: '#e5e7eb', padding: '2px 8px', borderRadius: '10px', fontSize: '12px' }}>{updates.length}</span></h2>
+                  <h2 style={{ margin: 0, fontSize: '16px' }}>
+                    Updates <span style={{ background: '#e5e7eb', padding: '2px 8px', borderRadius: '10px', fontSize: '12px' }}>{updates.length}</span>
+                    {updates.some(u => corruptedIds.has(u.id)) && <span style={{ background: theme.danger, color: '#fff', padding: '2px 6px', borderRadius: '10px', fontSize: '10px', marginLeft: '8px', fontWeight: 'bold' }}>{updates.filter(u => corruptedIds.has(u.id)).length} CORRUPTED</span>}
+                  </h2>
                   {updates.length > 0 && (
                     <button onClick={toggleAllUpdates} style={{ background: 'transparent', border: `1px solid ${theme.border}`, padding: '4px 8px', borderRadius: '4px', fontSize: '12px', cursor: 'pointer' }}>
                       {selectedUpdateIds.size === updates.length ? 'Deselect All' : 'Select All'}
@@ -455,28 +545,37 @@ function App() {
                     return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
                   })
                   .map(u => (
-                  <div key={u.id} style={{
-                      border: `1px solid ${selectedUpdateIds.has(u.id) ? theme.primary : theme.border}`,
+                    <div key={u.id} style={{
+                      border: `1px solid ${corruptedIds.has(u.id) ? theme.danger : selectedUpdateIds.has(u.id) ? theme.primary : theme.border}`,
                       borderRadius: '6px',
                       padding: '12px',
                       marginBottom: '12px',
-                      background: selectedUpdateIds.has(u.id) ? '#eff6ff' : '#fff',
+                      background: corruptedIds.has(u.id) ? '#fef2f2' : selectedUpdateIds.has(u.id) ? '#eff6ff' : '#fff',
                       transition: 'all 0.2s'
                     }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '8px' }}>
-                      <input
-                        type="checkbox"
-                        checked={selectedUpdateIds.has(u.id)}
-                        onChange={() => toggleUpdateSelection(u.id)}
-                        style={{ width: '16px', height: '16px', cursor: 'pointer' }}
-                      />
-                      <span style={{ fontSize: '13px', fontWeight: 'bold', color: theme.textMuted }}>ID: {u.id}</span>
-                    </label>
-                    <pre style={{ ...preStyle, margin: 0, padding: '8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', opacity: selectedUpdateIds.has(u.id) ? 1 : 0.6 }}>
-                      {renderData(u)}
-                    </pre>
-                  </div>
-                )) : (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '8px' }}>
+                        <input
+                          type="checkbox"
+                          checked={selectedUpdateIds.has(u.id)}
+                          onChange={() => toggleUpdateSelection(u.id)}
+                          disabled={corruptedIds.has(u.id)}
+                          style={{ width: '16px', height: '16px', cursor: corruptedIds.has(u.id) ? 'not-allowed' : 'pointer' }}
+                        />
+                        <span style={{ fontSize: '13px', fontWeight: 'bold', color: corruptedIds.has(u.id) ? theme.danger : theme.textMuted, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          ID: {u.id}
+                          {corruptedIds.has(u.id) && <span style={{ background: theme.danger, color: '#fff', padding: '1px 5px', borderRadius: '8px', fontSize: '10px' }}>⚠ CORRUPTED</span>}
+                        </span>
+                      </label>
+                      {corruptedIds.has(u.id) && (
+                        <div style={{ background: '#fff5f5', border: '1px solid #fecaca', borderRadius: '4px', padding: '6px', marginBottom: '6px', fontSize: '11px', color: '#991b1b' }}>
+                          {corruptedIds.get(u.id)}
+                        </div>
+                      )}
+                      <pre style={{ ...preStyle, margin: 0, padding: '8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', opacity: selectedUpdateIds.has(u.id) && !corruptedIds.has(u.id) ? 1 : 0.6 }}>
+                        {renderData(u)}
+                      </pre>
+                    </div>
+                  )) : (
                   <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>No pending updates</div>
                 )}
               </div>

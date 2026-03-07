@@ -84,6 +84,17 @@ export interface SyncContext {
     isDestroyed: () => boolean;
     /** Firebase Storage instance */
     storage: FirebaseStorage;
+    /**
+     * Per-session quarantine set of Firestore document IDs / storage paths
+     * that have failed Y.applyUpdate due to structural corruption.
+     * Prevents infinite retry loops on "poison pill" documents.
+     */
+    corruptedDocIds?: Set<string>;
+    /**
+     * Callback when a corrupted document is quarantined.
+     * Allows the application layer to log, alert, or take action.
+     */
+    onCorruptedDocument?: (docId: string, error: Error) => void;
 }
 
 /**
@@ -273,8 +284,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
                     } catch (storageErr) {
                         console.error("Failed to download snapshot from Cloud Storage", storageErr);
-                        // Note: If this fails, we can't apply the base snapshot.
-                        // We could fall back, but data loss is likely since we rely on it.
+                        // Cannot safely sync without the base snapshot — propagate so
+                        // the sync retry logic in provider.ts handles backoff/retry.
+                        throw storageErr;
                     }
                 } else if (data.stateVector || data.content) {
                     // Fallback for older documents that haven't been compacted into Cloud Storage yet
@@ -408,11 +420,20 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 }
 
                 if (data.update) {
+                    const docId = change.doc.id;
+
+                    // Skip quarantined poison pills
+                    if (ctx.corruptedDocIds?.has(docId)) {
+                        return;
+                    }
+
                     try {
                         const update = (data.update as Bytes).toUint8Array();
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                     } catch (e) {
-                        console.error("Failed to apply update", e);
+                        console.error(`Failed to apply update ${docId} (quarantined)`, e);
+                        ctx.corruptedDocIds?.add(docId);
+                        ctx.onCorruptedDocument?.(docId, e instanceof Error ? e : new Error(String(e)));
                     }
                 }
             }
@@ -435,6 +456,10 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
 export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
     const { db, path, doc: ydoc, onListenerError, storage } = ctx;
 
+    // Track the last quarantined snapshot path so we can clear quarantine
+    // when compaction produces a new snapshot at a different path.
+    let lastQuarantinedPath: string | null = null;
+
     return onSnapshot(doc(db, path), async (snapshot) => {
         if (!snapshot.exists()) return;
 
@@ -442,28 +467,47 @@ export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
 
         // Handle Cloud Storage Snapshot
         if (data?.snapshotStoragePath && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
+            const snapshotKey = `snapshot:${data.snapshotStoragePath}`;
+
+            // Clear quarantine if snapshot path changed (new compaction)
+            if (lastQuarantinedPath && lastQuarantinedPath !== snapshotKey) {
+                ctx.corruptedDocIds?.delete(lastQuarantinedPath);
+                lastQuarantinedPath = null;
+            }
+
+            // Skip quarantined snapshot
+            if (ctx.corruptedDocIds?.has(snapshotKey)) {
+                return;
+            }
+
             try {
                 const storageRef = ref(storage, data.snapshotStoragePath);
                 const buffer = await getBytes(storageRef);
                 const content = new Uint8Array(buffer);
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
             } catch (storageErr) {
-                console.error("Failed to apply snapshot from Cloud Storage listener", storageErr);
+                console.error(`Failed to apply snapshot ${snapshotKey} (quarantined)`, storageErr);
+                ctx.corruptedDocIds?.add(snapshotKey);
+                lastQuarantinedPath = snapshotKey;
+                ctx.onCorruptedDocument?.(snapshotKey, storageErr instanceof Error ? storageErr : new Error(String(storageErr)));
             }
         }
         // Handle Firestore Document Snapshot (legacy/small documents)
         else if (data?.content && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
-            // Apply snapshot if it's from a remote origin or if we need to sync up
+            const snapshotKey = 'snapshot:inline';
+
+            if (ctx.corruptedDocIds?.has(snapshotKey)) {
+                return;
+            }
+
             try {
-                // We should check redundancy but applying a snapshot is generally safe/idempotent in Yjs
-                // as long as we don't overwrite local pending changes that aren't in the snapshot yet.
-                // However, a snapshot represents valid state at a specific point.
-                // A safer check: if stateVector of snapshot is "ahead" or strictly different?
-                // For now, simpler approach: Apply it. Yjs handles deduplication.
                 const content = (data.content as Bytes).toUint8Array();
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
             } catch (err) {
-                console.error("Failed to apply snapshot from listener", err);
+                console.error(`Failed to apply inline snapshot (quarantined)`, err);
+                ctx.corruptedDocIds?.add(snapshotKey);
+                lastQuarantinedPath = snapshotKey;
+                ctx.onCorruptedDocument?.(snapshotKey, err instanceof Error ? err : new Error(String(err)));
             }
         }
     }, (error) => {
@@ -503,6 +547,13 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
+                const docId = change.doc.id;
+
+                // Skip quarantined poison pills
+                if (ctx.corruptedDocIds?.has(docId)) {
+                    return;
+                }
+
                 if (data && data.segment) {
                     try {
                         // Check redundancy using local state vector
@@ -518,7 +569,9 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
                             Y.applyUpdate(ydoc, (data.segment as Bytes).toUint8Array(), FIREBASE_ORIGINS.HISTORY);
                         }
                     } catch (err) {
-                        console.error("Failed to apply history segment from listener", err);
+                        console.error(`Failed to apply history segment ${docId} (quarantined)`, err);
+                        ctx.corruptedDocIds?.add(docId);
+                        ctx.onCorruptedDocument?.(docId, err instanceof Error ? err : new Error(String(err)));
                     }
                 }
             }

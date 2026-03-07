@@ -125,6 +125,8 @@ export class FireProvider extends ObservableV2<any> {
   /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
   private _debounceTimerId: ReturnType<typeof setTimeout> | null = null;
   private _boundBeforeUnload: (() => void) | null = null;
+  /** Per-session quarantine set for corrupted Firestore documents */
+  private _corruptedDocIds = new Set<string>();
 
   /**
    * Creates a new FireProvider instance.
@@ -288,6 +290,10 @@ export class FireProvider extends ObservableV2<any> {
             this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
           },
           storage: this.storage,
+          corruptedDocIds: this._corruptedDocIds,
+          onCorruptedDocument: (docId, error) => {
+            this.emit('corrupted-document', [{ docId, error }]);
+          },
         };
 
         // We resume listening from the last known checkpoint.
@@ -383,6 +389,10 @@ export class FireProvider extends ObservableV2<any> {
         this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
       },
       storage: this.storage,
+      corruptedDocIds: this._corruptedDocIds,
+      onCorruptedDocument: (docId, error) => {
+        this.emit('corrupted-document', [{ docId, error }]);
+      },
     };
 
     try {

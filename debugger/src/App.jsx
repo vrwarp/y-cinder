@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { initializeApp, getApps, getApp, deleteApp } from 'firebase/app';
 import { getFirestore, doc, getDoc, collection, getDocs, connectFirestoreEmulator } from 'firebase/firestore';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
+import { getStorage, connectStorageEmulator, ref as storageRef, getBytes } from 'firebase/storage';
 import * as Y from 'yjs';
 
 const extractYDocState = (doc) => {
@@ -41,6 +42,102 @@ const extractYDocState = (doc) => {
   return res;
 };
 
+const getUint8Array = (value) => {
+  if (!value) return null;
+  if (value instanceof Uint8Array) return value;
+  if (value.type === 'Buffer' && value.data) return new Uint8Array(value.data);
+  if (typeof value === 'object' && typeof value.toUint8Array === 'function') return value.toUint8Array();
+  if (typeof value === 'object' && value.type === 'firestore/bytes/1.0' && typeof value.bytes === 'string') {
+    const binaryString = atob(value.bytes);
+    const uint8Arr = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      uint8Arr[i] = binaryString.charCodeAt(i);
+    }
+    return uint8Arr;
+  }
+  return null;
+};
+
+const DataCardItem = ({ data, renderData, theme, preStyle }) => {
+  const [showRaw, setShowRaw] = useState(false);
+
+  // Parse fields
+  const createdBy = data.createdBy;
+  let createdAt = null;
+  if (data.createdAt) {
+    if (data.createdAt.seconds !== undefined) {
+      createdAt = new Date(data.createdAt.seconds * 1000).toLocaleString();
+    } else if (typeof data.createdAt === 'string') {
+      createdAt = new Date(data.createdAt).toLocaleString();
+    }
+  }
+
+  const clientIDs = data.clientIDs ? data.clientIDs.join(', ') : '';
+  const clientClocks = data.clientClocks ? data.clientClocks.join(', ') : '';
+
+  let yjsBytes = 0;
+  let structCount = 0;
+  const uint8Arr = getUint8Array(data.update || data.segment || data.content);
+  if (uint8Arr) {
+    yjsBytes = uint8Arr.length;
+    try {
+      const decoded = Y.decodeUpdate(uint8Arr);
+      structCount = decoded.structs.length;
+    } catch (e) { }
+  }
+
+  const hasGridData = createdAt || clientIDs || yjsBytes > 0;
+
+  return (
+    <div style={{ fontSize: '13px', color: theme.text }}>
+      {hasGridData ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '4px 12px', marginBottom: '8px' }}>
+          {createdAt && (
+            <>
+              <strong style={{ color: theme.textMuted }}>Created:</strong>
+              <span>{createdAt} {createdBy && <span>by <span style={{ fontFamily: 'monospace', background: theme.bg, padding: '2px 4px', borderRadius: '4px' }}>{createdBy}</span></span>}</span>
+            </>
+          )}
+
+          {clientIDs && (
+            <>
+              <strong style={{ color: theme.textMuted }}>Clients:</strong>
+              <span style={{ fontFamily: 'monospace' }}>{clientIDs} {clientClocks && `(Clocks: ${clientClocks})`}</span>
+            </>
+          )}
+
+          {(yjsBytes > 0) && (
+            <>
+              <strong style={{ color: theme.textMuted }}>Payload:</strong>
+              <span>Yjs Update ({yjsBytes} bytes) - {structCount} structs</span>
+            </>
+          )}
+        </div>
+      ) : null}
+
+      <button
+        onClick={() => setShowRaw(!showRaw)}
+        style={{ background: 'transparent', border: 'none', color: theme.primary, cursor: 'pointer', padding: 0, fontSize: '12px', fontWeight: 'bold' }}
+      >
+        {showRaw ? '▼ Hide Raw JSON' : '▶ Show Raw JSON'}
+      </button>
+
+      {showRaw && (
+        <pre style={{
+          ...preStyle,
+          marginTop: '8px',
+          padding: '8px',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-all',
+          margin: 0
+        }}>
+          {renderData(data)}
+        </pre>
+      )}
+    </div>
+  );
+};
+
 function App() {
   const [docPath, setDocPath] = useState('test/doc1');
   const [projectId, setProjectId] = useState('demo-y-cinder');
@@ -50,6 +147,7 @@ function App() {
   const [pastedConfig, setPastedConfig] = useState('');
   const [useEmulator, setUseEmulator] = useState(true);
   const [db, setDb] = useState(null);
+  const [storage, setStorage] = useState(null);
 
   const [user, setUser] = useState(null);
   const [authError, setAuthError] = useState(null);
@@ -93,27 +191,36 @@ function App() {
 
   useEffect(() => {
     let app;
+    // Cleanup any existing apps in the background
     if (getApps().length) {
-      app = getApp();
-      deleteApp(app).catch(console.error);
+      getApps().forEach(a => deleteApp(a).catch(console.error));
     }
 
     try {
-      const config = { projectId };
+      const config = {
+        projectId,
+        storageBucket: useEmulator ? 'default-bucket' : `${projectId}.firebasestorage.app`
+      };
       if (!useEmulator) {
         if (apiKey) config.apiKey = apiKey;
         if (appId) config.appId = appId;
         if (authDomain) config.authDomain = authDomain;
       }
 
-      app = initializeApp(config);
+      // Initialize with a unique name to prevent duplicate-app errors
+      // during hot-reloads or rapid configuration changes
+      app = initializeApp(config, `app-${Date.now()}`);
+
       const firestore = getFirestore(app);
+      const storageInstance = getStorage(app);
 
       if (useEmulator) {
         connectFirestoreEmulator(firestore, '127.0.0.1', 8080);
+        connectStorageEmulator(storageInstance, '127.0.0.1', 9199);
       }
 
       setDb(firestore);
+      setStorage(storageInstance);
 
       if (!useEmulator) {
         const auth = getAuth(app);
@@ -134,6 +241,7 @@ function App() {
       console.error("Firebase init error:", err);
       setError(`Failed to initialize Firebase: ${err.message}`);
       setDb(null);
+      setStorage(null);
     }
   }, [projectId, apiKey, appId, authDomain, useEmulator]);
 
@@ -160,14 +268,7 @@ function App() {
   // Validate a Yjs blob — returns error message or null
   const validateBlob = (blobData) => {
     try {
-      let uint8Arr;
-      if (blobData?.type === 'Buffer') {
-        uint8Arr = new Uint8Array(blobData.data);
-      } else if (blobData instanceof Uint8Array) {
-        uint8Arr = blobData;
-      } else if (blobData?.toUint8Array) {
-        uint8Arr = blobData.toUint8Array();
-      }
+      const uint8Arr = getUint8Array(blobData);
       if (!uint8Arr || uint8Arr.length === 0) return 'Empty or missing blob';
       Y.decodeUpdate(uint8Arr);
       return null; // valid
@@ -189,6 +290,19 @@ function App() {
       const docSnap = await getDoc(docRef);
       if (docSnap.exists()) {
         const data = docSnap.data();
+
+        // Fetch from Cloud Storage if configured
+        if (data.snapshotStoragePath && storage) {
+          try {
+            const sRef = storageRef(storage, data.snapshotStoragePath);
+            const buffer = await getBytes(sRef);
+            data.content = new Uint8Array(buffer);
+          } catch (e) {
+            console.error("Failed to load snapshot from storage", e);
+            newCorrupted.set('__base__', "Failed to load snapshot from storage: " + e.message);
+          }
+        }
+
         setBaseDoc(data);
         // Validate base snapshot
         if (data.content) {
@@ -238,16 +352,7 @@ function App() {
 
     const ydoc = new Y.Doc();
     const applyUpdateData = (updateData) => {
-      if (!updateData) return;
-      let uint8Arr;
-      if (updateData.type === 'Buffer') {
-        uint8Arr = new Uint8Array(updateData.data);
-      } else if (updateData instanceof Uint8Array) {
-        uint8Arr = updateData;
-      } else if (updateData.toUint8Array) {
-        uint8Arr = updateData.toUint8Array();
-      }
-
+      const uint8Arr = getUint8Array(updateData);
       if (uint8Arr) {
         try {
           Y.applyUpdate(ydoc, uint8Arr);
@@ -288,15 +393,23 @@ function App() {
 
   const renderData = (data) => {
     return JSON.stringify(data, (key, value) => {
-      if (value && value.type === 'Buffer') {
-        return `<Buffer ${value.data.length} bytes>`;
+      // Handle different Buffer/Uint8Array shapes that represent Yjs updates
+      const uint8Arr = getUint8Array(value);
+
+      if (uint8Arr) {
+        try {
+          // Attempt to decode as a Yjs update to show its inner structure
+          const decoded = Y.decodeUpdate(uint8Arr);
+          return {
+            __yjs_update_bytes: uint8Arr.length,
+            decoded: decoded
+          };
+        } catch (e) {
+          // If it fails to decode, fallback to just showing the length
+          return `<Bytes ${uint8Arr.length} bytes (decode error: ${e.message})>`;
+        }
       }
-      if (value && value instanceof Uint8Array) {
-        return `<Uint8Array ${value.length} bytes>`;
-      }
-      if (value && typeof value === 'object' && value.toBase64) {
-        return `<Bytes ${value.toUint8Array().length} bytes>`;
-      }
+
       if (value && typeof value === 'object' && value.seconds !== undefined && value.nanoseconds !== undefined) {
         return new Date(value.seconds * 1000).toISOString();
       }
@@ -495,7 +608,7 @@ function App() {
                         ⚠ {corruptedIds.get('__base__')}
                       </div>
                     )}
-                    <pre style={{ ...preStyle, margin: 0 }}>{renderData(baseDoc)}</pre>
+                    <DataCardItem data={baseDoc} renderData={renderData} theme={theme} preStyle={preStyle} />
                   </>
                 ) : (
                   <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>Not loaded or not found</div>
@@ -529,9 +642,7 @@ function App() {
                         {corruptedIds.get(h.id)}
                       </div>
                     )}
-                    <pre style={{ ...preStyle, margin: 0, padding: '8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-                      {renderData(h)}
-                    </pre>
+                    <DataCardItem data={h} renderData={renderData} theme={theme} preStyle={preStyle} />
                   </div>
                 )) : (
                   <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>No history segments</div>
@@ -608,9 +719,9 @@ function App() {
                           {corruptedIds.get(u.id)}
                         </div>
                       )}
-                      <pre style={{ ...preStyle, margin: 0, padding: '8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', opacity: selectedUpdateIds.has(u.id) && !corruptedIds.has(u.id) ? 1 : 0.6 }}>
-                        {renderData(u)}
-                      </pre>
+                      <div style={{ opacity: selectedUpdateIds.has(u.id) && !corruptedIds.has(u.id) ? 1 : 0.6 }}>
+                        <DataCardItem data={u} renderData={renderData} theme={theme} preStyle={preStyle} />
+                      </div>
                     </div>
                   )) : (
                   <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>No pending updates</div>

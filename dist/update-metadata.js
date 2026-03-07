@@ -20,15 +20,19 @@
  * ```typescript
  * {
  *   clientIDs: number[],    // All client IDs in the update
- *   clientID: number,       // First client ID (backwards compat)
- *   clockStart: number,     // Minimum clock value
- *   clockEnd: number,       // Maximum clock value
+ *   clientClocks: number[], // Per-client clockEnd values (paired with clientIDs)
  * }
  * ```
  *
  * @module update-metadata
  */
 import * as Y from "yjs";
+/**
+ * Maximum number of distinct client IDs to store in metadata.
+ * If an update exceeds this, we skip metadata optimization entirely
+ * to avoid Firestore document bloat from massive offline merges.
+ */
+const MAX_METADATA_CLIENTS = 50;
 /**
  * Extracts metadata from all clients within a Yjs update.
  *
@@ -113,11 +117,15 @@ export function aggregateMetadata(metas) {
     if (metas.length === 0) {
         return {};
     }
+    // Cap: if too many clients (e.g. massive offline merge with full history),
+    // skip metadata optimization entirely. It's cheaper to let Yjs handle
+    // the binary merge than to serialize/parse thousands of clock entries.
+    if (metas.length > MAX_METADATA_CLIENTS) {
+        return {};
+    }
     return {
         clientIDs: metas.map(m => m.clientID),
-        clientID: metas[0].clientID, // Backwards compatibility
-        clockStart: Math.min(...metas.map(m => m.clockStart)),
-        clockEnd: Math.max(...metas.map(m => m.clockEnd)),
+        clientClocks: metas.map(m => m.clockEnd),
     };
 }
 /**
@@ -139,10 +147,14 @@ export function aggregateMetadata(metas) {
  * }
  * ```
  */
-export function isUpdateRedundant(localSVMap, clientIDs, clockEnd) {
-    for (const cid of clientIDs) {
+export function isUpdateRedundant(localSVMap, clientIDs, clientClocks) {
+    if (clientIDs.length !== clientClocks.length) {
+        return false; // Malformed metadata
+    }
+    for (let i = 0; i < clientIDs.length; i++) {
+        const cid = clientIDs[i];
         const localClock = localSVMap.get(cid) || 0;
-        if (localClock < clockEnd) {
+        if (localClock < clientClocks[i]) {
             return false; // Missing data for this client
         }
     }

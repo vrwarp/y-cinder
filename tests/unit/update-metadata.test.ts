@@ -117,9 +117,7 @@ describe('update-metadata', () => {
             const result = aggregateMetadata(metas);
 
             expect(result.clientIDs).toEqual([100]);
-            expect(result.clientID).toBe(100);
-            expect(result.clockStart).toBe(0);
-            expect(result.clockEnd).toBe(5);
+            expect(result.clientClocks).toEqual([5]);
         });
 
         it('should aggregate multiple metadata entries', () => {
@@ -132,9 +130,32 @@ describe('update-metadata', () => {
             const result = aggregateMetadata(metas);
 
             expect(result.clientIDs).toEqual([100, 200, 300]);
-            expect(result.clientID).toBe(100); // First for backwards compat
-            expect(result.clockStart).toBe(0); // Min
-            expect(result.clockEnd).toBe(20); // Max
+            expect(result.clientClocks).toEqual([5, 20, 15]);
+        });
+
+        it('should return empty object when client count exceeds cap', () => {
+            const metas = Array.from({ length: 51 }, (_, i) => ({
+                clientID: i + 1,
+                clockStart: 0,
+                clockEnd: i + 10,
+            }));
+
+            const result = aggregateMetadata(metas);
+
+            expect(Object.keys(result).length).toBe(0);
+        });
+
+        it('should include clientClocks at exactly the cap limit', () => {
+            const metas = Array.from({ length: 50 }, (_, i) => ({
+                clientID: i + 1,
+                clockStart: 0,
+                clockEnd: i + 10,
+            }));
+
+            const result = aggregateMetadata(metas);
+
+            expect(result.clientIDs).toHaveLength(50);
+            expect(result.clientClocks).toHaveLength(50);
         });
     });
 
@@ -145,7 +166,7 @@ describe('update-metadata', () => {
                 [200, 20],  // >= 15
             ]);
 
-            const result = isUpdateRedundant(localSV, [100, 200], 15);
+            const result = isUpdateRedundant(localSV, [100, 200], [15, 15]);
 
             expect(result).toBe(true);
         });
@@ -156,7 +177,7 @@ describe('update-metadata', () => {
                 [200, 5],  // Behind
             ]);
 
-            const result = isUpdateRedundant(localSV, [100, 200], 10);
+            const result = isUpdateRedundant(localSV, [100, 200], [10, 10]);
 
             expect(result).toBe(false);
         });
@@ -166,7 +187,7 @@ describe('update-metadata', () => {
                 [100, 10],
             ]);
 
-            const result = isUpdateRedundant(localSV, [100, 200], 5);
+            const result = isUpdateRedundant(localSV, [100, 200], [5, 5]);
 
             expect(result).toBe(false);
         });
@@ -174,9 +195,37 @@ describe('update-metadata', () => {
         it('should handle empty clientIDs array', () => {
             const localSV = new Map<number, number>([[100, 10]]);
 
-            const result = isUpdateRedundant(localSV, [], 10);
+            const result = isUpdateRedundant(localSV, [], []);
 
             expect(result).toBe(true);
+        });
+
+        it('should use per-client clocks', () => {
+            // Client A clock 10, Client B clock 5000
+            // Local state: A=15, B=5000
+            const localSV = new Map<number, number>([
+                [100, 15],
+                [200, 5000],
+            ]);
+
+            const result = isUpdateRedundant(
+                localSV, [100, 200], [10, 5000]
+            );
+
+            expect(result).toBe(true);
+        });
+
+        it('should detect missing data with per-client clocks', () => {
+            const localSV = new Map<number, number>([
+                [100, 5],   // Behind client A's clock of 10
+                [200, 5000],
+            ]);
+
+            const result = isUpdateRedundant(
+                localSV, [100, 200], [10, 5000]
+            );
+
+            expect(result).toBe(false);
         });
     });
 });

@@ -409,12 +409,11 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 }
 
                 // Check if we already have this update
-                const clientIDs = data.clientIDs || (typeof data.clientID === 'number' ? [data.clientID] : []);
-                if (clientIDs.length > 0 && typeof data.clockEnd === 'number') {
+                if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
                     const freshSV = Y.encodeStateVector(ydoc);
                     const freshMap = Y.decodeStateVector(freshSV);
 
-                    if (isUpdateRedundant(freshMap, clientIDs, data.clockEnd)) {
+                    if (isUpdateRedundant(freshMap, data.clientIDs, data.clientClocks)) {
                         return; // Skip - we have all the data
                     }
                 }
@@ -592,19 +591,14 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
  * @param serverSVMap - Map to populate with client -> clock mappings
  */
 function processUpdateMetadata(data: any, serverSVMap: Map<number, number>): void {
-    // P1.9 FIX: Use clientIDs array if available
-    if (data.clientIDs && data.clientIDs.length > 0 && typeof data.clockEnd === 'number') {
-        data.clientIDs.forEach((cid: number) => {
+    if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
+        data.clientIDs.forEach((cid: number, i: number) => {
+            const clock = data.clientClocks[i];
             const current = serverSVMap.get(cid) || 0;
-            if (data.clockEnd > current) {
-                serverSVMap.set(cid, data.clockEnd);
+            if (clock > current) {
+                serverSVMap.set(cid, clock);
             }
         });
-    } else if (typeof data.clientID === 'number' && typeof data.clockEnd === 'number') {
-        const current = serverSVMap.get(data.clientID) || 0;
-        if (data.clockEnd > current) {
-            serverSVMap.set(data.clientID, data.clockEnd);
-        }
     } else if (data.update) {
         try {
             const updateBlob = (data.update as Bytes).toUint8Array();
@@ -713,15 +707,8 @@ function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, number>): 
 
     if (item.type === 'update') {
         const data = item.data;
-        // P1.9 FIX: Check all client IDs if available
-        if (data.clientIDs && data.clientIDs.length > 0 && typeof data.clockEnd === 'number') {
-            return isUpdateRedundant(localSVMap, data.clientIDs, data.clockEnd);
-        }
-
-        // Fallback to single client ID (backwards compat)
-        if (data.clientID !== undefined && data.clockEnd !== undefined) {
-            const localClock = localSVMap.get(data.clientID) || 0;
-            return localClock >= data.clockEnd;
+        if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
+            return isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks);
         }
     }
 

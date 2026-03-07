@@ -276,7 +276,7 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
             onCompactionNeeded();
         }
         snapshot.docChanges().forEach((change) => {
-            var _a, _b, _c;
+            var _a, _b, _c, _d, _e;
             if (change.type === 'added') {
                 const data = change.doc.data();
                 // Skip our own updates
@@ -284,18 +284,17 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
                     return;
                 }
                 // Check if we already have this update
-                const clientIDs = data.clientIDs || (typeof data.clientID === 'number' ? [data.clientID] : []);
-                if (clientIDs.length > 0 && typeof data.clockEnd === 'number') {
+                if (((_a = data.clientIDs) === null || _a === void 0 ? void 0 : _a.length) > 0 && ((_b = data.clientClocks) === null || _b === void 0 ? void 0 : _b.length) > 0) {
                     const freshSV = Y.encodeStateVector(ydoc);
                     const freshMap = Y.decodeStateVector(freshSV);
-                    if (isUpdateRedundant(freshMap, clientIDs, data.clockEnd)) {
+                    if (isUpdateRedundant(freshMap, data.clientIDs, data.clientClocks)) {
                         return; // Skip - we have all the data
                     }
                 }
                 if (data.update) {
                     const docId = change.doc.id;
                     // Skip quarantined poison pills
-                    if ((_a = ctx.corruptedDocIds) === null || _a === void 0 ? void 0 : _a.has(docId)) {
+                    if ((_c = ctx.corruptedDocIds) === null || _c === void 0 ? void 0 : _c.has(docId)) {
                         return;
                     }
                     try {
@@ -304,8 +303,8 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
                     }
                     catch (e) {
                         console.error(`Failed to apply update ${docId} (quarantined)`, e);
-                        (_b = ctx.corruptedDocIds) === null || _b === void 0 ? void 0 : _b.add(docId);
-                        (_c = ctx.onCorruptedDocument) === null || _c === void 0 ? void 0 : _c.call(ctx, docId, e instanceof Error ? e : new Error(String(e)));
+                        (_d = ctx.corruptedDocIds) === null || _d === void 0 ? void 0 : _d.add(docId);
+                        (_e = ctx.onCorruptedDocument) === null || _e === void 0 ? void 0 : _e.call(ctx, docId, e instanceof Error ? e : new Error(String(e)));
                     }
                 }
             }
@@ -448,20 +447,15 @@ export function createHistoryListener(ctx, startAfterDoc) {
  * @param serverSVMap - Map to populate with client -> clock mappings
  */
 function processUpdateMetadata(data, serverSVMap) {
-    // P1.9 FIX: Use clientIDs array if available
-    if (data.clientIDs && data.clientIDs.length > 0 && typeof data.clockEnd === 'number') {
-        data.clientIDs.forEach((cid) => {
+    var _a, _b;
+    if (((_a = data.clientIDs) === null || _a === void 0 ? void 0 : _a.length) > 0 && ((_b = data.clientClocks) === null || _b === void 0 ? void 0 : _b.length) > 0) {
+        data.clientIDs.forEach((cid, i) => {
+            const clock = data.clientClocks[i];
             const current = serverSVMap.get(cid) || 0;
-            if (data.clockEnd > current) {
-                serverSVMap.set(cid, data.clockEnd);
+            if (clock > current) {
+                serverSVMap.set(cid, clock);
             }
         });
-    }
-    else if (typeof data.clientID === 'number' && typeof data.clockEnd === 'number') {
-        const current = serverSVMap.get(data.clientID) || 0;
-        if (data.clockEnd > current) {
-            serverSVMap.set(data.clientID, data.clockEnd);
-        }
     }
     else if (data.update) {
         try {
@@ -543,6 +537,7 @@ function processSnapshotMetadata(data, serverSVMap) {
  * @returns true if local document already has all data from this item
  */
 function isItemRedundant(item, localSVMap) {
+    var _a, _b;
     if (item.type === 'snapshot' && item.data.stateVector) {
         const sv = fromBase64(item.data.stateVector);
         const map = Y.decodeStateVector(sv);
@@ -572,14 +567,8 @@ function isItemRedundant(item, localSVMap) {
     }
     if (item.type === 'update') {
         const data = item.data;
-        // P1.9 FIX: Check all client IDs if available
-        if (data.clientIDs && data.clientIDs.length > 0 && typeof data.clockEnd === 'number') {
-            return isUpdateRedundant(localSVMap, data.clientIDs, data.clockEnd);
-        }
-        // Fallback to single client ID (backwards compat)
-        if (data.clientID !== undefined && data.clockEnd !== undefined) {
-            const localClock = localSVMap.get(data.clientID) || 0;
-            return localClock >= data.clockEnd;
+        if (((_a = data.clientIDs) === null || _a === void 0 ? void 0 : _a.length) > 0 && ((_b = data.clientClocks) === null || _b === void 0 ? void 0 : _b.length) > 0) {
+            return isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks);
         }
     }
     return false;

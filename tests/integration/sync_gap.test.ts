@@ -79,9 +79,8 @@ describe('Sync Gap Race Condition', () => {
                 update: Bytes.fromUint8Array(update),
                 createdAt: serverTimestamp(),
                 createdBy: clientA_ID,
-                clientID: 1111,
-                clockStart: i,
-                clockEnd: i + 1
+                clientIDs: [1111],
+                clientClocks: [i + 1]
             }));
         }
         await Promise.all(updatePromises);

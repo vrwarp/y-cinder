@@ -74,9 +74,7 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
             createdAt: serverTimestamp(),
             createdBy: 'test',
             clientIDs: [1001, 2002],  // Issue 3 Fix: Array of all client IDs
-            clientID: 1001,           // Backwards compat
-            clockStart: 0,
-            clockEnd: 11              // Max clock end
+            clientClocks: [5, 11]     // Clocks for each client
         });
 
         // Create a new provider that already has client1's data

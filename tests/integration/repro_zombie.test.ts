@@ -83,9 +83,8 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
                 update: Bytes.fromUint8Array(update),
                 createdAt: serverTimestamp(),
                 createdBy: 'test_client',
-                clientID: clientId,
-                clockStart: 0,
-                clockEnd: 1
+                clientIDs: [clientId],
+                clientClocks: [1]
             });
         };
 

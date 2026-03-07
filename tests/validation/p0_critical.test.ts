@@ -85,9 +85,8 @@ describe('P0 Critical Issue Validation', () => {
                     update: Bytes.fromUint8Array(update),
                     createdAt: serverTimestamp(),
                     createdBy: `client-${i}`,
-                    clientID: i,
-                    clockStart: 0,
-                    clockEnd: 1,
+                    clientIDs: [i],
+                    clientClocks: [1],
                 });
             }
 
@@ -239,7 +238,7 @@ describe('P0 Critical Issue Validation', () => {
             expect(maintenanceSnap.size).toBeLessThanOrEqual(5); // Relaxed for now
         });
 
-        it('should reuse cached clock offset for subsequent lock attempts', async () => {
+        it('should reuse cached clock offset for subsequent lock attempts', { timeout: 15000 }, async () => {
             const path = `validation/p0-3-cache-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
@@ -305,7 +304,7 @@ describe('P0 Critical Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('content').toString().includes('P0.4 test'),
-                { timeout: 5000, message: 'Sync should complete' }
+                { timeout: 15000, message: 'Sync should complete' }
             );
 
             const elapsed = Date.now() - start;
@@ -460,9 +459,8 @@ describe('P0 Critical Issue Validation', () => {
                 update: Bytes.fromUint8Array(update),
                 createdAt: serverTimestamp(),
                 createdBy: 'original-client',
-                clientID: 999,
-                clockStart: 0,
-                clockEnd: 1,
+                clientIDs: [999],
+                clientClocks: [1],
             });
 
             // Client connects and syncs

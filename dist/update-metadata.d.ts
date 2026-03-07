@@ -20,9 +20,7 @@
  * ```typescript
  * {
  *   clientIDs: number[],    // All client IDs in the update
- *   clientID: number,       // First client ID (backwards compat)
- *   clockStart: number,     // Minimum clock value
- *   clockEnd: number,       // Maximum clock value
+ *   clientClocks: number[], // Per-client clockEnd values (paired with clientIDs)
  * }
  * ```
  *
@@ -83,9 +81,7 @@ export declare function extractAllMetadata(update: Uint8Array): UpdateMetadata[]
  */
 export declare function aggregateMetadata(metas: UpdateMetadata[]): {
     clientIDs?: number[];
-    clientID?: number;
-    clockStart?: number;
-    clockEnd?: number;
+    clientClocks?: number[];
 };
 /**
  * Checks if a local document already contains the data represented by metadata.
@@ -106,5 +102,5 @@ export declare function aggregateMetadata(metas: UpdateMetadata[]): {
  * }
  * ```
  */
-export declare function isUpdateRedundant(localSVMap: Map<number, number>, clientIDs: number[], clockEnd: number): boolean;
+export declare function isUpdateRedundant(localSVMap: Map<number, number>, clientIDs: number[], clientClocks: number[]): boolean;
 //# sourceMappingURL=update-metadata.d.ts.map

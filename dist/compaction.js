@@ -42,9 +42,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-import { doc, collection, Bytes, runTransaction, query, orderBy, getDocs, serverTimestamp, limit, } from "@firebase/firestore";
+import { doc, collection, runTransaction, query, orderBy, getDocs, getDoc, serverTimestamp, limit, } from "@firebase/firestore";
+import { ref, uploadBytes, deleteObject, getBytes } from "@firebase/storage";
 import * as Y from "yjs";
-import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { calculateStateVector, wait, calculateBackoff } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
@@ -77,7 +77,7 @@ import { mergeUpdatesAsync } from "./merge-utils";
  */
 export function compact(ctx, attempt = 1) {
     return __awaiter(this, void 0, void 0, function* () {
-        const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange, cachedClockOffset } = ctx;
+        const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange, cachedClockOffset, storage } = ctx;
         // 1. Distributed Gate: Try to become the Leader
         // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
         const hasLock = yield acquireLock({ db, path, uid, lockTTL, cachedClockOffset });
@@ -101,56 +101,37 @@ export function compact(ctx, attempt = 1) {
             if (testHooks === null || testHooks === void 0 ? void 0 : testHooks.beforeTransaction) {
                 yield testHooks.beforeTransaction();
             }
-            const result = yield performCompactionTransaction({
-                db,
-                path,
-                uid,
-                updateDocs,
-                historyDocs,
-            });
-            return result;
-        }
-        catch (e) {
-            return yield handleCompactionError(ctx, e, attempt);
-        }
-        finally {
-            onCompactionStateChange === null || onCompactionStateChange === void 0 ? void 0 : onCompactionStateChange(false);
-            yield releaseLock({ db, path, uid });
-        }
-    });
-}
-/**
- * Performs the actual compaction within a Firestore transaction.
- */
-function performCompactionTransaction(params) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const { db, path, uid, updateDocs, historyDocs } = params;
-        return yield runTransaction(db, (transaction) => __awaiter(this, void 0, void 0, function* () {
-            // === STEP A: THE KILL SWITCH ===
-            // Re-read the lock to ensure we still own it
-            const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
-            const lockSnap = yield transaction.get(lockRef);
-            if (!lockSnap.exists() || lockSnap.data().owner !== uid) {
-                throw new Error("Lock lost or expired during compaction phase - Aborting write.");
-            }
-            // === STEP B: Read current state ===
+            // === STEP 2: Read current state outside transaction to prepare upload ===
+            // This avoids uploading files inside a potentially repeating transaction block
             const mainRef = doc(db, path);
-            const mainSnap = yield transaction.get(mainRef);
+            const mainSnap = yield getDoc(mainRef);
             let baseSnapshot = null;
             let currentVersion = 0;
             if (mainSnap.exists()) {
                 const data = mainSnap.data();
-                if (data === null || data === void 0 ? void 0 : data.content) {
+                // Fetch from Cloud Storage if configured
+                if (data === null || data === void 0 ? void 0 : data.snapshotStoragePath) {
+                    try {
+                        const storageRef = ref(storage, data.snapshotStoragePath);
+                        const buffer = yield getBytes(storageRef);
+                        baseSnapshot = new Uint8Array(buffer);
+                    }
+                    catch (e) {
+                        console.error("Compaction failed to download base snapshot from storage", e);
+                        throw e; // Cannot safely compact without base state
+                    }
+                }
+                else if (data === null || data === void 0 ? void 0 : data.content) {
                     baseSnapshot = data.content.toUint8Array();
                 }
                 if (typeof (data === null || data === void 0 ? void 0 : data.version) === 'number') {
                     currentVersion = data.version;
                 }
             }
-            // Read updates to merge (re-read in transaction for consistency)
+            // Read updates
             const updatesToProcess = [];
             for (const uDoc of updateDocs) {
-                const freshSnap = yield transaction.get(uDoc.ref);
+                const freshSnap = yield getDoc(uDoc.ref);
                 if (freshSnap.exists()) {
                     const data = freshSnap.data();
                     if (data === null || data === void 0 ? void 0 : data.update) {
@@ -162,10 +143,10 @@ function performCompactionTransaction(params) {
                     }
                 }
             }
-            // Read history segments
+            // Read history
             const historyToMerge = [];
             for (const hDoc of historyDocs) {
-                const freshSnap = yield transaction.get(hDoc.ref);
+                const freshSnap = yield getDoc(hDoc.ref);
                 if (freshSnap.exists()) {
                     const data = freshSnap.data();
                     if (data === null || data === void 0 ? void 0 : data.segment) {
@@ -179,33 +160,114 @@ function performCompactionTransaction(params) {
             if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
                 return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
             }
-            // === STEP C: Perform Merge ===
-            // CRITICAL FIX: Use async merge to avoid blocking main thread
-            // Note: Inside transaction, this may fall back to sync if worker unavailable
-            // Try to merge everything
+            // === STEP 3: Merge and Upload (Outside Transaction) ===
             const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
             const candidate = yield mergeUpdatesAsync(allContent);
-            const sizeInBytes = candidate.byteLength;
-            if (candidate.byteLength <= DEFAULTS.TARGET_SNAPSHOT_SIZE) {
-                // Path 1: Compact to Snapshot
-                return yield compactToSnapshot({
-                    transaction,
-                    mainRef,
-                    candidate,
-                    currentVersion,
-                    updatesToProcess,
-                    historyToMerge,
-                });
+            // Validate candidate before committing — a corrupted merge must never
+            // overwrite the canonical snapshot.
+            try {
+                Y.decodeUpdate(candidate);
             }
-            else {
-                // Path 2: Compact to History Segments
-                return yield compactToHistory({
-                    transaction,
-                    db,
-                    path,
-                    updatesToProcess,
-                });
+            catch (decodeErr) {
+                throw new Error(`Compaction candidate failed validation (${candidate.byteLength} bytes): ${decodeErr}`);
             }
+            const nextVersion = currentVersion + 1;
+            const snapshotFilename = `snapshot_v${nextVersion}.bin`;
+            const storagePath = `${path}/${snapshotFilename}`;
+            const storageRef = ref(storage, storagePath);
+            // Upload candidate blob to Cloud Storage first
+            // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
+            yield uploadBytes(storageRef, candidate);
+            // === STEP 4: Transaction ===
+            const result = yield performCompactionTransaction({
+                db,
+                path,
+                uid,
+                updateDocs,
+                historyDocs,
+                storagePath,
+                candidate,
+                expectedVersion: currentVersion,
+            });
+            // Garbage Collect Old Storage Snapshot
+            if (result.success && result.type === 'snapshot' && result.previousVersion !== undefined && result.previousVersion > 0) {
+                try {
+                    const oldSnapshotPath = `${path}/snapshot_v${result.previousVersion}.bin`;
+                    const oldStorageRef = ref(storage, oldSnapshotPath);
+                    yield deleteObject(oldStorageRef);
+                    console.log(`Garbage collected old snapshot: ${oldSnapshotPath}`);
+                }
+                catch (err) {
+                    console.warn(`Failed to garbage collect old snapshot for ${path}`, err);
+                }
+            }
+            return result;
+        }
+        catch (e) {
+            return yield handleCompactionError(ctx, e, attempt);
+        }
+        finally {
+            onCompactionStateChange === null || onCompactionStateChange === void 0 ? void 0 : onCompactionStateChange(false);
+            yield releaseLock({ db, path, uid });
+        }
+    });
+}
+/**
+ * Performs the actual compaction within a Firestore transaction.
+ *
+ * Verifies the version and deletes processed documents.
+ */
+function performCompactionTransaction(params) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const { db, path, uid, updateDocs, historyDocs, storagePath, candidate, expectedVersion } = params;
+        return yield runTransaction(db, (transaction) => __awaiter(this, void 0, void 0, function* () {
+            // === STEP A: THE KILL SWITCH ===
+            const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
+            const lockSnap = yield transaction.get(lockRef);
+            if (!lockSnap.exists() || lockSnap.data().owner !== uid) {
+                throw new Error("Lock lost or expired during compaction phase - Aborting write.");
+            }
+            // === STEP B: Read current state & verify version ===
+            const mainRef = doc(db, path);
+            const mainSnap = yield transaction.get(mainRef);
+            let currentVersion = 0;
+            if (mainSnap.exists()) {
+                const data = mainSnap.data();
+                if (typeof (data === null || data === void 0 ? void 0 : data.version) === 'number') {
+                    currentVersion = data.version;
+                }
+            }
+            if (currentVersion !== expectedVersion) {
+                throw new Error("Document version changed during compaction upload. Aborting to retry.");
+            }
+            // Verify updates still exist (avoid zombie bugs)
+            const updatesToProcess = [];
+            for (const uDoc of updateDocs) {
+                const freshSnap = yield transaction.get(uDoc.ref);
+                if (freshSnap.exists()) {
+                    updatesToProcess.push({ ref: uDoc.ref });
+                }
+            }
+            const historyToMerge = [];
+            for (const hDoc of historyDocs) {
+                const freshSnap = yield transaction.get(hDoc.ref);
+                if (freshSnap.exists()) {
+                    historyToMerge.push({ ref: hDoc.ref });
+                }
+            }
+            if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
+                return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
+            }
+            // === STEP C: Commit Pointers ===
+            return compactToSnapshot({
+                transaction,
+                mainRef,
+                storagePath,
+                candidate,
+                currentVersion,
+                updatesToProcess,
+                historyToMerge,
+            });
         }));
     });
 }
@@ -213,10 +275,10 @@ function performCompactionTransaction(params) {
  * Compacts everything into the base snapshot.
  */
 function compactToSnapshot(params) {
-    const { transaction, mainRef, candidate, currentVersion, updatesToProcess, historyToMerge } = params;
+    const { transaction, mainRef, storagePath, candidate, currentVersion, updatesToProcess, historyToMerge } = params;
     console.log(`Compacted to Snapshot (Size: ${candidate.byteLength})`);
     transaction.set(mainRef, {
-        content: Bytes.fromUint8Array(candidate),
+        snapshotStoragePath: storagePath,
         stateVector: calculateStateVector(candidate),
         version: currentVersion + 1,
         updatedAt: serverTimestamp(),
@@ -228,142 +290,8 @@ function compactToSnapshot(params) {
         type: 'snapshot',
         updatesCompacted: updatesToProcess.length,
         historySegmentsMerged: historyToMerge.length,
+        previousVersion: currentVersion > 0 ? currentVersion : undefined,
     };
-}
-/**
- * Compacts updates into history segments (with chunking for large updates).
- * CRITICAL FIX: Now async to support off-main-thread merge.
- */
-function compactToHistory(params) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const { transaction, db, path, updatesToProcess } = params;
-        if (updatesToProcess.length === 0) {
-            return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
-        }
-        const MAX_SEGMENT_SIZE = DEFAULTS.TARGET_SNAPSHOT_SIZE;
-        // Try merging all first (optimistic) - CRITICAL FIX: async merge
-        const allUpdates = updatesToProcess.map(u => u.data);
-        const pendingMerge = yield mergeUpdatesAsync(allUpdates);
-        if (pendingMerge.byteLength < MAX_SEGMENT_SIZE) {
-            // Fast path: It fits in one segment
-            const segmentId = Math.random().toString(36).substring(2);
-            const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
-            // P1.2 FIX: Calculate and store stateVector for efficient sync redundancy checks
-            const tempDoc = new Y.Doc();
-            Y.applyUpdate(tempDoc, pendingMerge);
-            const stateVector = toBase64(Y.encodeStateVector(tempDoc));
-            transaction.set(historyRef, {
-                segment: Bytes.fromUint8Array(pendingMerge),
-                startTime: updatesToProcess[0].createdAt,
-                endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
-                stateVector, // P1.2 FIX: Pre-computed stateVector
-            });
-            for (const item of updatesToProcess) {
-                transaction.delete(item.ref);
-            }
-            return {
-                success: true,
-                type: 'history',
-                updatesCompacted: updatesToProcess.length,
-                historySegmentsMerged: 0,
-            };
-        }
-        // Slow path: Chunk into multiple segments
-        return yield chunkIntoHistorySegments({ transaction, db, path, updatesToProcess, maxSegmentSize: MAX_SEGMENT_SIZE });
-    });
-}
-/**
- * Chunks updates into multiple history segments when they exceed size limits.
- *
- * STRATEGY: We keep adding updates to a batch until the ESTIMATED merged size
- * would exceed the limit. Then we flush that batch as a segment.
- *
- * IMPORTANT: Each segment is independently mergeable because Y.mergeUpdates
- * combines updates with shared history correctly. The sync will apply segments
- * in order, building up the state progressively.
- */
-function chunkIntoHistorySegments(params) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const { transaction, db, path, updatesToProcess, maxSegmentSize } = params;
-        let currentBatch = [];
-        let batchStartIndex = 0;
-        let segmentsCreated = 0;
-        for (let i = 0; i < updatesToProcess.length; i++) {
-            const item = updatesToProcess[i];
-            // Add to current batch
-            currentBatch.push(item.data);
-            // Check if we should flush (estimate by trying merge)
-            // This is expensive but accurate
-            const merged = yield mergeUpdatesAsync(currentBatch);
-            const mergedSize = merged.byteLength;
-            // If we exceed limit and have more than 1 item, flush all but the last
-            if (mergedSize >= maxSegmentSize && currentBatch.length > 1) {
-                // Remove the last item (the one that pushed us over)
-                currentBatch.pop();
-                // Merge the remaining items
-                const segmentData = yield mergeUpdatesAsync(currentBatch);
-                const segmentId = Math.random().toString(36).substring(2);
-                const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
-                // FIX: Calculate and store stateVector for efficient sync redundancy checks
-                const tempDoc = new Y.Doc();
-                Y.applyUpdate(tempDoc, segmentData);
-                const encodedSV = Y.encodeStateVector(tempDoc);
-                // Only store SV if it's not empty (length > 1 or non-zero). 
-                // An empty SV ([0]) implies the updates were not applied (e.g. pending dependencies),
-                // so we shouldn't claim to "know" the state is empty.
-                let stateVector;
-                if (encodedSV.length > 1 || encodedSV[0] !== 0) {
-                    stateVector = toBase64(encodedSV);
-                }
-                const historyData = {
-                    segment: Bytes.fromUint8Array(segmentData),
-                    startTime: updatesToProcess[batchStartIndex].createdAt,
-                    endTime: updatesToProcess[i - 1].createdAt,
-                };
-                if (stateVector) {
-                    historyData.stateVector = stateVector;
-                }
-                transaction.set(historyRef, historyData);
-                segmentsCreated++;
-                // Start new batch with just the current item
-                currentBatch = [item.data];
-                batchStartIndex = i;
-            }
-        }
-        // Flush remaining batch
-        if (currentBatch.length > 0) {
-            const segmentData = yield mergeUpdatesAsync(currentBatch);
-            const segmentId = Math.random().toString(36).substring(2);
-            const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY), segmentId);
-            const tempDoc = new Y.Doc();
-            Y.applyUpdate(tempDoc, segmentData);
-            const encodedSV = Y.encodeStateVector(tempDoc);
-            let stateVector;
-            if (encodedSV.length > 1 || encodedSV[0] !== 0) {
-                stateVector = toBase64(encodedSV);
-            }
-            const historyData = {
-                segment: Bytes.fromUint8Array(segmentData),
-                startTime: updatesToProcess[batchStartIndex].createdAt,
-                endTime: updatesToProcess[updatesToProcess.length - 1].createdAt,
-            };
-            if (stateVector) {
-                historyData.stateVector = stateVector;
-            }
-            transaction.set(historyRef, historyData);
-            segmentsCreated++;
-        }
-        // Delete all processed updates
-        for (const item of updatesToProcess) {
-            transaction.delete(item.ref);
-        }
-        return {
-            success: true,
-            type: 'history',
-            updatesCompacted: updatesToProcess.length,
-            historySegmentsMerged: segmentsCreated,
-        };
-    });
 }
 /**
  * Handles compaction errors with exponential backoff retry.

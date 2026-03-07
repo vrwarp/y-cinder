@@ -41,6 +41,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 import { onSnapshot, doc, collection, addDoc, Bytes, query, orderBy, getDocs, getDoc, serverTimestamp, limit, startAfter, } from "@firebase/firestore";
+import { getBytes, ref } from "@firebase/storage";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import { FIREBASE_ORIGINS, FIRESTORE_PATHS, DEFAULTS, } from "./types";
@@ -166,7 +167,24 @@ export function performInitialSync(ctx) {
                 const data = mainSnap.data();
                 if (data) {
                     processSnapshotMetadata(data, serverSVMap);
-                    if (data.stateVector || data.content) {
+                    // Fetch snapshot from Cloud Storage if available
+                    if (data.snapshotStoragePath) {
+                        try {
+                            const storageRef = ref(ctx.storage, data.snapshotStoragePath);
+                            const buffer = yield getBytes(storageRef);
+                            // Convert ArrayBuffer to Uint8Array and inject it into data.content
+                            data.content = Bytes.fromUint8Array(new Uint8Array(buffer));
+                            pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
+                        }
+                        catch (storageErr) {
+                            console.error("Failed to download snapshot from Cloud Storage", storageErr);
+                            // Cannot safely sync without the base snapshot — propagate so
+                            // the sync retry logic in provider.ts handles backoff/retry.
+                            throw storageErr;
+                        }
+                    }
+                    else if (data.stateVector || data.content) {
+                        // Fallback for older documents that haven't been compacted into Cloud Storage yet
                         pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
                     }
                 }
@@ -258,6 +276,7 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
             onCompactionNeeded();
         }
         snapshot.docChanges().forEach((change) => {
+            var _a, _b, _c;
             if (change.type === 'added') {
                 const data = change.doc.data();
                 // Skip our own updates
@@ -274,12 +293,19 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
                     }
                 }
                 if (data.update) {
+                    const docId = change.doc.id;
+                    // Skip quarantined poison pills
+                    if ((_a = ctx.corruptedDocIds) === null || _a === void 0 ? void 0 : _a.has(docId)) {
+                        return;
+                    }
                     try {
                         const update = data.update.toUint8Array();
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                     }
                     catch (e) {
-                        console.error("Failed to apply update", e);
+                        console.error(`Failed to apply update ${docId} (quarantined)`, e);
+                        (_b = ctx.corruptedDocIds) === null || _b === void 0 ? void 0 : _b.add(docId);
+                        (_c = ctx.onCorruptedDocument) === null || _c === void 0 ? void 0 : _c.call(ctx, docId, e instanceof Error ? e : new Error(String(e)));
                     }
                 }
             }
@@ -299,27 +325,58 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
  * receives the new reference state.
  */
 export function createSnapshotListener(ctx) {
-    const { db, path, doc: ydoc, onListenerError } = ctx;
-    return onSnapshot(doc(db, path), (snapshot) => {
+    const { db, path, doc: ydoc, onListenerError, storage } = ctx;
+    // Track the last quarantined snapshot path so we can clear quarantine
+    // when compaction produces a new snapshot at a different path.
+    let lastQuarantinedPath = null;
+    return onSnapshot(doc(db, path), (snapshot) => __awaiter(this, void 0, void 0, function* () {
+        var _a, _b, _c, _d, _e, _f, _g;
         if (!snapshot.exists())
             return;
         const data = snapshot.data();
-        if ((data === null || data === void 0 ? void 0 : data.content) && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
-            // Apply snapshot if it's from a remote origin or if we need to sync up
+        // Handle Cloud Storage Snapshot
+        if ((data === null || data === void 0 ? void 0 : data.snapshotStoragePath) && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
+            const snapshotKey = `snapshot:${data.snapshotStoragePath}`;
+            // Clear quarantine if snapshot path changed (new compaction)
+            if (lastQuarantinedPath && lastQuarantinedPath !== snapshotKey) {
+                (_a = ctx.corruptedDocIds) === null || _a === void 0 ? void 0 : _a.delete(lastQuarantinedPath);
+                lastQuarantinedPath = null;
+            }
+            // Skip quarantined snapshot
+            if ((_b = ctx.corruptedDocIds) === null || _b === void 0 ? void 0 : _b.has(snapshotKey)) {
+                return;
+            }
             try {
-                // We should check redundancy but applying a snapshot is generally safe/idempotent in Yjs
-                // as long as we don't overwrite local pending changes that aren't in the snapshot yet.
-                // However, a snapshot represents valid state at a specific point.
-                // A safer check: if stateVector of snapshot is "ahead" or strictly different?
-                // For now, simpler approach: Apply it. Yjs handles deduplication.
+                const storageRef = ref(storage, data.snapshotStoragePath);
+                const buffer = yield getBytes(storageRef);
+                const content = new Uint8Array(buffer);
+                Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
+            }
+            catch (storageErr) {
+                console.error(`Failed to apply snapshot ${snapshotKey} (quarantined)`, storageErr);
+                (_c = ctx.corruptedDocIds) === null || _c === void 0 ? void 0 : _c.add(snapshotKey);
+                lastQuarantinedPath = snapshotKey;
+                (_d = ctx.onCorruptedDocument) === null || _d === void 0 ? void 0 : _d.call(ctx, snapshotKey, storageErr instanceof Error ? storageErr : new Error(String(storageErr)));
+            }
+        }
+        // Handle Firestore Document Snapshot (legacy/small documents)
+        else if ((data === null || data === void 0 ? void 0 : data.content) && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
+            const snapshotKey = 'snapshot:inline';
+            if ((_e = ctx.corruptedDocIds) === null || _e === void 0 ? void 0 : _e.has(snapshotKey)) {
+                return;
+            }
+            try {
                 const content = data.content.toUint8Array();
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
             }
             catch (err) {
-                console.error("Failed to apply snapshot from listener", err);
+                console.error(`Failed to apply inline snapshot (quarantined)`, err);
+                (_f = ctx.corruptedDocIds) === null || _f === void 0 ? void 0 : _f.add(snapshotKey);
+                lastQuarantinedPath = snapshotKey;
+                (_g = ctx.onCorruptedDocument) === null || _g === void 0 ? void 0 : _g.call(ctx, snapshotKey, err instanceof Error ? err : new Error(String(err)));
             }
         }
-    }, (error) => {
+    }), (error) => {
         console.error("Snapshot listener failed", error);
         if (onListenerError)
             onListenerError(error);
@@ -346,8 +403,14 @@ export function createHistoryListener(ctx, startAfterDoc) {
     }
     return onSnapshot(q, (snapshot) => {
         snapshot.docChanges().forEach((change) => {
+            var _a, _b, _c;
             if (change.type === 'added') {
                 const data = change.doc.data();
+                const docId = change.doc.id;
+                // Skip quarantined poison pills
+                if ((_a = ctx.corruptedDocIds) === null || _a === void 0 ? void 0 : _a.has(docId)) {
+                    return;
+                }
                 if (data && data.segment) {
                     try {
                         // Check redundancy using local state vector
@@ -363,7 +426,9 @@ export function createHistoryListener(ctx, startAfterDoc) {
                         }
                     }
                     catch (err) {
-                        console.error("Failed to apply history segment from listener", err);
+                        console.error(`Failed to apply history segment ${docId} (quarantined)`, err);
+                        (_b = ctx.corruptedDocIds) === null || _b === void 0 ? void 0 : _b.add(docId);
+                        (_c = ctx.onCorruptedDocument) === null || _c === void 0 ? void 0 : _c.call(ctx, docId, err instanceof Error ? err : new Error(String(err)));
                     }
                 }
             }

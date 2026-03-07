@@ -32,6 +32,7 @@
  * @module sync
  */
 import { Firestore, Unsubscribe, QueryDocumentSnapshot } from "@firebase/firestore";
+import { FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 /**
  * Context required for sync operations.
@@ -53,6 +54,19 @@ export interface SyncContext {
     onListenerError?: (error: Error) => void;
     /** Flag to check if provider is destroyed */
     isDestroyed: () => boolean;
+    /** Firebase Storage instance */
+    storage: FirebaseStorage;
+    /**
+     * Per-session quarantine set of Firestore document IDs / storage paths
+     * that have failed Y.applyUpdate due to structural corruption.
+     * Prevents infinite retry loops on "poison pill" documents.
+     */
+    corruptedDocIds?: Set<string>;
+    /**
+     * Callback when a corrupted document is quarantined.
+     * Allows the application layer to log, alert, or take action.
+     */
+    onCorruptedDocument?: (docId: string, error: Error) => void;
 }
 /**
  * Result of initial sync operation.

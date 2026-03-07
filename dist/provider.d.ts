@@ -12,6 +12,7 @@
  */
 import { FirebaseApp } from "@firebase/app";
 import { Firestore } from "@firebase/firestore";
+import { FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
 import { FireProviderConfig } from "./types";
@@ -45,6 +46,8 @@ export declare class FireProvider extends ObservableV2<any> {
     readonly db: Firestore;
     /** Firebase app instance */
     readonly firebaseApp: FirebaseApp;
+    /** Firebase Storage instance */
+    readonly storage: FirebaseStorage;
     /** Unique session ID for this provider instance */
     readonly uid: string;
     /** Map of subdocument providers */
@@ -75,6 +78,8 @@ export declare class FireProvider extends ObservableV2<any> {
     /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
     private _debounceTimerId;
     private _boundBeforeUnload;
+    /** Per-session quarantine set for corrupted Firestore documents */
+    private _corruptedDocIds;
     /**
      * Creates a new FireProvider instance.
      *

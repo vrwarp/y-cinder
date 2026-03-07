@@ -34,6 +34,7 @@
  * @module compaction
  */
 import { Firestore } from "@firebase/firestore";
+import { FirebaseStorage } from "@firebase/storage";
 import { TestHooks } from "./types";
 /**
  * Context required for compaction operations.
@@ -57,6 +58,8 @@ export interface CompactionContext {
     onCompactionStateChange?: (isCompacting: boolean) => void;
     /** P0.3 FIX: Cached clock offset to pass to locking */
     cachedClockOffset?: number;
+    /** Firebase Storage instance */
+    storage: FirebaseStorage;
 }
 /**
  * Result of a compaction operation.
@@ -72,6 +75,8 @@ export interface CompactionResult {
     historySegmentsMerged: number;
     /** Error if compaction failed */
     error?: Error;
+    /** Version number of the snapshot that was replaced (for garbage collection) */
+    previousVersion?: number;
 }
 /**
  * Performs tiered compaction of updates.

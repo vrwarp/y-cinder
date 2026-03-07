@@ -97,6 +97,8 @@ export interface CompactionResult {
     historySegmentsMerged: number;
     /** Error if compaction failed */
     error?: Error;
+    /** Version number of the snapshot that was replaced (for garbage collection) */
+    previousVersion?: number;
 }
 
 /**
@@ -396,6 +398,7 @@ function compactToSnapshot(params: {
         type: 'snapshot',
         updatesCompacted: updatesToProcess.length,
         historySegmentsMerged: historyToMerge.length,
+        previousVersion: currentVersion > 0 ? currentVersion : undefined,
     };
 }
 

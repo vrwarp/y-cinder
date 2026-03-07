@@ -20,6 +20,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 import { getFirestore, initializeFirestore, persistentLocalCache, collection, addDoc, Bytes, serverTimestamp, } from "@firebase/firestore";
+import { getStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
 // Module imports
@@ -84,6 +85,8 @@ export class FireProvider extends ObservableV2 {
         /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
         this._debounceTimerId = null;
         this._boundBeforeUnload = null;
+        /** Per-session quarantine set for corrupted Firestore documents */
+        this._corruptedDocIds = new Set();
         /**
          * Handles local document updates.
          * Batches updates and triggers debounced save to Firestore.
@@ -170,6 +173,7 @@ export class FireProvider extends ObservableV2 {
             throw new Error(`Invalid depth: ${depth}. Must be between 0 and 100.`);
         }
         this.firebaseApp = firebaseApp;
+        this.storage = getStorage(firebaseApp);
         // Check if offline persistence is enabled
         if ((_a = config.persistence) === null || _a === void 0 ? void 0 : _a.enabled) {
             try {
@@ -257,6 +261,7 @@ export class FireProvider extends ObservableV2 {
                 },
                 // P0.3 FIX: Pass cached clock offset to avoid re-measuring
                 cachedClockOffset: this._cachedClockOffset,
+                storage: this.storage,
             };
             // FIX: Pause history listener during compaction to avoid contention/deadlock in emulator
             if (this._unsubscribeHistory) {
@@ -283,6 +288,11 @@ export class FireProvider extends ObservableV2 {
                         onListenerError: (error) => {
                             console.error('Listener error (resumed):', error);
                             this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
+                        },
+                        storage: this.storage,
+                        corruptedDocIds: this._corruptedDocIds,
+                        onCorruptedDocument: (docId, error) => {
+                            this.emit('corrupted-document', [{ docId, error }]);
                         },
                     };
                     // We resume listening from the last known checkpoint.
@@ -372,6 +382,11 @@ export class FireProvider extends ObservableV2 {
                 onListenerError: (error) => {
                     console.error('Listener error:', error);
                     this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
+                },
+                storage: this.storage,
+                corruptedDocIds: this._corruptedDocIds,
+                onCorruptedDocument: (docId, error) => {
+                    this.emit('corrupted-document', [{ docId, error }]);
                 },
             };
             try {

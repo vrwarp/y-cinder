@@ -4,6 +4,43 @@ import { getFirestore, doc, getDoc, collection, getDocs, connectFirestoreEmulato
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 import * as Y from 'yjs';
 
+const extractYDocState = (doc) => {
+  const res = {};
+  for (const [name, type] of doc.share.entries()) {
+    if (type.constructor.name !== 'AbstractType') {
+      res[name] = type.toJSON ? type.toJSON() : undefined;
+      continue;
+    }
+
+    let isText = false;
+    let isArray = false;
+    let isMap = false;
+    for (const [client, items] of doc.store.clients) {
+      for (const item of items) {
+        if (item.parent === type) {
+          if (item.parentSub !== null) {
+            isMap = true;
+          } else if (item.content && (item.content.constructor.name === 'ContentString' || item.content.constructor.name === 'ContentFormat')) {
+            isText = true;
+          } else {
+            isArray = true;
+          }
+          break;
+        }
+      }
+      if (isMap || isText || isArray) break;
+    }
+
+    if (isMap) res[name] = doc.getMap(name).toJSON();
+    else if (isText) res[name] = doc.getText(name).toJSON();
+    else if (isArray) res[name] = doc.getArray(name).toJSON();
+    else {
+      res[name] = doc.getMap(name).toJSON(); // default fallback
+    }
+  }
+  return res;
+};
+
 function App() {
   const [docPath, setDocPath] = useState('test/doc1');
   const [projectId, setProjectId] = useState('demo-y-cinder');
@@ -228,7 +265,7 @@ function App() {
       }
     });
 
-    setCombinedDocData(ydoc.toJSON());
+    setCombinedDocData(extractYDocState(ydoc));
   }, [baseDoc, history, updates, selectedUpdateIds]);
 
   const toggleUpdateSelection = (id) => {

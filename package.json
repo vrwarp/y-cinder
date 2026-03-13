@@ -8,7 +8,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "npm run version-bump && tsc",
+    "build": "node scripts/bundle-worker.js && npm run version-bump && tsc",
     "test": "./scripts/test.sh",
     "version-bump": "node scripts/bump-version.js",
     "emulators:start": "firebase emulators:start",

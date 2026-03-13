@@ -6,9 +6,15 @@
  *
  * ## Architecture
  *
- * 1. On first call, attempts to create a Web Worker
+ * 1. On first call, attempts to create a Web Worker from a pre-bundled blob
  * 2. If Worker is available, merges happen off main thread
  * 3. If Worker fails (e.g., Node.js, strict CSP), falls back to sync merge
+ *
+ * ## Bundling
+ *
+ * The worker code (including Yjs) is pre-bundled at build time by
+ * `scripts/bundle-worker.js` into `generated/merge-worker-blob.ts`.
+ * No external CDN or network requests are needed at runtime.
  *
  * ## Fallback Strategy
  *

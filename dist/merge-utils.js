@@ -6,9 +6,15 @@
  *
  * ## Architecture
  *
- * 1. On first call, attempts to create a Web Worker
+ * 1. On first call, attempts to create a Web Worker from a pre-bundled blob
  * 2. If Worker is available, merges happen off main thread
  * 3. If Worker fails (e.g., Node.js, strict CSP), falls back to sync merge
+ *
+ * ## Bundling
+ *
+ * The worker code (including Yjs) is pre-bundled at build time by
+ * `scripts/bundle-worker.js` into `generated/merge-worker-blob.ts`.
+ * No external CDN or network requests are needed at runtime.
  *
  * ## Fallback Strategy
  *
@@ -27,6 +33,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 import * as Y from 'yjs';
+import { MERGE_WORKER_CODE } from './generated/merge-worker-blob';
 // Worker instance (lazily initialized, singleton)
 let mergeWorker = null;
 let workerInitialized = false;
@@ -57,24 +64,8 @@ function initWorker() {
         return false;
     }
     try {
-        // Create inline worker from source code
-        // This avoids needing a separate file and works with bundlers
-        const workerCode = `
-            importScripts('https://unpkg.com/yjs@13/dist/yjs.cjs');
-            
-            self.onmessage = function(event) {
-                var data = event.data;
-                try {
-                    var result = Y.mergeUpdates(data.updates);
-                    self.postMessage({ id: data.id, result: result }, [result.buffer]);
-                } catch (err) {
-                    self.postMessage({ id: data.id, error: err.message || String(err) });
-                }
-            };
-            
-            self.postMessage({ type: 'ready' });
-        `;
-        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        // Create worker from pre-bundled code (no external network requests)
+        const blob = new Blob([MERGE_WORKER_CODE], { type: 'application/javascript' });
         const workerUrl = URL.createObjectURL(blob);
         mergeWorker = new Worker(workerUrl);
         // Handle worker messages

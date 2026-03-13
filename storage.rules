@@ -14,5 +14,8 @@ service firebase.storage {
     match /depth-tests/{allPaths=**} {
       allow read, write: if true;
     }
+    match /integration-tests/{allPaths=**} {
+      allow read, write: if true;
+    }
   }
 }

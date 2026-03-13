@@ -50,7 +50,7 @@ import {
     limitToLast,
     QueryDocumentSnapshot,
 } from "@firebase/firestore";
-import { getBytes, ref, FirebaseStorage } from "@firebase/storage";
+import { getBytes, ref, uploadBytes, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import {
@@ -193,13 +193,24 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             if (updatesSnap.empty) {
                 hasMoreUpdates = false;
             } else {
-                updatesSnap.forEach(snap => {
+                for (const snap of updatesSnap.docs) {
                     const data = snap.data();
                     if (data) {
+                        // Download storage-backed update if present
+                        if (data.updateStoragePath && !data.update) {
+                            try {
+                                const storageRef = ref(ctx.storage, data.updateStoragePath);
+                                const buffer = await getBytes(storageRef);
+                                data.update = Bytes.fromUint8Array(new Uint8Array(buffer));
+                            } catch (storageErr) {
+                                console.error(`Failed to download storage-backed update: ${data.updateStoragePath}`, storageErr);
+                                continue; // Skip this update — cannot apply without data
+                            }
+                        }
                         processUpdateMetadata(data, serverSVMap);
                         pendingUpdates.push({ type: 'update', data, priority: 3 });
                     }
-                });
+                }
 
                 // FIX: Verify cursor is committed to avoid "Invalid query" with pending serverTimestamp
                 let candidateDoc: QueryDocumentSnapshot | null = updatesSnap.docs[updatesSnap.docs.length - 1];
@@ -325,13 +336,32 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         if (localDiff.byteLength > 2) {
             console.log("Pushing missing local updates to Firestore.");
             const metas = extractAllMetadata(localDiff);
-            const pkg: any = {
-                update: Bytes.fromUint8Array(localDiff),
-                createdAt: serverTimestamp(),
-                createdBy: uid,
-                ...aggregateMetadata(metas)
-            };
-            await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
+
+            if (localDiff.byteLength > DEFAULTS.FIRESTORE_DOC_LIMIT) {
+                // Storage-backed update: upload binary to Cloud Storage
+                const storagePath = `${path}/large_updates/${uid}_${Date.now()}.bin`;
+                const storageRef = ref(ctx.storage, storagePath);
+                await uploadBytes(storageRef, localDiff);
+
+                // Write lightweight pointer document to updates collection
+                const pkg: any = {
+                    updateStoragePath: storagePath,
+                    createdAt: serverTimestamp(),
+                    createdBy: uid,
+                    ...aggregateMetadata(metas)
+                };
+                await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
+                console.log(`Oversized initial sync diff (${localDiff.byteLength} bytes) offloaded to Cloud Storage: ${storagePath}`);
+            } else {
+                // Standard inline update
+                const pkg: any = {
+                    update: Bytes.fromUint8Array(localDiff),
+                    createdAt: serverTimestamp(),
+                    createdBy: uid,
+                    ...aggregateMetadata(metas)
+                };
+                await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
+            }
             localUpdatesPushed = true;
         }
 
@@ -418,14 +448,31 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                     }
                 }
 
+                const docId = change.doc.id;
+
+                // Skip quarantined poison pills
+                if (ctx.corruptedDocIds?.has(docId)) {
+                    return;
+                }
+
+                // Handle storage-backed update (oversized diff offloaded to Cloud Storage)
+                if (data.updateStoragePath && !data.update) {
+                    (async () => {
+                        try {
+                            const storageRef = ref(ctx.storage, data.updateStoragePath);
+                            const buffer = await getBytes(storageRef);
+                            const update = new Uint8Array(buffer);
+                            Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
+                        } catch (e) {
+                            console.error(`Failed to apply storage-backed update ${docId} (quarantined)`, e);
+                            ctx.corruptedDocIds?.add(docId);
+                            ctx.onCorruptedDocument?.(docId, e instanceof Error ? e : new Error(String(e)));
+                        }
+                    })();
+                    return;
+                }
+
                 if (data.update) {
-                    const docId = change.doc.id;
-
-                    // Skip quarantined poison pills
-                    if (ctx.corruptedDocIds?.has(docId)) {
-                        return;
-                    }
-
                     try {
                         const update = (data.update as Bytes).toUint8Array();
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);

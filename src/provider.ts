@@ -37,7 +37,7 @@ import {
 import { debounce, generateSessionId, calculateBackoff } from "./utils";
 import { extractAllMetadata, aggregateMetadata } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext } from "./sync";
-import { compact, CompactionContext } from "./compaction";
+import { compact as performTieredCompaction, CompactionContext } from "./compaction";
 import { measureClockSkew } from "./locking";
 import {
   handleSubdocs as handleSubdocsEvent,
@@ -247,6 +247,8 @@ export class FireProvider extends ObservableV2<any> {
     // Prevent concurrent compaction from same instance
     if (this._isCompacting && attempt === 1) return;
 
+    this._isCompacting = true;
+
     const ctx: CompactionContext = {
       db: this.db,
       path: this.path,
@@ -255,9 +257,6 @@ export class FireProvider extends ObservableV2<any> {
       compactionLimit: this.compactionLimit,
       isDestroyed: () => this._isDestroyed,
       testHooks: this._testHooks,
-      onCompactionStateChange: (isCompacting) => {
-        this._isCompacting = isCompacting;
-      },
       // P0.3 FIX: Pass cached clock offset to avoid re-measuring
       cachedClockOffset: this._cachedClockOffset,
       storage: this.storage,
@@ -270,8 +269,10 @@ export class FireProvider extends ObservableV2<any> {
     }
 
     try {
-      await compact(ctx, attempt);
+      await performTieredCompaction(ctx, attempt);
     } finally {
+      this._isCompacting = false;
+
       // FIX: Resume history listener
       if (!this._isDestroyed && !this._unsubscribeHistory) {
         // Use SyncContext to recreate listener

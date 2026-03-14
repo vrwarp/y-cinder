@@ -75,8 +75,6 @@ export interface CompactionContext {
     isDestroyed: () => boolean;
     /** Test hooks for dependency injection */
     testHooks?: TestHooks;
-    /** Callback when compaction state changes */
-    onCompactionStateChange?: (isCompacting: boolean) => void;
     /** P0.3 FIX: Cached clock offset to pass to locking */
     cachedClockOffset?: number;
     /** Firebase Storage instance */
@@ -131,7 +129,7 @@ export async function compact(
     ctx: CompactionContext,
     attempt: number = 1
 ): Promise<CompactionResult> {
-    const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange, cachedClockOffset, storage } = ctx;
+    const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, cachedClockOffset, storage } = ctx;
 
     // 1. Distributed Gate: Try to become the Leader
     // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
@@ -139,8 +137,6 @@ export async function compact(
     if (!hasLock) {
         return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
     }
-
-    onCompactionStateChange?.(true);
 
     try {
         console.log(`Starting compaction (attempt ${attempt})...`);
@@ -286,7 +282,6 @@ export async function compact(
     } catch (e: any) {
         return await handleCompactionError(ctx, e, attempt);
     } finally {
-        onCompactionStateChange?.(false);
         await releaseLock({ db, path, uid });
     }
 }

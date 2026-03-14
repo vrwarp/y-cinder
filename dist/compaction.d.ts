@@ -54,8 +54,6 @@ export interface CompactionContext {
     isDestroyed: () => boolean;
     /** Test hooks for dependency injection */
     testHooks?: TestHooks;
-    /** Callback when compaction state changes */
-    onCompactionStateChange?: (isCompacting: boolean) => void;
     /** P0.3 FIX: Cached clock offset to pass to locking */
     cachedClockOffset?: number;
     /** Firebase Storage instance */

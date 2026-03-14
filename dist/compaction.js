@@ -77,14 +77,13 @@ import { mergeUpdatesAsync } from "./merge-utils";
  */
 export function compact(ctx, attempt = 1) {
     return __awaiter(this, void 0, void 0, function* () {
-        const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, onCompactionStateChange, cachedClockOffset, storage } = ctx;
+        const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, cachedClockOffset, storage } = ctx;
         // 1. Distributed Gate: Try to become the Leader
         // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
         const hasLock = yield acquireLock({ db, path, uid, lockTTL, cachedClockOffset });
         if (!hasLock) {
             return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
         }
-        onCompactionStateChange === null || onCompactionStateChange === void 0 ? void 0 : onCompactionStateChange(true);
         try {
             console.log(`Starting compaction (attempt ${attempt})...`);
             // Fetch work items
@@ -207,7 +206,6 @@ export function compact(ctx, attempt = 1) {
             return yield handleCompactionError(ctx, e, attempt);
         }
         finally {
-            onCompactionStateChange === null || onCompactionStateChange === void 0 ? void 0 : onCompactionStateChange(false);
             yield releaseLock({ db, path, uid });
         }
     });

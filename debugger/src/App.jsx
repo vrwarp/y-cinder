@@ -109,7 +109,12 @@ const DataCardItem = ({ data, renderData, theme, preStyle }) => {
           {(yjsBytes > 0) && (
             <>
               <strong style={{ color: theme.textMuted }}>Payload:</strong>
-              <span>Yjs Update ({yjsBytes} bytes) - {structCount} structs</span>
+              <span>
+                Yjs Update ({yjsBytes} bytes) - {structCount} structs
+                {(data.updateStoragePath || data.snapshotStoragePath) && (
+                  <span style={{ background: theme.primary, color: '#fff', padding: '2px 6px', borderRadius: '10px', fontSize: '10px', marginLeft: '6px', fontWeight: 'bold' }}>OFFLOADED</span>
+                )}
+              </span>
             </>
           )}
         </div>
@@ -316,11 +321,29 @@ function App() {
       const updatesRef = collection(db, `${docPath}/updates`);
       const updatesSnap = await getDocs(updatesRef);
       const updatesList = updatesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      if (storage) {
+        await Promise.all(updatesList.map(async (u) => {
+          if (u.updateStoragePath && !u.update) {
+            try {
+              const sRef = storageRef(storage, u.updateStoragePath);
+              const buffer = await getBytes(sRef);
+              u.update = new Uint8Array(buffer);
+            } catch (e) {
+              console.error(`Failed to load update ${u.id} from storage`, e);
+              newCorrupted.set(u.id, "Failed to load update from storage: " + e.message);
+            }
+          }
+        }));
+      }
+
       setUpdates(updatesList);
       // Validate each update
       updatesList.forEach(u => {
-        const err = validateBlob(u.update);
-        if (err) newCorrupted.set(u.id, err);
+        if (!newCorrupted.has(u.id)) {
+          const err = validateBlob(u.update);
+          if (err) newCorrupted.set(u.id, err);
+        }
       });
       // Select only non-corrupted updates by default
       setSelectedUpdateIds(new Set(updatesList.filter(u => !newCorrupted.has(u.id)).map(u => u.id)));

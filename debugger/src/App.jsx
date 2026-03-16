@@ -39,6 +39,41 @@ const extractYDocState = (doc) => {
       res[name] = doc.getMap(name).toJSON(); // default fallback
     }
   }
+
+  // Extract pending structs
+  let pendingStructsCount = 0;
+  const pendingStructsPreview = [];
+
+  if (doc.store.pendingStructs && doc.store.pendingStructs.update) {
+    try {
+      // Decode the pending update buffer to get actual structs
+      const pendingDecoded = Y.decodeUpdate(doc.store.pendingStructs.update);
+
+      pendingStructsCount = pendingDecoded.structs.length;
+
+      for (let i = 0; i < Math.min(50, pendingStructsCount); i++) {
+        const struct = pendingDecoded.structs[i];
+        pendingStructsPreview.push({
+          client: struct.id.client,
+          clock: struct.id.clock,
+          parentSub: struct.parentSub,
+          class: struct.constructor.name,
+          deleted: struct.deleted || false
+        });
+      }
+    } catch (e) {
+      console.error("Failed to decode pending structs:", e);
+    }
+  }
+
+  if (pendingStructsCount > 0) {
+    res.__pendingStructs = {
+      count: pendingStructsCount,
+      preview: pendingStructsPreview,
+      note: "These operations are trapped in the pending queue due to missing dependencies from a base document."
+    };
+  }
+
   return res;
 };
 

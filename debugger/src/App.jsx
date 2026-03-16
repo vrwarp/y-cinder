@@ -222,6 +222,7 @@ function App() {
   const [history, setHistory] = useState([]);
   const [combinedDocData, setCombinedDocData] = useState(null);
   const [selectedUpdateIds, setSelectedUpdateIds] = useState(new Set());
+  const [useBaseDoc, setUseBaseDoc] = useState(true);
   const [corruptedIds, setCorruptedIds] = useState(new Map()); // id -> error message
 
   const [loading, setLoading] = useState(false);
@@ -444,7 +445,7 @@ function App() {
       }
     };
 
-    if (baseDoc && baseDoc.content) applyUpdateData(baseDoc.content);
+    if (useBaseDoc && baseDoc && baseDoc.content) applyUpdateData(baseDoc.content);
     history.forEach(h => applyUpdateData(h.segment));
     updates.forEach(u => {
       if (selectedUpdateIds.has(u.id)) {
@@ -453,7 +454,7 @@ function App() {
     });
 
     setCombinedDocData(extractYDocState(ydoc));
-  }, [baseDoc, history, updates, selectedUpdateIds]);
+  }, [baseDoc, history, updates, selectedUpdateIds, useBaseDoc]);
 
   const toggleUpdateSelection = (id) => {
     const newSet = new Set(selectedUpdateIds);
@@ -698,6 +699,17 @@ function App() {
                   Base Document
                   {corruptedIds.has('__base__') && <span style={{ background: theme.danger, color: '#fff', padding: '2px 6px', borderRadius: '10px', fontSize: '10px', marginLeft: '8px', fontWeight: 'bold' }}>CORRUPTED</span>}
                 </h2>
+                {baseDoc && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', cursor: 'pointer', color: theme.textMuted }}>
+                    <input
+                      type="checkbox"
+                      checked={useBaseDoc}
+                      onChange={(e) => setUseBaseDoc(e.target.checked)}
+                      disabled={corruptedIds.has('__base__')}
+                    />
+                    Include
+                  </label>
+                )}
               </div>
               <div style={{ flex: 1, overflowY: 'auto', maxHeight: '500px' }}>
                 {baseDoc ? (

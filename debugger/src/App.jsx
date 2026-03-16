@@ -4,238 +4,12 @@ import { getFirestore, doc, getDoc, collection, getDocs, connectFirestoreEmulato
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 import { getStorage, connectStorageEmulator, ref as storageRef, getBytes } from 'firebase/storage';
 import * as Y from 'yjs';
+import { mergeUpdatesAsync } from 'y-cinder';
 
-const extractYDocState = (doc) => {
-  const res = {};
-  for (const [name, type] of doc.share.entries()) {
-    if (type.constructor.name !== 'AbstractType') {
-      res[name] = type.toJSON ? type.toJSON() : undefined;
-      continue;
-    }
-
-    let isText = false;
-    let isArray = false;
-    let isMap = false;
-    for (const [client, items] of doc.store.clients) {
-      for (const item of items) {
-        if (item.parent === type) {
-          if (item.parentSub !== null) {
-            isMap = true;
-          } else if (item.content && (item.content.constructor.name === 'ContentString' || item.content.constructor.name === 'ContentFormat')) {
-            isText = true;
-          } else {
-            isArray = true;
-          }
-          break;
-        }
-      }
-      if (isMap || isText || isArray) break;
-    }
-
-    if (isMap) res[name] = doc.getMap(name).toJSON();
-    else if (isText) res[name] = doc.getText(name).toJSON();
-    else if (isArray) res[name] = doc.getArray(name).toJSON();
-    else {
-      res[name] = doc.getMap(name).toJSON(); // default fallback
-    }
-  }
-
-  // Extract pending structs
-  let pendingStructsCount = 0;
-  const pendingStructsPreview = [];
-
-  if (doc.store.pendingStructs && doc.store.pendingStructs.update) {
-    try {
-      // Decode the pending update buffer to get actual structs
-      const pendingDecoded = Y.decodeUpdate(doc.store.pendingStructs.update);
-
-      pendingStructsCount = pendingDecoded.structs.length;
-
-      for (let i = 0; i < Math.min(50, pendingStructsCount); i++) {
-        const struct = pendingDecoded.structs[i];
-        pendingStructsPreview.push({
-          client: struct.id.client,
-          clock: struct.id.clock,
-          parentSub: struct.parentSub,
-          class: struct.constructor.name,
-          deleted: struct.deleted || false
-        });
-      }
-    } catch (e) {
-      console.error("Failed to decode pending structs:", e);
-    }
-  }
-
-  if (pendingStructsCount > 0) {
-    res.__pendingStructs = {
-      count: pendingStructsCount,
-      preview: pendingStructsPreview,
-      note: "These operations are trapped in the pending queue due to missing dependencies from a base document."
-    };
-  }
-
-  return res;
-};
-
-const getUint8Array = (value) => {
-  if (!value) return null;
-  if (value instanceof Uint8Array) return value;
-  if (value.type === 'Buffer' && value.data) return new Uint8Array(value.data);
-  if (typeof value === 'object' && typeof value.toUint8Array === 'function') return value.toUint8Array();
-  if (typeof value === 'object' && value.type === 'firestore/bytes/1.0' && typeof value.bytes === 'string') {
-    const binaryString = atob(value.bytes);
-    const uint8Arr = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      uint8Arr[i] = binaryString.charCodeAt(i);
-    }
-    return uint8Arr;
-  }
-  return null;
-};
-
-const DataCardItem = ({ data, renderData, theme, preStyle }) => {
-  const [showRaw, setShowRaw] = useState(false);
-  const [structLimit, setStructLimit] = useState(250);
-
-  // Parse fields
-  const createdBy = data.createdBy;
-  let createdAt = null;
-  if (data.createdAt) {
-    if (data.createdAt.seconds !== undefined) {
-      createdAt = new Date(data.createdAt.seconds * 1000).toLocaleString();
-    } else if (typeof data.createdAt === 'string') {
-      createdAt = new Date(data.createdAt).toLocaleString();
-    }
-  }
-
-  const clientIDs = data.clientIDs ? data.clientIDs.join(', ') : '';
-  const clientClocks = data.clientClocks ? data.clientClocks.join(', ') : '';
-
-  let yjsBytes = 0;
-  let structCount = 0;
-  const uint8Arr = getUint8Array(data.update || data.segment || data.content);
-  if (uint8Arr) {
-    yjsBytes = uint8Arr.length;
-    try {
-      const decoded = Y.decodeUpdate(uint8Arr);
-      structCount = decoded.structs.length;
-    } catch (e) { }
-  }
-
-  const hasGridData = createdAt || clientIDs || yjsBytes > 0;
-
-  return (
-    <div style={{ fontSize: '13px', color: theme.text }}>
-      {hasGridData ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '4px 12px', marginBottom: '8px' }}>
-          {createdAt && (
-            <>
-              <strong style={{ color: theme.textMuted }}>Created:</strong>
-              <span>{createdAt} {createdBy && <span>by <span style={{ fontFamily: 'monospace', background: theme.bg, padding: '2px 4px', borderRadius: '4px' }}>{createdBy}</span></span>}</span>
-            </>
-          )}
-
-          {clientIDs && (
-            <>
-              <strong style={{ color: theme.textMuted }}>Clients:</strong>
-              <span style={{ fontFamily: 'monospace' }}>{clientIDs} {clientClocks && `(Clocks: ${clientClocks})`}</span>
-            </>
-          )}
-
-          {(yjsBytes > 0) && (
-            <>
-              <strong style={{ color: theme.textMuted }}>Payload:</strong>
-              <span>
-                Yjs Update ({yjsBytes} bytes) - {structCount} structs
-                {(data.updateStoragePath || data.snapshotStoragePath) && (
-                  <span style={{ background: theme.primary, color: '#fff', padding: '2px 6px', borderRadius: '10px', fontSize: '10px', marginLeft: '6px', fontWeight: 'bold' }}>OFFLOADED</span>
-                )}
-              </span>
-            </>
-          )}
-        </div>
-      ) : null}
-
-      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-        <button
-          onClick={() => setShowRaw(!showRaw)}
-          style={{ background: 'transparent', border: 'none', color: theme.primary, cursor: 'pointer', padding: 0, fontSize: '12px', fontWeight: 'bold' }}
-        >
-          {showRaw ? '▼ Hide Raw JSON' : '▶ Show Raw JSON'}
-        </button>
-
-        <button
-          onClick={() => {
-            try {
-              const jsonStr = JSON.stringify(data, (key, value) => {
-                const uintArr = getUint8Array(value);
-                if (uintArr) {
-                  try {
-                    return { decodedFull: Y.decodeUpdate(uintArr) };
-                  } catch (e) { return `<Bytes ${uintArr.length} bytes>`; }
-                }
-                return value;
-              }, 2);
-              const blob = new Blob([jsonStr], { type: 'application/json' });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = `update_${data.id || 'data'}.json`;
-              a.click();
-              URL.revokeObjectURL(url);
-            } catch (e) {
-              console.error(e);
-              alert("Failed to export full JSON.");
-            }
-          }}
-          style={{ background: 'transparent', border: `1px solid ${theme.border}`, borderRadius: '4px', color: theme.textMuted, cursor: 'pointer', padding: '2px 8px', fontSize: '11px' }}
-        >
-          ⬇ Download JSON
-        </button>
-
-        {uint8Arr && (
-          <button
-            onClick={() => {
-              const blob = new Blob([uint8Arr], { type: 'application/octet-stream' });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = `update_${data.id || 'data'}.bin`;
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
-            style={{ background: 'transparent', border: `1px solid ${theme.border}`, borderRadius: '4px', color: theme.textMuted, cursor: 'pointer', padding: '2px 8px', fontSize: '11px' }}
-          >
-            ⬇ Download Binary
-          </button>
-        )}
-      </div>
-
-      {showRaw && (
-        <pre style={{
-          ...preStyle,
-          marginTop: '8px',
-          padding: '8px',
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-all',
-          margin: 0
-        }}>
-          {renderData(data, structLimit)}
-          {structCount > structLimit && (
-            <div style={{ marginTop: '8px', textAlign: 'center' }}>
-              <button
-                onClick={() => setStructLimit(prev => prev + 250)}
-                style={{ background: theme.primary, border: 'none', borderRadius: '4px', color: '#fff', cursor: 'pointer', padding: '6px 12px', fontSize: '13px', fontWeight: 'bold' }}
-              >
-                Load Next 250 Structs ({structLimit} / {structCount} shown)
-              </button>
-            </div>
-          )}
-        </pre>
-      )}
-    </div>
-  );
-};
+import { extractYDocState, getUint8Array, validateBlob, formatDataForDisplay } from './utils/yjs-utils';
+import { parseFirebaseConfig } from './utils/config-parser';
+import { DataCardItem } from './components/DataCardItem';
+import { computeCompactedState } from './utils/compaction-utils';
 
 function App() {
   const [docPath, setDocPath] = useState('test/doc1');
@@ -260,6 +34,9 @@ function App() {
   const [useBaseDoc, setUseBaseDoc] = useState(true);
   const [corruptedIds, setCorruptedIds] = useState(new Map()); // id -> error message
 
+  const [compactedDocData, setCompactedDocData] = useState(null);
+  const [compactionError, setCompactionError] = useState(null);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [sortOrder, setSortOrder] = useState('desc');
@@ -267,15 +44,8 @@ function App() {
 
   const handlePasteConfig = () => {
     try {
-      const match = pastedConfig.match(/const\s+\w+\s*=\s*({[\s\S]*?});/);
-      let jsonStr = match ? match[1] : pastedConfig;
-
-      jsonStr = jsonStr
-        .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
-        .replace(/:\s*'([^']*)'/g, ':"$1"')
-        .replace(/,(\s*[}\]])/g, '$1');
-
-      const config = JSON.parse(jsonStr);
+      const config = parseFirebaseConfig(pastedConfig);
+      if (!config) return;
 
       if (config.projectId) setProjectId(config.projectId);
       if (config.apiKey) setApiKey(config.apiKey);
@@ -284,7 +54,7 @@ function App() {
 
       setPastedConfig('');
     } catch (e) {
-      setError("Failed to parse configuration. Please ensure it is valid JSON or a valid JavaScript object literal.");
+      setError(e.message);
       console.error("Parse error:", e);
     }
   };
@@ -365,17 +135,7 @@ function App() {
     }
   };
 
-  // Validate a Yjs blob — returns error message or null
-  const validateBlob = (blobData) => {
-    try {
-      const uint8Arr = getUint8Array(blobData);
-      if (!uint8Arr || uint8Arr.length === 0) return 'Empty or missing blob';
-      Y.decodeUpdate(uint8Arr);
-      return null; // valid
-    } catch (err) {
-      return err.message || 'Invalid Yjs update';
-    }
-  };
+
 
   const loadData = async () => {
     if (!db) {
@@ -489,6 +249,10 @@ function App() {
     });
 
     setCombinedDocData(extractYDocState(ydoc));
+
+    // Clear compaction when source data changes
+    setCompactedDocData(null);
+    setCompactionError(null);
   }, [baseDoc, history, updates, selectedUpdateIds, useBaseDoc]);
 
   const toggleUpdateSelection = (id) => {
@@ -509,47 +273,22 @@ function App() {
     }
   };
 
-  const renderData = (data, structLimit = Infinity) => {
-    return JSON.stringify(data, (key, value) => {
-      // Handle different Buffer/Uint8Array shapes that represent Yjs updates
-      const uint8Arr = getUint8Array(value);
-
-      if (uint8Arr) {
-        try {
-          // Attempt to decode as a Yjs update to show its inner structure
-          const decoded = Y.decodeUpdate(uint8Arr);
-
-          let structsToDisplay = decoded.structs;
-          let truncated = false;
-          if (decoded.structs.length > structLimit) {
-            structsToDisplay = decoded.structs.slice(0, structLimit);
-            truncated = true;
-          }
-
-          const res = {
-            __yjs_update_bytes: uint8Arr.length,
-            decoded: {
-              ...decoded,
-              structs: structsToDisplay
-            }
-          };
-
-          if (truncated) {
-            res.decoded.__warning__ = `Showing ${structLimit} of ${decoded.structs.length} structs. Click 'Load Next 250 Structs' to view more, or download JSON to view all.`;
-          }
-
-          return res;
-        } catch (e) {
-          // If it fails to decode, fallback to just showing the length
-          return `<Bytes ${uint8Arr.length} bytes (decode error: ${e.message})>`;
-        }
-      }
-
-      if (value && typeof value === 'object' && value.seconds !== undefined && value.nanoseconds !== undefined) {
-        return new Date(value.seconds * 1000).toISOString();
-      }
-      return value;
-    }, 2);
+  const handleTestCompaction = async () => {
+    try {
+      setCompactionError(null);
+      const compactedState = await computeCompactedState({
+        useBaseDoc,
+        baseDoc,
+        history,
+        updates,
+        selectedUpdateIds
+      });
+      setCompactedDocData(compactedState);
+    } catch (err) {
+      console.error("Compaction failed:", err);
+      setCompactionError(err.message || 'Failed to compact updates');
+      setCompactedDocData(null);
+    }
   };
 
   // Modern UI Styles
@@ -610,6 +349,11 @@ function App() {
     fontFamily: 'monospace',
     color: '#334155'
   };
+
+  let isMatch = null;
+  if (combinedDocData && compactedDocData) {
+    isMatch = JSON.stringify(combinedDocData) === JSON.stringify(compactedDocData);
+  }
 
   return (
     <div style={{ background: theme.bg, minHeight: '100vh', color: theme.text, fontFamily: 'system-ui, -apple-system, sans-serif' }}>
@@ -754,7 +498,7 @@ function App() {
                         ⚠ {corruptedIds.get('__base__')}
                       </div>
                     )}
-                    <DataCardItem data={baseDoc} renderData={renderData} theme={theme} preStyle={preStyle} />
+                    <DataCardItem data={baseDoc} renderData={formatDataForDisplay} theme={theme} preStyle={preStyle} />
                   </>
                 ) : (
                   <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>Not loaded or not found</div>
@@ -788,7 +532,7 @@ function App() {
                         {corruptedIds.get(h.id)}
                       </div>
                     )}
-                    <DataCardItem data={h} renderData={renderData} theme={theme} preStyle={preStyle} />
+                    <DataCardItem data={h} renderData={formatDataForDisplay} theme={theme} preStyle={preStyle} />
                   </div>
                 )) : (
                   <div style={{ padding: '20px', textAlign: 'center', color: theme.textMuted, fontSize: '14px', background: '#f9fafb', borderRadius: '4px' }}>No history segments</div>
@@ -866,7 +610,7 @@ function App() {
                         </div>
                       )}
                       <div style={{ opacity: selectedUpdateIds.has(u.id) && !corruptedIds.has(u.id) ? 1 : 0.6 }}>
-                        <DataCardItem data={u} renderData={renderData} theme={theme} preStyle={preStyle} />
+                        <DataCardItem data={u} renderData={formatDataForDisplay} theme={theme} preStyle={preStyle} />
                       </div>
                     </div>
                   )) : (
@@ -877,17 +621,51 @@ function App() {
 
           </div>
 
-          {/* Bottom Row: Combined Result */}
-          <div style={{ ...panelStyle, background: '#f8fafc', border: `1px solid ${theme.primary}`, boxShadow: `0 4px 6px -1px rgba(59, 130, 246, 0.1)` }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '12px' }}>
-              <h2 style={{ margin: 0, fontSize: '18px', color: theme.primary }}>Fully Combined Document State</h2>
-              <div style={{ fontSize: '13px', color: theme.textMuted }}>
-                Applying: Base + History + {selectedUpdateIds.size} Selected Update(s)
+          {/* Bottom Row: Combined Result & Compaction */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '20px' }}>
+            {/* Combined Result */}
+            <div style={{ ...panelStyle, background: '#f8fafc', border: `1px solid ${theme.primary}`, boxShadow: `0 4px 6px -1px rgba(59, 130, 246, 0.1)`, marginBottom: 0 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '12px' }}>
+                <h2 style={{ margin: 0, fontSize: '18px', color: theme.primary }}>Fully Combined Document State</h2>
+                <div style={{ fontSize: '13px', color: theme.textMuted }}>
+                  Applying: Base + History + {selectedUpdateIds.size} Selected Update(s)
+                </div>
               </div>
+              <pre style={{ ...preStyle, background: '#fff', maxHeight: '400px', border: `1px solid ${theme.border}` }}>
+                {combinedDocData ? JSON.stringify(combinedDocData, null, 2) : 'No combined data (load a document first)'}
+              </pre>
             </div>
-            <pre style={{ ...preStyle, background: '#fff', maxHeight: '400px', border: `1px solid ${theme.border}` }}>
-              {combinedDocData ? JSON.stringify(combinedDocData, null, 2) : 'No combined data (load a document first)'}
-            </pre>
+
+            {/* Compaction Result */}
+            <div style={{ ...panelStyle, background: '#f8fafc', border: `1px solid ${theme.success}`, boxShadow: `0 4px 6px -1px rgba(16, 185, 129, 0.1)`, marginBottom: 0 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '12px' }}>
+                <h2 style={{ margin: 0, fontSize: '18px', color: theme.success, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  Compacted Document State
+                  {isMatch !== null && (
+                    <span style={{
+                      background: isMatch ? theme.success : theme.danger,
+                      color: '#fff',
+                      padding: '2px 8px',
+                      borderRadius: '12px',
+                      fontSize: '11px',
+                      fontWeight: 'bold',
+                      textTransform: 'uppercase'
+                    }}>
+                      {isMatch ? 'Matches Combined' : 'Mismatch'}
+                    </span>
+                  )}
+                </h2>
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                  {compactionError && <span style={{ color: theme.danger, fontSize: '12px' }}>{compactionError}</span>}
+                  <button onClick={handleTestCompaction} style={{ ...btnStyle, background: theme.success, padding: '6px 12px' }}>
+                    Test Compaction
+                  </button>
+                </div>
+              </div>
+              <pre style={{ ...preStyle, background: '#fff', maxHeight: '400px', border: `1px solid ${theme.border}` }}>
+                {compactedDocData ? JSON.stringify(compactedDocData, null, 2) : 'Click "Test Compaction" to compute'}
+              </pre>
+            </div>
           </div>
 
         </main>

@@ -19,3 +19,4 @@
 
 export { FireProvider } from "./provider";
 export type { FireProviderConfig } from "./provider";
+export { mergeUpdatesAsync } from "./merge-utils";

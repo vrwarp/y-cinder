@@ -60,6 +60,7 @@ const getUint8Array = (value) => {
 
 const DataCardItem = ({ data, renderData, theme, preStyle }) => {
   const [showRaw, setShowRaw] = useState(false);
+  const [structLimit, setStructLimit] = useState(250);
 
   // Parse fields
   const createdBy = data.createdBy;
@@ -120,12 +121,60 @@ const DataCardItem = ({ data, renderData, theme, preStyle }) => {
         </div>
       ) : null}
 
-      <button
-        onClick={() => setShowRaw(!showRaw)}
-        style={{ background: 'transparent', border: 'none', color: theme.primary, cursor: 'pointer', padding: 0, fontSize: '12px', fontWeight: 'bold' }}
-      >
-        {showRaw ? '▼ Hide Raw JSON' : '▶ Show Raw JSON'}
-      </button>
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <button
+          onClick={() => setShowRaw(!showRaw)}
+          style={{ background: 'transparent', border: 'none', color: theme.primary, cursor: 'pointer', padding: 0, fontSize: '12px', fontWeight: 'bold' }}
+        >
+          {showRaw ? '▼ Hide Raw JSON' : '▶ Show Raw JSON'}
+        </button>
+
+        <button
+          onClick={() => {
+            try {
+              const jsonStr = JSON.stringify(data, (key, value) => {
+                const uintArr = getUint8Array(value);
+                if (uintArr) {
+                  try {
+                    return { decodedFull: Y.decodeUpdate(uintArr) };
+                  } catch (e) { return `<Bytes ${uintArr.length} bytes>`; }
+                }
+                return value;
+              }, 2);
+              const blob = new Blob([jsonStr], { type: 'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `update_${data.id || 'data'}.json`;
+              a.click();
+              URL.revokeObjectURL(url);
+            } catch (e) {
+              console.error(e);
+              alert("Failed to export full JSON.");
+            }
+          }}
+          style={{ background: 'transparent', border: `1px solid ${theme.border}`, borderRadius: '4px', color: theme.textMuted, cursor: 'pointer', padding: '2px 8px', fontSize: '11px' }}
+        >
+          ⬇ Download JSON
+        </button>
+
+        {uint8Arr && (
+          <button
+            onClick={() => {
+              const blob = new Blob([uint8Arr], { type: 'application/octet-stream' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `update_${data.id || 'data'}.bin`;
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+            style={{ background: 'transparent', border: `1px solid ${theme.border}`, borderRadius: '4px', color: theme.textMuted, cursor: 'pointer', padding: '2px 8px', fontSize: '11px' }}
+          >
+            ⬇ Download Binary
+          </button>
+        )}
+      </div>
 
       {showRaw && (
         <pre style={{
@@ -136,7 +185,17 @@ const DataCardItem = ({ data, renderData, theme, preStyle }) => {
           wordBreak: 'break-all',
           margin: 0
         }}>
-          {renderData(data)}
+          {renderData(data, structLimit)}
+          {structCount > structLimit && (
+            <div style={{ marginTop: '8px', textAlign: 'center' }}>
+              <button
+                onClick={() => setStructLimit(prev => prev + 250)}
+                style={{ background: theme.primary, border: 'none', borderRadius: '4px', color: '#fff', cursor: 'pointer', padding: '6px 12px', fontSize: '13px', fontWeight: 'bold' }}
+              >
+                Load Next 250 Structs ({structLimit} / {structCount} shown)
+              </button>
+            </div>
+          )}
         </pre>
       )}
     </div>
@@ -414,7 +473,7 @@ function App() {
     }
   };
 
-  const renderData = (data) => {
+  const renderData = (data, structLimit = Infinity) => {
     return JSON.stringify(data, (key, value) => {
       // Handle different Buffer/Uint8Array shapes that represent Yjs updates
       const uint8Arr = getUint8Array(value);
@@ -423,10 +482,27 @@ function App() {
         try {
           // Attempt to decode as a Yjs update to show its inner structure
           const decoded = Y.decodeUpdate(uint8Arr);
-          return {
+
+          let structsToDisplay = decoded.structs;
+          let truncated = false;
+          if (decoded.structs.length > structLimit) {
+            structsToDisplay = decoded.structs.slice(0, structLimit);
+            truncated = true;
+          }
+
+          const res = {
             __yjs_update_bytes: uint8Arr.length,
-            decoded: decoded
+            decoded: {
+              ...decoded,
+              structs: structsToDisplay
+            }
           };
+
+          if (truncated) {
+            res.decoded.__warning__ = `Showing ${structLimit} of ${decoded.structs.length} structs. Click 'Load Next 250 Structs' to view more, or download JSON to view all.`;
+          }
+
+          return res;
         } catch (e) {
           // If it fails to decode, fallback to just showing the length
           return `<Bytes ${uint8Arr.length} bytes (decode error: ${e.message})>`;

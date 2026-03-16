@@ -593,6 +593,9 @@ export class FireProvider extends ObservableV2<any> {
           error: err instanceof Error ? err : new Error(String(err)),
           update,
         }]);
+        if (this.updateCache) {
+          this._debouncedSave();
+        }
         return;
       }
 
@@ -610,6 +613,9 @@ export class FireProvider extends ObservableV2<any> {
           update,
         }]);
         this._saveRetryCount = 0;
+        if (this.updateCache) {
+          this._debouncedSave();
+        }
         return;
       }
 

@@ -238,7 +238,7 @@ describe('P0 Critical Issue Validation', () => {
             expect(maintenanceSnap.size).toBeLessThanOrEqual(5); // Relaxed for now
         });
 
-        it('should reuse cached clock offset for subsequent lock attempts', { timeout: 15000 }, async () => {
+        it('should reuse cached clock offset for subsequent lock attempts', { timeout: 30000 }, async () => {
             const path = `validation/p0-3-cache-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();

@@ -10,6 +10,7 @@ import { extractYDocState, getUint8Array, validateBlob, formatDataForDisplay } f
 import { parseFirebaseConfig } from './utils/config-parser';
 import { DataCardItem } from './components/DataCardItem';
 import { computeCompactedState } from './utils/compaction-utils';
+import { PendingStructsBanner } from './components/PendingStructsBanner';
 
 function App() {
   const [docPath, setDocPath] = useState('test/doc1');
@@ -631,6 +632,7 @@ function App() {
                   Applying: Base + History + {selectedUpdateIds.size} Selected Update(s)
                 </div>
               </div>
+              <PendingStructsBanner pendingStructs={combinedDocData?.__pendingStructs} theme={theme} />
               <pre style={{ ...preStyle, background: '#fff', maxHeight: '400px', border: `1px solid ${theme.border}` }}>
                 {combinedDocData ? JSON.stringify(combinedDocData, null, 2) : 'No combined data (load a document first)'}
               </pre>
@@ -662,6 +664,7 @@ function App() {
                   </button>
                 </div>
               </div>
+              <PendingStructsBanner pendingStructs={compactedDocData?.__pendingStructs} theme={theme} />
               <pre style={{ ...preStyle, background: '#fff', maxHeight: '400px', border: `1px solid ${theme.border}` }}>
                 {compactedDocData ? JSON.stringify(compactedDocData, null, 2) : 'Click "Test Compaction" to compute'}
               </pre>

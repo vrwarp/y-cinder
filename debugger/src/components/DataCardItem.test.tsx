@@ -76,4 +76,32 @@ describe('DataCardItem', () => {
 
         expect(screen.getByText('OFFLOADED')).toBeInTheDocument();
     });
+
+    it('renders pending structs warning when present', () => {
+        const data = {
+            __pendingStructs: {
+                count: 5,
+                note: 'missing dependencies',
+                preview: [
+                    { class: 'ItemString', client: 123, clock: 0 }
+                ]
+            }
+        };
+        render(
+            <DataCardItem
+                data={data}
+                renderData={mockRenderData}
+                theme={mockTheme}
+                preStyle={mockPreStyle}
+            />
+        );
+
+        expect(screen.getByText(/Pending Structs Detected \(5\)/)).toBeInTheDocument();
+        expect(screen.getByText('missing dependencies')).toBeInTheDocument();
+
+        // Reveal the pending structs details via the banner's toggle
+        fireEvent.click(screen.getByRole('button', { name: /Show Details/i }));
+
+        expect(screen.getByText(/ItemString\s*\|\s*client:\s*123\s*\|\s*clock:\s*0/)).toBeInTheDocument();
+    });
 });

@@ -87,6 +87,57 @@ describe('Yjs Utils', () => {
             const state = extractYDocState(doc);
             expect(state).toEqual({});
         });
+
+        it('extracts pending structs when update application is deferred', () => {
+            const targetDoc = new Y.Doc();
+
+            // Manually craft what Yjs internal pendingStructs.update looks like
+            // A basic Yjs update with 1 struct is [1, 1, 0, ...]
+            // For testing the utility, we will use a real Y.Doc to encode an update
+            const tempDoc = new Y.Doc();
+            tempDoc.clientID = 1000;
+            tempDoc.getText('test').insert(0, 'pending data');
+            const updateBytes = Y.encodeStateAsUpdate(tempDoc);
+
+            // Inject directly into the internal store to mock pending state
+            (targetDoc.store as any).pendingStructs = {
+                missing: new Map([[999, 0]]),
+                update: updateBytes
+            };
+
+            const state = extractYDocState(targetDoc);
+
+            expect(state.__pendingStructs).toBeDefined();
+            expect(state.__pendingStructs.count).toBeGreaterThan(0);
+            expect(state.__pendingStructs.preview.length).toBeGreaterThan(0);
+            expect(state.__pendingStructs.preview[0]).toHaveProperty('client');
+            expect(state.__pendingStructs.preview[0]).toHaveProperty('clock');
+            expect(state.__pendingStructs.preview[0]).toHaveProperty('class');
+            expect(state.__pendingStructs.note).toContain('missing dependencies');
+        });
+
+        it('truncates pending structs preview gracefully', () => {
+            const targetDoc = new Y.Doc();
+
+            const tempDoc = new Y.Doc();
+            for (let i = 0; i < 60; i++) {
+                // Changing client ID forces a new struct
+                tempDoc.clientID = i + 1000;
+                tempDoc.getText('test').insert(i, 'X');
+            }
+            const updateBytes = Y.encodeStateAsUpdate(tempDoc);
+
+            (targetDoc.store as any).pendingStructs = {
+                missing: new Map([[999, 0]]),
+                update: updateBytes // Over 60 distinct structs now
+            };
+
+            const state = extractYDocState(targetDoc);
+
+            expect(state.__pendingStructs).toBeDefined();
+            expect(state.__pendingStructs.count).toBeGreaterThan(50);
+            expect(state.__pendingStructs.preview.length).toBe(50); // Hardcapped at 50
+        });
     });
 
     describe('formatDataForDisplay', () => {

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import * as Y from 'yjs';
 import { getUint8Array } from '../utils/yjs-utils';
+import { PendingStructsBanner } from './PendingStructsBanner';
 
 export const DataCardItem = ({ data, renderData, theme, preStyle }: any) => {
     const [showRaw, setShowRaw] = useState(false);
@@ -35,6 +36,7 @@ export const DataCardItem = ({ data, renderData, theme, preStyle }: any) => {
 
     return (
         <div style={{ fontSize: '13px', color: theme.text }}>
+            <PendingStructsBanner pendingStructs={data.__pendingStructs} theme={theme} />
             {hasGridData ? (
                 <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '4px 12px', marginBottom: '8px' }}>
                     {createdAt && (

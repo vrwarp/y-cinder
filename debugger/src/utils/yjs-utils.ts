@@ -4,7 +4,11 @@ export const extractYDocState = (doc: Y.Doc): any => {
     const res: any = {};
     for (const [name, type] of doc.share.entries()) {
         if (type.constructor.name !== 'AbstractType') {
-            res[name] = (type as any).toJSON ? (type as any).toJSON() : undefined;
+            try {
+                res[name] = (type as any).toJSON ? (type as any).toJSON() : undefined;
+            } catch (e) {
+                res[name] = '<unresolvable: pending structs>';
+            }
             continue;
         }
 
@@ -27,19 +31,33 @@ export const extractYDocState = (doc: Y.Doc): any => {
             if (isMap || isText || isArray) break;
         }
 
-        if (isMap) res[name] = doc.getMap(name).toJSON();
-        else if (isText) res[name] = doc.getText(name).toJSON();
-        else if (isArray) res[name] = doc.getArray(name).toJSON();
-        else {
-            res[name] = doc.getMap(name).toJSON(); // default fallback
+        try {
+            if (isMap) res[name] = doc.getMap(name).toJSON();
+            else if (isText) res[name] = doc.getText(name).toJSON();
+            else if (isArray) res[name] = doc.getArray(name).toJSON();
+            else {
+                res[name] = doc.getMap(name).toJSON(); // default fallback
+            }
+        } catch (e) {
+            res[name] = '<unresolvable: pending structs>';
         }
     }
 
     // Extract pending structs
     let pendingStructsCount = 0;
     const pendingStructsPreview: any[] = [];
+    const missingDeps: Array<{client: number, clock: number}> = [];
 
-    if ((doc.store as any).pendingStructs && (doc.store as any).pendingStructs.update) {
+    if ((doc.store as any).pendingStructs) {
+        const pending = (doc.store as any).pendingStructs;
+        
+        if (pending.missing && pending.missing instanceof Map) {
+            for (const [client, clock] of pending.missing.entries()) {
+                missingDeps.push({ client, clock });
+            }
+        }
+
+        if (pending.update) {
         try {
             // Decode the pending update buffer to get actual structs
             const pendingDecoded = Y.decodeUpdate((doc.store as any).pendingStructs.update);
@@ -60,11 +78,13 @@ export const extractYDocState = (doc: Y.Doc): any => {
             console.error("Failed to decode pending structs:", e);
         }
     }
+}
 
-    if (pendingStructsCount > 0) {
+    if (pendingStructsCount > 0 || missingDeps.length > 0) {
         res.__pendingStructs = {
             count: pendingStructsCount,
             preview: pendingStructsPreview,
+            missingDependencies: missingDeps,
             note: "These operations are trapped in the pending queue due to missing dependencies from a base document."
         };
     }
@@ -117,8 +137,51 @@ export const formatDataForDisplay = (data: any, structLimit = Infinity): string 
                     truncated = true;
                 }
 
+                // Calculate external dependencies
+                const provided = new Map<number, { min: number, max: number }>();
+                for (const s of decoded.structs) {
+                    if (s.id && s.id.client !== undefined && s.id.clock !== undefined) {
+                        const { client, clock } = s.id;
+                        const len = s.length || 1;
+                        const range = provided.get(client) || { min: clock, max: clock + len - 1 };
+                        range.min = Math.min(range.min, clock);
+                        range.max = Math.max(range.max, clock + len - 1);
+                        provided.set(client, range);
+                    }
+                }
+
+                const required = new Set<string>();
+                const addReq = (id: any) => {
+                    if (id && typeof id === 'object' && id.client !== undefined && id.clock !== undefined) {
+                         required.add(`${id.client}:${id.clock}`);
+                    }
+                };
+
+                for (const s of decoded.structs) {
+                     addReq(s.left);
+                     addReq(s.right);
+                     addReq(s.origin);
+                     addReq(s.rightOrigin);
+                     if (s.parent && s.parent.constructor && s.parent.constructor.name === 'ID') {
+                         addReq(s.parent);
+                     }
+                }
+
+                const externalReqs: Array<{client: number, clock: number}> = [];
+                for (const req of required) {
+                    const [cStr, timeStr] = req.split(':');
+                    const c = Number(cStr);
+                    const t = Number(timeStr);
+                    const p = provided.get(c);
+                    // If it's not provided by this update at all, or the required clock is outside the provided range
+                    if (!p || t < p.min || t > p.max) {
+                         externalReqs.push({ client: c, clock: t });
+                    }
+                }
+
                 const res: any = {
                     __yjs_update_bytes: uint8Arr.length,
+                    __external_dependencies: externalReqs.length > 0 ? externalReqs : 'None (Self-contained)',
                     decoded: {
                         ...decoded,
                         structs: structsToDisplay
@@ -129,7 +192,7 @@ export const formatDataForDisplay = (data: any, structLimit = Infinity): string 
                     res.decoded.__warning__ = `Showing ${structLimit} of ${decoded.structs.length} structs. Click 'Load Next 250 Structs' to view more, or download JSON to view all.`;
                 }
 
-                return res;
+                return sanitizeYjsTypes(res);
             } catch (e: any) {
                 // If it fails to decode, fallback to just showing the length
                 return `<Bytes ${uint8Arr.length} bytes (decode error: ${e.message})>`;
@@ -142,3 +205,41 @@ export const formatDataForDisplay = (data: any, structLimit = Infinity): string 
         return value;
     }, 2);
 };
+
+export const sanitizeYjsTypes = (obj: any, seen = new WeakSet()): any => {
+    if (obj === null || typeof obj !== 'object') return obj;
+    if (obj instanceof Date) return obj.toISOString();
+    if (obj instanceof Uint8Array) return `[Uint8Array ${obj.length}]`;
+    if (seen.has(obj)) return '[Circular]';
+    seen.add(obj);
+
+    if (Array.isArray(obj)) {
+        return obj.map(item => sanitizeYjsTypes(item, seen));
+    }
+
+    const cName = obj.constructor ? obj.constructor.name : 'Object';
+    const isYjsType = cName === 'AbstractType' || 
+                      (cName.startsWith('Y') && typeof obj.toJSON === 'function') ||
+                      (obj instanceof Y.AbstractType);
+
+    const res: any = {};
+    
+    // Add class name for context so the debugger knows what type this is
+    if (cName !== 'Object' && cName !== 'Array') {
+        res.__class = cName;
+    }
+
+    if (isYjsType) {
+        res.__debugger_note = "Raw internal state stringified to prevent Yjs warnPrematureAccess out-of-document exceptions.";
+    }
+
+    // Explicitly iterate over own properties instead of returning the object directly.
+    // This strips out prototype methods like toJSON() so JSON.stringify won't call them,
+    // while still giving the user full visibility into the raw internal fields!
+    for (const key of Object.keys(obj)) {
+        res[key] = sanitizeYjsTypes(obj[key], seen);
+    }
+    
+    return res;
+};
+

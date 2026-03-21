@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import * as Y from 'yjs';
-import { getUint8Array } from '../utils/yjs-utils';
+import { getUint8Array, sanitizeYjsTypes } from '../utils/yjs-utils';
 import { PendingStructsBanner } from './PendingStructsBanner';
 
 export const DataCardItem = ({ data, renderData, theme, preStyle }: any) => {
@@ -64,6 +64,17 @@ export const DataCardItem = ({ data, renderData, theme, preStyle }: any) => {
                             </span>
                         </>
                     )}
+
+                    {data.__external_dependencies && data.__external_dependencies !== 'None (Self-contained)' && (
+                         <>
+                            <strong style={{ color: '#d97706' }}>Missing Deps:</strong>
+                            <span style={{ color: '#d97706', fontFamily: 'monospace' }}>
+                                {Array.isArray(data.__external_dependencies) 
+                                    ? data.__external_dependencies.map((dep: any) => `client:${dep.client}@${dep.clock}`).join(', ')
+                                    : 'Unknown'}
+                            </span>
+                         </>
+                    )}
                 </div>
             ) : null}
 
@@ -82,7 +93,7 @@ export const DataCardItem = ({ data, renderData, theme, preStyle }: any) => {
                                 const uintArr = getUint8Array(value);
                                 if (uintArr) {
                                     try {
-                                        return { decodedFull: Y.decodeUpdate(uintArr) };
+                                        return { decodedFull: sanitizeYjsTypes(Y.decodeUpdate(uintArr)) };
                                     } catch (e) { return `<Bytes ${uintArr.length} bytes>`; }
                                 }
                                 return value;

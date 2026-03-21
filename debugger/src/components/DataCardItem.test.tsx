@@ -1,7 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+// @vitest-environment jsdom
+import React from 'react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { DataCardItem } from './DataCardItem';
-import '@testing-library/jest-dom';
+import * as matchers from '@testing-library/jest-dom/matchers';
+
+expect.extend(matchers);
 
 const mockTheme = {
     text: '#000',
@@ -18,6 +22,10 @@ const mockPreStyle = {
 const mockRenderData = vi.fn((data: any, limit: number) => JSON.stringify(data));
 
 describe('DataCardItem', () => {
+    afterEach(() => {
+        cleanup();
+    });
+
     it('renders correctly with given properties', () => {
         const data = {
             createdAt: { seconds: 1234567890 },

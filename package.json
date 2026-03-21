@@ -37,6 +37,7 @@
   "homepage": "https://github.com/vrwarp/y-cinder#readme",
   "devDependencies": {
     "firebase-tools": "^15.4.0",
+    "jsdom": "^29.0.1",
     "typescript": "^5.3.3",
     "vitest": "^4.0.17"
   },

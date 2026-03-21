@@ -201,7 +201,20 @@ export async function compact(
             const freshSnap = await getDoc(uDoc.ref);
             if (freshSnap.exists()) {
                 const data = freshSnap.data() as Record<string, any>;
-                if (data?.update) {
+                if (data?.updateStoragePath && !data?.update) {
+                    try {
+                        const storageRef = ref(storage, data.updateStoragePath);
+                        const buffer = await getBytes(storageRef);
+                        updatesToProcess.push({
+                            ref: uDoc.ref,
+                            data: new Uint8Array(buffer),
+                            createdAt: data.createdAt,
+                        });
+                    } catch (e) {
+                        console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
+                        // Skip this update - do not process or delete it, but continue compacting the rest
+                    }
+                } else if (data?.update) {
                     updatesToProcess.push({
                         ref: uDoc.ref,
                         data: (data.update as Bytes).toUint8Array(),
@@ -258,8 +271,8 @@ export async function compact(
             db,
             path,
             uid,
-            updateDocs,
-            historyDocs,
+            verifiedUpdateRefs: updatesToProcess.map(u => u.ref),
+            verifiedHistoryRefs: historyToMerge.map(h => h.ref),
             storagePath,
             candidate,
             expectedVersion: currentVersion,
@@ -295,13 +308,13 @@ async function performCompactionTransaction(params: {
     db: Firestore;
     path: string;
     uid: string;
-    updateDocs: any[];
-    historyDocs: any[];
+    verifiedUpdateRefs: DocumentReference[];
+    verifiedHistoryRefs: DocumentReference[];
     storagePath: string;
     candidate: Uint8Array;
     expectedVersion: number;
 }): Promise<CompactionResult> {
-    const { db, path, uid, updateDocs, historyDocs, storagePath, candidate, expectedVersion } = params;
+    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, expectedVersion } = params;
 
     return await runTransaction(db, async (transaction) => {
         // === STEP A: THE KILL SWITCH ===
@@ -328,20 +341,20 @@ async function performCompactionTransaction(params: {
             throw new Error("Document version changed during compaction upload. Aborting to retry.");
         }
 
-        // Verify updates still exist (avoid zombie bugs)
+        // Verify updates still exist (avoid zombie bugs) before deleting
         const updatesToProcess: { ref: DocumentReference }[] = [];
-        for (const uDoc of updateDocs) {
-            const freshSnap = await transaction.get(uDoc.ref);
+        for (const ref of verifiedUpdateRefs) {
+            const freshSnap = await transaction.get(ref);
             if (freshSnap.exists()) {
-                updatesToProcess.push({ ref: uDoc.ref });
+                updatesToProcess.push({ ref });
             }
         }
 
         const historyToMerge: { ref: DocumentReference }[] = [];
-        for (const hDoc of historyDocs) {
-            const freshSnap = await transaction.get(hDoc.ref);
+        for (const ref of verifiedHistoryRefs) {
+            const freshSnap = await transaction.get(ref);
             if (freshSnap.exists()) {
-                historyToMerge.push({ ref: hDoc.ref });
+                historyToMerge.push({ ref });
             }
         }
 

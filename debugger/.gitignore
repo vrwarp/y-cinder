@@ -24,3 +24,8 @@ dist-ssr
 *.sw?
 playwright-report/
 test-results/
+
+# Local environment variables
+.env
+.env.*
+!.env.example

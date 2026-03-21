@@ -13,13 +13,13 @@ import { computeCompactedState } from './utils/compaction-utils';
 import { PendingStructsBanner } from './components/PendingStructsBanner';
 
 function App() {
-  const [docPath, setDocPath] = useState('test/doc1');
-  const [projectId, setProjectId] = useState('demo-y-cinder');
-  const [apiKey, setApiKey] = useState('');
-  const [appId, setAppId] = useState('');
-  const [authDomain, setAuthDomain] = useState('');
+  const [docPath, setDocPath] = useState(import.meta.env.VITE_DEFAULT_DOC_PATH || 'test/doc1');
+  const [projectId, setProjectId] = useState(import.meta.env.VITE_DEFAULT_PROJECT_ID || 'demo-y-cinder');
+  const [apiKey, setApiKey] = useState(import.meta.env.VITE_DEFAULT_API_KEY || '');
+  const [appId, setAppId] = useState(import.meta.env.VITE_DEFAULT_APP_ID || '');
+  const [authDomain, setAuthDomain] = useState(import.meta.env.VITE_DEFAULT_AUTH_DOMAIN || '');
   const [pastedConfig, setPastedConfig] = useState('');
-  const [useEmulator, setUseEmulator] = useState(true);
+  const [useEmulator, setUseEmulator] = useState(import.meta.env.VITE_USE_EMULATOR !== 'false');
   const [db, setDb] = useState(null);
   const [storage, setStorage] = useState(null);
 

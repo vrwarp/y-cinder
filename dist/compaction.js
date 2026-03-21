@@ -133,7 +133,22 @@ export function compact(ctx, attempt = 1) {
                 const freshSnap = yield getDoc(uDoc.ref);
                 if (freshSnap.exists()) {
                     const data = freshSnap.data();
-                    if (data === null || data === void 0 ? void 0 : data.update) {
+                    if ((data === null || data === void 0 ? void 0 : data.updateStoragePath) && !(data === null || data === void 0 ? void 0 : data.update)) {
+                        try {
+                            const storageRef = ref(storage, data.updateStoragePath);
+                            const buffer = yield getBytes(storageRef);
+                            updatesToProcess.push({
+                                ref: uDoc.ref,
+                                data: new Uint8Array(buffer),
+                                createdAt: data.createdAt,
+                            });
+                        }
+                        catch (e) {
+                            console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
+                            // Skip this update - do not process or delete it, but continue compacting the rest
+                        }
+                    }
+                    else if (data === null || data === void 0 ? void 0 : data.update) {
                         updatesToProcess.push({
                             ref: uDoc.ref,
                             data: data.update.toUint8Array(),
@@ -182,8 +197,8 @@ export function compact(ctx, attempt = 1) {
                 db,
                 path,
                 uid,
-                updateDocs,
-                historyDocs,
+                verifiedUpdateRefs: updatesToProcess.map(u => u.ref),
+                verifiedHistoryRefs: historyToMerge.map(h => h.ref),
                 storagePath,
                 candidate,
                 expectedVersion: currentVersion,
@@ -217,7 +232,7 @@ export function compact(ctx, attempt = 1) {
  */
 function performCompactionTransaction(params) {
     return __awaiter(this, void 0, void 0, function* () {
-        const { db, path, uid, updateDocs, historyDocs, storagePath, candidate, expectedVersion } = params;
+        const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, expectedVersion } = params;
         return yield runTransaction(db, (transaction) => __awaiter(this, void 0, void 0, function* () {
             // === STEP A: THE KILL SWITCH ===
             const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
@@ -238,19 +253,19 @@ function performCompactionTransaction(params) {
             if (currentVersion !== expectedVersion) {
                 throw new Error("Document version changed during compaction upload. Aborting to retry.");
             }
-            // Verify updates still exist (avoid zombie bugs)
+            // Verify updates still exist (avoid zombie bugs) before deleting
             const updatesToProcess = [];
-            for (const uDoc of updateDocs) {
-                const freshSnap = yield transaction.get(uDoc.ref);
+            for (const ref of verifiedUpdateRefs) {
+                const freshSnap = yield transaction.get(ref);
                 if (freshSnap.exists()) {
-                    updatesToProcess.push({ ref: uDoc.ref });
+                    updatesToProcess.push({ ref });
                 }
             }
             const historyToMerge = [];
-            for (const hDoc of historyDocs) {
-                const freshSnap = yield transaction.get(hDoc.ref);
+            for (const ref of verifiedHistoryRefs) {
+                const freshSnap = yield transaction.get(ref);
                 if (freshSnap.exists()) {
-                    historyToMerge.push({ ref: hDoc.ref });
+                    historyToMerge.push({ ref });
                 }
             }
             if (updatesToProcess.length === 0 && historyToMerge.length === 0) {

@@ -484,6 +484,9 @@ export class FireProvider extends ObservableV2 {
                             error: err instanceof Error ? err : new Error(String(err)),
                             update,
                         }]);
+                    if (this.updateCache) {
+                        this._debouncedSave();
+                    }
                     return;
                 }
                 // Generic failure: apply retry cap
@@ -497,6 +500,9 @@ export class FireProvider extends ObservableV2 {
                             update,
                         }]);
                     this._saveRetryCount = 0;
+                    if (this.updateCache) {
+                        this._debouncedSave();
+                    }
                     return;
                 }
                 // Recovery: Merge back the update we failed to save

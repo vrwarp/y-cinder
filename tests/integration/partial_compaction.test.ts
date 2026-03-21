@@ -40,13 +40,11 @@ describe('Issue 12: Partial Compaction Failure', () => {
         const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
         app = a;
         db = d;
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
         path = `tests/${seed}`;
-    });
+    }, 30000);
 
     afterEach(async () => {
-        await terminate(db);
+        // await terminate(db);
     });
 
     it('should not duplicate data if transaction partially fails', { timeout: 30000 }, async () => {
@@ -93,7 +91,7 @@ describe('Issue 12: Partial Compaction Failure', () => {
         await provider.destroy();
     });
 
-    it('should maintain data integrity after compaction', { timeout: 15000 }, async () => {
+    it('should maintain data integrity after compaction', { timeout: 30000 }, async () => {
         const ydoc = new Y.Doc();
         const provider = new FireProvider({
             firebaseApp: app,

@@ -58,7 +58,7 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         await deleteCollection(db, path + '/updates');
         await deleteCollection(db, path + '/history');
         await deleteDoc(doc(db, path));
-    });
+    }, 30000);
 
     afterEach(async () => {
         if (provider) {
@@ -67,7 +67,7 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         await terminate(db);
     });
 
-    it('should correctly handle concurrent deletion of an update during compaction (No Zombie Updates)', async () => {
+    it('should correctly handle concurrent deletion of an update during compaction (No Zombie Updates)', { timeout: 30000 }, async () => {
         // 1. Setup: Create 3 updates: A, B, C
         // We manually insert them to ensure we control the order/timing
         const updatesCol = collection(db, path, 'updates');

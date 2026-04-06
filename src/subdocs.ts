@@ -25,6 +25,7 @@
 import * as Y from "yjs";
 import { FirebaseApp } from "@firebase/app";
 import { DEFAULTS } from "./types";
+import { sanitizeError } from "./utils";
 
 /**
  * Event emitted when subdocuments change.
@@ -203,7 +204,7 @@ export async function destroyAllSubdocs(subProviders: SubProviderMap): Promise<v
             try {
                 await provider.destroy();
             } catch (err) {
-                console.error(`Failed to destroy subdoc provider ${guid}:`, err);
+                console.error(`Failed to destroy subdoc provider ${guid}:`, sanitizeError(err));
                 throw err; // Rethrow so allSettled records it as rejected
             }
         }

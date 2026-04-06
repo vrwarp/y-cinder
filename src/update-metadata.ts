@@ -29,6 +29,7 @@
 
 import * as Y from "yjs";
 import { UpdateMetadata } from "./types";
+import { sanitizeError } from "./utils";
 
 /**
  * Maximum number of distinct client IDs to store in metadata.
@@ -107,7 +108,7 @@ export function extractAllMetadata(update: Uint8Array): UpdateMetadata[] {
         return results;
     } catch (e) {
         // P1.9 FIX: Log parse error for debugging
-        console.warn("Failed to parse update metadata:", e);
+        console.warn("Failed to parse update metadata:", sanitizeError(e));
         return [];
     }
 }

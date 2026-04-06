@@ -19,7 +19,8 @@ import {
     writeStateVector,
     calculateStateVector,
     generateSessionId,
-    calculateBackoff
+    calculateBackoff,
+    sanitizeError
 } from '../../src/utils';
 import * as Y from 'yjs';
 
@@ -197,6 +198,62 @@ describe('utils', () => {
 
             expect(min).toBeGreaterThanOrEqual(200);
             expect(max).toBeLessThan(400);
+        });
+    });
+
+    describe('sanitizeError', () => {
+        it('should return non-object values as is', () => {
+            expect(sanitizeError(null)).toBe(null);
+            expect(sanitizeError(undefined)).toBe(undefined);
+            expect(sanitizeError('error')).toBe('error');
+            expect(sanitizeError(123)).toBe(123);
+        });
+
+        it('should extract message, code, and name from Error objects', () => {
+            const err = new Error('test message');
+            (err as any).code = 'test-code';
+            const sanitized = sanitizeError(err);
+
+            expect(sanitized).toEqual({
+                message: 'test message',
+                code: 'test-code',
+                name: 'Error'
+            });
+        });
+
+        it('should extract fields from Firestore-like error objects', () => {
+            const err = {
+                message: 'firestore error',
+                code: 'permission-denied',
+                secretField: 'donotlog'
+            };
+            const sanitized = sanitizeError(err);
+
+            expect(sanitized).toEqual({
+                message: 'firestore error',
+                code: 'permission-denied'
+            });
+            expect(sanitized.secretField).toBeUndefined();
+        });
+
+        it('should return generic message for objects without standard fields', () => {
+            const err = { foo: 'bar' };
+            expect(sanitizeError(err)).toBe('[Non-standard Error Object]');
+        });
+
+        it('should convert field values to strings', () => {
+            const err = {
+                message: 123,
+                code: { nested: 'code' },
+                name: true
+            };
+            const sanitized = sanitizeError(err);
+
+            expect(sanitized).toEqual({
+                message: '123',
+                code: '[object Object]',
+                name: 'true'
+            });
         });
     });
 });

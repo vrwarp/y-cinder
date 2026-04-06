@@ -34,6 +34,7 @@ import {
     serverTimestamp,
 } from "@firebase/firestore";
 import { FIRESTORE_PATHS } from "./types";
+import { sanitizeError } from "./utils";
 
 /**
  * Measures the difference between client clock and server clock.
@@ -144,7 +145,7 @@ export async function acquireLock(config: LockConfig): Promise<boolean> {
         try {
             serverOffset = await measureClockSkew(db, path, uid);
         } catch (e) {
-            console.warn("Failed to measure clock skew, defaulting to 0:", e);
+            console.warn("Failed to measure clock skew, defaulting to 0:", sanitizeError(e));
         }
     }
 
@@ -183,7 +184,7 @@ export async function acquireLock(config: LockConfig): Promise<boolean> {
             return true;
         });
     } catch (e) {
-        console.warn("Failed to acquire lock (contention):", e);
+        console.warn("Failed to acquire lock (contention):", sanitizeError(e));
         return false;
     }
 }
@@ -213,7 +214,7 @@ export async function releaseLock(config: Pick<LockConfig, 'db' | 'path' | 'uid'
             }
         });
     } catch (e) {
-        console.warn("Failed to release lock:", e);
+        console.warn("Failed to release lock:", sanitizeError(e));
     }
 }
 

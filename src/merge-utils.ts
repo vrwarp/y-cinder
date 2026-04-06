@@ -26,6 +26,7 @@
 
 import * as Y from 'yjs';
 import { MERGE_WORKER_CODE } from './generated/merge-worker-blob';
+import { sanitizeError } from './utils';
 
 // Worker instance (lazily initialized, singleton)
 let mergeWorker: Worker | null = null;
@@ -98,7 +99,7 @@ function initWorker(): boolean {
 
         // Handle worker errors
         mergeWorker.onerror = (event) => {
-            console.error('Worker error:', event);
+            console.error('Worker error:', sanitizeError(event));
             // Reject all pending requests
             pendingRequests.forEach((pending) => {
                 pending.reject(new Error('Worker crashed'));

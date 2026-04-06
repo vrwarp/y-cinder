@@ -53,7 +53,7 @@ import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@fire
 import * as Y from "yjs";
 import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
-import { calculateStateVector, wait, calculateBackoff } from "./utils";
+import { calculateStateVector, wait, calculateBackoff, sanitizeError } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
 import { mergeUpdatesAsync } from "./merge-utils";
 
@@ -184,7 +184,7 @@ export async function compact(
                     const buffer = await getBytes(storageRef);
                     baseSnapshot = new Uint8Array(buffer);
                 } catch (e) {
-                    console.error("Compaction failed to download base snapshot from storage", e);
+                    console.error("Compaction failed to download base snapshot from storage", sanitizeError(e));
                     throw e; // Cannot safely compact without base state
                 }
             } else if (data?.content) {
@@ -211,7 +211,7 @@ export async function compact(
                             createdAt: data.createdAt,
                         });
                     } catch (e) {
-                        console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
+                        console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, sanitizeError(e));
                         // Skip this update - do not process or delete it, but continue compacting the rest
                     }
                 } else if (data?.update) {
@@ -286,7 +286,7 @@ export async function compact(
                 await deleteObject(oldStorageRef);
                 console.log(`Garbage collected old snapshot: ${oldSnapshotPath}`);
             } catch (err) {
-                console.warn(`Failed to garbage collect old snapshot for ${path}`, err);
+                console.warn(`Failed to garbage collect old snapshot for ${path}`, sanitizeError(err));
             }
         }
 
@@ -425,7 +425,7 @@ async function handleCompactionError(
 
     if (attempt < DEFAULTS.MAX_RETRIES && isRetryable && !isLockLostError && !isDestroyed()) {
         const backoff = calculateBackoff(attempt);
-        console.warn(`Compaction failed (attempt ${attempt}). Retrying in ${Math.floor(backoff)}ms...`, error);
+        console.warn(`Compaction failed (attempt ${attempt}). Retrying in ${Math.floor(backoff)}ms...`, sanitizeError(error));
 
         await wait(backoff);
 
@@ -434,7 +434,7 @@ async function handleCompactionError(
         }
     }
 
-    console.error("Compaction failed permanently.", error);
+    console.error("Compaction failed permanently.", sanitizeError(error));
     return {
         success: false,
         type: 'none',

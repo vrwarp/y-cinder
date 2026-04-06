@@ -34,7 +34,7 @@ import {
   FIREBASE_ORIGINS,
   FIRESTORE_PATHS,
 } from "./types";
-import { debounce, generateSessionId, calculateBackoff } from "./utils";
+import { debounce, generateSessionId, calculateBackoff, sanitizeError } from "./utils";
 import { extractAllMetadata, aggregateMetadata } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext } from "./sync";
 import { compact as performTieredCompaction, CompactionContext } from "./compaction";
@@ -287,7 +287,7 @@ export class FireProvider extends ObservableV2<any> {
           onCompactionNeeded: () => this.compact(),
           isDestroyed: () => this._isDestroyed,
           onListenerError: (error) => {
-            console.error('Listener error (resumed):', error);
+            console.error('Listener error (resumed):', sanitizeError(error));
             this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
           },
           storage: this.storage,
@@ -371,7 +371,7 @@ export class FireProvider extends ObservableV2<any> {
         this._cachedClockOffset = await measureClockSkew(this.db, this.path, this.uid);
         console.log(`Clock offset measured: ${this._cachedClockOffset}ms`);
       } catch (e) {
-        console.warn("Failed to measure clock skew, using 0:", e);
+        console.warn("Failed to measure clock skew, using 0:", sanitizeError(e));
         this._cachedClockOffset = 0;
       }
     }
@@ -386,7 +386,7 @@ export class FireProvider extends ObservableV2<any> {
       isDestroyed: () => this._isDestroyed,
       // FIX: Wire listener error to event emitter
       onListenerError: (error) => {
-        console.error('Listener error:', error);
+        console.error('Listener error:', sanitizeError(error));
         this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
       },
       storage: this.storage,
@@ -420,7 +420,7 @@ export class FireProvider extends ObservableV2<any> {
       this._unsubscribeHistory = createHistoryListener(syncCtx, result.lastHistoryDoc);
 
     } catch (err) {
-      console.error("Sync failed", err);
+      console.error("Sync failed", sanitizeError(err));
 
       // FIX: Circuit breaker - stop retrying after MAX_RETRIES
       if (!this._isDestroyed) {
@@ -514,7 +514,7 @@ export class FireProvider extends ObservableV2<any> {
 
     // Start the save operation - browser gives us a small window
     this.saveToFirestore().catch(err => {
-      console.warn('Best-effort save on unload failed:', err);
+      console.warn('Best-effort save on unload failed:', sanitizeError(err));
     });
 
     // Note: For guaranteed delivery, implement a Cloud Function endpoint
@@ -576,7 +576,7 @@ export class FireProvider extends ObservableV2<any> {
         this._debouncedSave();
       }
     } catch (err: any) {
-      console.error("Failed to save update to Firestore", err);
+      console.error("Failed to save update to Firestore", sanitizeError(err));
 
       // Detect Firestore size-limit error (server-side rejection)
       const isDocTooLarge =

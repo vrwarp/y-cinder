@@ -158,3 +158,29 @@ export function calculateBackoff(
 ): number {
     return (Math.pow(2, attempt) * baseMs) + (Math.random() * jitterMs);
 }
+
+/**
+ * Sanitizes an error object to prevent leaking sensitive information in logs.
+ * Extracts only common non-sensitive fields: message, code, and name.
+ *
+ * @param err - The error or object to sanitize
+ * @returns A sanitized object or the original value if it's not an object
+ */
+export function sanitizeError(err: any): any {
+    if (err === null || typeof err !== 'object') {
+        return err;
+    }
+
+    const sanitized: Record<string, any> = {};
+
+    if ('message' in err) sanitized.message = String(err.message);
+    if ('code' in err) sanitized.code = String(err.code);
+    if ('name' in err) sanitized.name = String(err.name);
+
+    // If no standard fields found, return a generic message to avoid leaking unknown fields
+    if (Object.keys(sanitized).length === 0) {
+        return '[Non-standard Error Object]';
+    }
+
+    return sanitized;
+}

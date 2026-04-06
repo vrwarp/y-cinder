@@ -59,7 +59,7 @@ import {
     FIRESTORE_PATHS,
     DEFAULTS,
 } from "./types";
-import { writeStateVector } from "./utils";
+import { writeStateVector, sanitizeError } from "./utils";
 import { extractAllMetadata, aggregateMetadata, isUpdateRedundant } from "./update-metadata";
 
 /**
@@ -203,7 +203,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                                 const buffer = await getBytes(storageRef);
                                 data.update = Bytes.fromUint8Array(new Uint8Array(buffer));
                             } catch (storageErr) {
-                                console.error(`Failed to download storage-backed update: ${data.updateStoragePath}`, storageErr);
+                                console.error(`Failed to download storage-backed update: ${data.updateStoragePath}`, sanitizeError(storageErr));
                                 continue; // Skip this update — cannot apply without data
                             }
                         }
@@ -294,7 +294,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         data.content = Bytes.fromUint8Array(new Uint8Array(buffer));
                         pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
                     } catch (storageErr) {
-                        console.error("Failed to download snapshot from Cloud Storage", storageErr);
+                        console.error("Failed to download snapshot from Cloud Storage", sanitizeError(storageErr));
                         // Cannot safely sync without the base snapshot — propagate so
                         // the sync retry logic in provider.ts handles backoff/retry.
                         throw storageErr;
@@ -373,7 +373,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             lastHistoryDoc
         };
     } catch (err) {
-        console.error("Sync failed", err);
+        console.error("Sync failed", sanitizeError(err));
         return {
             success: false,
             error: err instanceof Error ? err : new Error(String(err)),
@@ -464,7 +464,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                             const update = new Uint8Array(buffer);
                             Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                         } catch (e) {
-                            console.error(`Failed to apply storage-backed update ${docId} (quarantined)`, e);
+                            console.error(`Failed to apply storage-backed update ${docId} (quarantined)`, sanitizeError(e));
                             ctx.corruptedDocIds?.add(docId);
                             ctx.onCorruptedDocument?.(docId, e instanceof Error ? e : new Error(String(e)));
                         }
@@ -477,7 +477,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                         const update = (data.update as Bytes).toUint8Array();
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                     } catch (e) {
-                        console.error(`Failed to apply update ${docId} (quarantined)`, e);
+                        console.error(`Failed to apply update ${docId} (quarantined)`, sanitizeError(e));
                         ctx.corruptedDocIds?.add(docId);
                         ctx.onCorruptedDocument?.(docId, e instanceof Error ? e : new Error(String(e)));
                     }
@@ -485,7 +485,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
             }
         });
     }, (error) => {
-        console.error("onSnapshot listener failed", error);
+        console.error("onSnapshot listener failed", sanitizeError(error));
         // P1.7 FIX: Emit error event so caller can handle disconnect
         if (onListenerError) {
             onListenerError(error);
@@ -532,7 +532,7 @@ export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
                 const content = new Uint8Array(buffer);
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
             } catch (storageErr) {
-                console.error(`Failed to apply snapshot ${snapshotKey} (quarantined)`, storageErr);
+                console.error(`Failed to apply snapshot ${snapshotKey} (quarantined)`, sanitizeError(storageErr));
                 ctx.corruptedDocIds?.add(snapshotKey);
                 lastQuarantinedPath = snapshotKey;
                 ctx.onCorruptedDocument?.(snapshotKey, storageErr instanceof Error ? storageErr : new Error(String(storageErr)));
@@ -550,14 +550,14 @@ export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
                 const content = (data.content as Bytes).toUint8Array();
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
             } catch (err) {
-                console.error(`Failed to apply inline snapshot (quarantined)`, err);
+                console.error(`Failed to apply inline snapshot (quarantined)`, sanitizeError(err));
                 ctx.corruptedDocIds?.add(snapshotKey);
                 lastQuarantinedPath = snapshotKey;
                 ctx.onCorruptedDocument?.(snapshotKey, err instanceof Error ? err : new Error(String(err)));
             }
         }
     }, (error) => {
-        console.error("Snapshot listener failed", error);
+        console.error("Snapshot listener failed", sanitizeError(error));
         if (onListenerError) onListenerError(error);
     });
 }
@@ -615,7 +615,7 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
                             Y.applyUpdate(ydoc, (data.segment as Bytes).toUint8Array(), FIREBASE_ORIGINS.HISTORY);
                         }
                     } catch (err) {
-                        console.error(`Failed to apply history segment ${docId} (quarantined)`, err);
+                        console.error(`Failed to apply history segment ${docId} (quarantined)`, sanitizeError(err));
                         ctx.corruptedDocIds?.add(docId);
                         ctx.onCorruptedDocument?.(docId, err instanceof Error ? err : new Error(String(err)));
                     }
@@ -623,7 +623,7 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
             }
         });
     }, (error) => {
-        console.error("History listener failed", error);
+        console.error("History listener failed", sanitizeError(error));
         if (onListenerError) onListenerError(error);
     });
 }
@@ -657,7 +657,7 @@ function processUpdateMetadata(data: any, serverSVMap: Map<number, number>): voi
                 }
             });
         } catch (e) {
-            console.warn("Failed to parse fallback metadata", e);
+            console.warn("Failed to parse fallback metadata", sanitizeError(e));
         }
     }
 }
@@ -690,7 +690,7 @@ function processHistoryMetadata(data: any, serverSVMap: Map<number, number>): vo
                 }
             });
         } catch (e) {
-            console.warn("Failed to parse fallback history segment", e);
+            console.warn("Failed to parse fallback history segment", sanitizeError(e));
         }
     }
 }
@@ -783,7 +783,7 @@ function applyItem(item: PendingUpdate, ydoc: Y.Doc): boolean {
             return true;
         }
     } catch (e) {
-        console.error(`Failed to apply ${item.type}`, e);
+        console.error(`Failed to apply ${item.type}`, sanitizeError(e));
     }
     return false;
 }

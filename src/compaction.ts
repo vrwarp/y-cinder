@@ -248,25 +248,52 @@ export async function compact(
         const candidate = await mergeUpdatesAsync(allContent);
 
         let type: 'snapshot' | 'history' = 'snapshot';
-        let uploadContent = candidate;
+        let uploadContent: Uint8Array | Uint8Array[] = candidate;
         let storagePath: string | undefined = undefined;
 
         // Level 2 Fallback: If snapshot exists and total size exceeds threshold,
         // merge into history instead of snapshot.
         if (baseSnapshot && candidate.byteLength > DEFAULTS.TARGET_SNAPSHOT_SIZE) {
             type = 'history';
-            // Only merge history and updates for the history segment
-            uploadContent = await mergeUpdatesAsync([...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)]);
+            // Merge history and updates, then chunk if necessary to stay under Firestore limits
+            const historyUpdates = [...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
+            const fullHistory = await mergeUpdatesAsync(historyUpdates);
+
+            if (fullHistory.byteLength > DEFAULTS.TARGET_SNAPSHOT_SIZE) {
+                // Chunk history into multiple segments
+                const chunks: Uint8Array[] = [];
+                let currentChunk: Uint8Array[] = [];
+                let currentSize = 0;
+
+                for (const item of historyUpdates) {
+                    if (currentSize + item.byteLength > DEFAULTS.TARGET_SNAPSHOT_SIZE && currentChunk.length > 0) {
+                        chunks.push(await mergeUpdatesAsync(currentChunk));
+                        currentChunk = [];
+                        currentSize = 0;
+                    }
+                    currentChunk.push(item);
+                    currentSize += item.byteLength;
+                }
+                if (currentChunk.length > 0) {
+                    chunks.push(await mergeUpdatesAsync(currentChunk));
+                }
+                uploadContent = chunks;
+            } else {
+                uploadContent = fullHistory;
+            }
         }
 
-        // Validate candidate before committing — a corrupted merge must never
+        // Validate candidates before committing — a corrupted merge must never
         // overwrite the canonical state.
-        try {
-            Y.decodeUpdate(uploadContent);
-        } catch (decodeErr) {
-            throw new Error(
-                `Compaction ${type} candidate failed validation (${uploadContent.byteLength} bytes): ${decodeErr}`
-            );
+        const contentArray = Array.isArray(uploadContent) ? uploadContent : [uploadContent];
+        for (const content of contentArray) {
+            try {
+                Y.decodeUpdate(content);
+            } catch (decodeErr) {
+                throw new Error(
+                    `Compaction ${type} candidate failed validation (${content.byteLength} bytes): ${decodeErr}`
+                );
+            }
         }
 
         if (type === 'snapshot') {
@@ -277,7 +304,7 @@ export async function compact(
 
             // Upload candidate blob to Cloud Storage first
             // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
-            await uploadBytes(storageRef, uploadContent);
+            await uploadBytes(storageRef, contentArray[0]);
         }
 
         // === STEP 4: Transaction ===
@@ -326,7 +353,7 @@ async function performCompactionTransaction(params: {
     verifiedUpdateRefs: DocumentReference[];
     verifiedHistoryRefs: DocumentReference[];
     storagePath?: string;
-    candidate: Uint8Array;
+    candidate: Uint8Array | Uint8Array[];
     expectedVersion: number;
     type: 'snapshot' | 'history';
 }): Promise<CompactionResult> {
@@ -384,7 +411,7 @@ async function performCompactionTransaction(params: {
                 transaction,
                 db,
                 path,
-                candidate,
+                candidate: Array.isArray(candidate) ? candidate : [candidate],
                 updatesToProcess,
                 historyToMerge,
             });
@@ -403,25 +430,26 @@ async function performCompactionTransaction(params: {
 }
 
 /**
- * Compacts updates into a history segment.
+ * Compacts updates into one or more history segments.
  */
 function compactToHistory(params: {
     transaction: any;
     db: Firestore;
     path: string;
-    candidate: Uint8Array;
+    candidate: Uint8Array[];
     updatesToProcess: { ref: DocumentReference }[];
     historyToMerge: { ref: DocumentReference }[];
 }): CompactionResult {
     const { transaction, db, path, candidate, updatesToProcess, historyToMerge } = params;
 
-    console.log(`Compacted to History Segment (Size: ${candidate.byteLength})`);
-
-    const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY));
-    transaction.set(historyRef, {
-        segment: Bytes.fromUint8Array(candidate),
-        stateVector: calculateStateVector(candidate),
-        startTime: serverTimestamp(),
+    candidate.forEach((segment, index) => {
+        console.log(`Compacted to History Segment ${index + 1}/${candidate.length} (Size: ${segment.byteLength})`);
+        const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY));
+        transaction.set(historyRef, {
+            segment: Bytes.fromUint8Array(segment),
+            stateVector: calculateStateVector(segment),
+            startTime: serverTimestamp(),
+        });
     });
 
     updatesToProcess.forEach(u => transaction.delete(u.ref));
@@ -442,18 +470,19 @@ function compactToSnapshot(params: {
     transaction: any;
     mainRef: DocumentReference;
     storagePath: string;
-    candidate: Uint8Array;
+    candidate: Uint8Array | Uint8Array[];
     currentVersion: number;
     updatesToProcess: { ref: DocumentReference }[];
     historyToMerge: { ref: DocumentReference }[];
 }): CompactionResult {
     const { transaction, mainRef, storagePath, candidate, currentVersion, updatesToProcess, historyToMerge } = params;
+    const uploadContent = Array.isArray(candidate) ? candidate[0] : candidate;
 
-    console.log(`Compacted to Snapshot (Size: ${candidate.byteLength})`);
+    console.log(`Compacted to Snapshot (Size: ${uploadContent.byteLength})`);
 
     transaction.set(mainRef, {
         snapshotStoragePath: storagePath,
-        stateVector: calculateStateVector(candidate),
+        stateVector: calculateStateVector(uploadContent),
         version: currentVersion + 1,
         updatedAt: serverTimestamp(),
     }, { merge: true });

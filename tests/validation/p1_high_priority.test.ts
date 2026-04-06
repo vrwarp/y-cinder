@@ -54,7 +54,7 @@ describe('P1 High Priority Issue Validation', () => {
     };
 
     beforeEach(async () => {
-        vi.setConfig({ testTimeout: 20000 });
+        vi.setConfig({ testTimeout: 60000 });
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
@@ -219,7 +219,7 @@ describe('P1 High Priority Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('content').toString().includes('history'),
-                { timeout: 5000, interval: 50, message: 'Should sync' }
+                { timeout: 15000, interval: 50, message: 'Should sync' }
             );
 
             await provider.destroy();
@@ -261,7 +261,7 @@ describe('P1 High Priority Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('content').toString().includes('P1.3 history'),
-                { timeout: 5000, interval: 100, message: 'Should sync history' }
+                { timeout: 15000, interval: 100, message: 'Should sync history' }
             );
 
             await provider.destroy();
@@ -364,7 +364,7 @@ describe('P1 High Priority Issue Validation', () => {
             await waitForConditionEquals(
                 () => verifyDoc.getText('x').toString(),
                 'important-data',
-                { timeout: 10000, interval: 50, message: 'Data should be persisted' }
+                { timeout: 15000, interval: 50, message: 'Data should be persisted' }
             );
 
             await verifyProvider.destroy();

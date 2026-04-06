@@ -54,7 +54,6 @@ import { getBytes, ref, uploadBytes, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import {
-    UpdateMetadata,
     FIREBASE_ORIGINS,
     FIRESTORE_PATHS,
     DEFAULTS,

@@ -319,10 +319,14 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 const applied = applyItem(item, ydoc);
                 if (applied) {
                     updatesApplied++;
-                    // P0.4 FIX: Refresh localSVMap after applying snapshot or history
+                    // Incremental update of localSVMap instead of expensive re-encode/decode (P3.0 Optimization)
                     // This prevents redundant processing of history/updates already in snapshot/previous segments
-                    if (item.type === 'snapshot' || item.type === 'history') {
-                        localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+                    if (item.type === 'snapshot') {
+                        processSnapshotMetadata(item.data, localSVMap);
+                    } else if (item.type === 'history') {
+                        processHistoryMetadata(item.data, localSVMap);
+                    } else if (item.type === 'update') {
+                        processUpdateMetadata(item.data, localSVMap);
                     }
                 }
             }
@@ -419,6 +423,9 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
         );
     }
 
+    // Cache local state vector for redundancy checks (P3.0 Optimization)
+    let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+
     return onSnapshot(liveUpdatesQ, (snapshot) => {
         // Check for compaction trigger based on actual size
         // Note: snapshot.size may be capped by limitToLast, so we check docChanges for additions
@@ -435,15 +442,14 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
 
                 // Skip our own updates
                 if (data.createdBy === uid) {
+                    // Update our cache even for our own updates so subsequent checks are accurate
+                    processUpdateMetadata(data, localSVMap);
                     return;
                 }
 
                 // Check if we already have this update
                 if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
-                    const freshSV = Y.encodeStateVector(ydoc);
-                    const freshMap = Y.decodeStateVector(freshSV);
-
-                    if (isUpdateRedundant(freshMap, data.clientIDs, data.clientClocks)) {
+                    if (isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks)) {
                         return; // Skip - we have all the data
                     }
                 }
@@ -463,6 +469,8 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                             const buffer = await getBytes(storageRef);
                             const update = new Uint8Array(buffer);
                             Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
+                            // Incremental update of cached state vector (P3.0 Optimization)
+                            processUpdateMetadata(data, localSVMap);
                         } catch (e) {
                             console.error(`Failed to apply storage-backed update ${docId} (quarantined)`, e);
                             ctx.corruptedDocIds?.add(docId);
@@ -476,6 +484,8 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                     try {
                         const update = (data.update as Bytes).toUint8Array();
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
+                        // Incremental update of cached state vector (P3.0 Optimization)
+                        processUpdateMetadata(data, localSVMap);
                     } catch (e) {
                         console.error(`Failed to apply update ${docId} (quarantined)`, e);
                         ctx.corruptedDocIds?.add(docId);
@@ -589,6 +599,9 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
         );
     }
 
+    // Cache local state vector for redundancy checks (P3.0 Optimization)
+    let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+
     return onSnapshot(q, (snapshot) => {
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
@@ -603,7 +616,6 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
                 if (data && data.segment) {
                     try {
                         // Check redundancy using local state vector
-                        const localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
                         const item: PendingUpdate = {
                             type: 'history',
                             data: data as any,
@@ -613,6 +625,8 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
                         if (!isItemRedundant(item, localSVMap)) {
                             // Apply it
                             Y.applyUpdate(ydoc, (data.segment as Bytes).toUint8Array(), FIREBASE_ORIGINS.HISTORY);
+                            // Incremental update of cached state vector (P3.0 Optimization)
+                            processHistoryMetadata(data, localSVMap);
                         }
                     } catch (err) {
                         console.error(`Failed to apply history segment ${docId} (quarantined)`, err);

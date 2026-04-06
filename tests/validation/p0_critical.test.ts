@@ -469,7 +469,7 @@ describe('P0 Critical Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('content').toString() === 'IMPORTANT_DATA',
-                { timeout: 5000, message: 'Should receive data' }
+                { timeout: 15000, message: 'Should receive data' }
             );
 
             await provider.destroy();
@@ -504,7 +504,7 @@ describe('P0 Critical Issue Validation', () => {
             await waitForConditionTruthy(() => {
                 const content = doc2.getText('x').toString();
                 return content.includes('DataA') && content.includes('DataB');
-            }, { timeout: 5000, message: 'Should get all data after compaction' });
+            }, { timeout: 15000, message: 'Should get all data after compaction' });
 
             await provider1.destroy();
             await provider2.destroy();

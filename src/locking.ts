@@ -250,7 +250,16 @@ export async function checkLockStatus(config: LockConfig): Promise<{
             : 0;
 
         // P1.1 FIX: Use cached clock offset for accurate age calculation
-        const serverNow = Date.now() + (cachedClockOffset ?? 0);
+        let serverOffset = cachedClockOffset ?? 0;
+        if (cachedClockOffset === undefined) {
+            try {
+                serverOffset = await measureClockSkew(db, path, uid);
+            } catch (e) {
+                console.warn("Failed to measure clock skew, defaulting to 0:", e);
+            }
+        }
+
+        const serverNow = Date.now() + serverOffset;
         const ageMs = serverNow - createdAt;
 
         return {

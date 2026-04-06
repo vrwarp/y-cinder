@@ -51,7 +51,6 @@ import {
 } from "@firebase/firestore";
 import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
-import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
 import { calculateStateVector, wait, calculateBackoff } from "./utils";
 import { acquireLock, releaseLock } from "./locking";

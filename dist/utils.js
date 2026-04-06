@@ -123,7 +123,13 @@ export function generateSessionId() {
     if (g.crypto && g.crypto.randomUUID) {
         return g.crypto.randomUUID();
     }
-    // Fallback for legacy environments
+    // Fallback using crypto.getRandomValues if available
+    if (g.crypto && g.crypto.getRandomValues) {
+        const array = new Uint8Array(16);
+        g.crypto.getRandomValues(array);
+        return Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('') + Date.now().toString(36);
+    }
+    // In environments without crypto, we fallback to Math.random but this should be rare
     return Math.random().toString(36).substring(2) + Date.now().toString(36);
 }
 /**

@@ -42,13 +42,7 @@ describe('Issue 4: Clock Skew in Distributed Lock', () => {
         const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
         app = a;
         db = d;
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
         path = `tests/${seed}`;
-    });
-
-    afterEach(async () => {
-        await terminate(db);
     });
 
     it('should respect lock even when client clock is behind server', async () => {

@@ -17,15 +17,18 @@ TEST_ARGS="$@"
 if [ -z "$TEST_ARGS" ]; then
   echo "Running all tests in batches to prevent emulator overload..."
   
-  echo "--- RUNNING BATCH 1/3 ---"
-  npx firebase emulators:exec --project demo-test-project "npx vitest run --no-file-parallelism --test-timeout=30000 --exclude 'debugger/**/*' --shard=1/3" || exit 1
+  echo "--- RUNNING BATCH 1/4 ---"
+  npx firebase emulators:exec --project demo-test-project "npx vitest run --no-file-parallelism --test-timeout=30000 --exclude debugger --shard=1/4" || exit 1
 
-  echo "--- RUNNING BATCH 2/3 ---"
-  npx firebase emulators:exec --project demo-test-project "npx vitest run --no-file-parallelism --test-timeout=30000 --exclude 'debugger/**/*' --shard=2/3" || exit 1
+  echo "--- RUNNING BATCH 2/4 ---"
+  npx firebase emulators:exec --project demo-test-project "npx vitest run --no-file-parallelism --test-timeout=30000 --exclude debugger --shard=2/4" || exit 1
 
-  echo "--- RUNNING BATCH 3/3 ---"
-  npx firebase emulators:exec --project demo-test-project "npx vitest run --no-file-parallelism --test-timeout=30000 --exclude 'debugger/**/*' --shard=3/3" || exit 1
+  echo "--- RUNNING BATCH 3/4 ---"
+  npx firebase emulators:exec --project demo-test-project "npx vitest run --no-file-parallelism --test-timeout=30000 --exclude debugger --shard=3/4" || exit 1
+
+  echo "--- RUNNING BATCH 4/4 ---"
+  npx firebase emulators:exec --project demo-test-project "npx vitest run --no-file-parallelism --test-timeout=30000 --exclude debugger --shard=4/4" || exit 1
 else
   echo "Running specific tests: $TEST_ARGS"
-  npx firebase emulators:exec --project demo-test-project "npx vitest run --no-file-parallelism --test-timeout=30000 --exclude 'debugger/**/*' $TEST_ARGS"
+  npx firebase emulators:exec --project demo-test-project "npx vitest run --no-file-parallelism --test-timeout=30000 --exclude debugger $TEST_ARGS"
 fi

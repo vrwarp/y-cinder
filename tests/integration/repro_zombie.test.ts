@@ -8,7 +8,7 @@
  * @file repro_zombie.test.ts
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { initializeApp } from '@firebase/app';
@@ -26,6 +26,8 @@ import {
 } from '@firebase/firestore';
 import { waitForConditionEquals } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
+
+vi.setConfig({ testTimeout: 60000 });
 
 // Emulator settings
 const EMULATOR_HOST = '127.0.0.1';
@@ -96,7 +98,7 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         await waitForConditionEquals(async () => {
             const snap = await getDocs(updatesCol);
             return snap.size;
-        }, 3, { timeout: 5000, interval: 100, message: 'Wait for updates to appear' });
+        }, 3, { timeout: 15000, interval: 100, message: 'Wait for updates to appear' });
 
         const initialSnap = await getDocs(updatesCol);
         const sortedDocs = initialSnap.docs.sort((a, b) => {

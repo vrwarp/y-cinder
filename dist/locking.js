@@ -61,8 +61,10 @@ import { FIRESTORE_PATHS } from "./types";
  */
 export function measureClockSkew(db, path, uid) {
     return __awaiter(this, void 0, void 0, function* () {
-        const tempId = `skew_${uid}_${Math.random().toString(36).substring(2)}`;
-        const ref = doc(collection(db, path, FIRESTORE_PATHS.MAINTENANCE), tempId);
+        const maintCollection = collection(db, path, FIRESTORE_PATHS.MAINTENANCE);
+        const tempRef = doc(maintCollection); // let firestore generate secure id
+        const tempId = `skew_${uid}_${tempRef.id}`;
+        const ref = doc(maintCollection, tempId);
         try {
             yield setDoc(ref, { t: serverTimestamp() });
             const snap = yield getDoc(ref);

@@ -66,8 +66,10 @@ export async function measureClockSkew(
     path: string,
     uid: string
 ): Promise<number> {
-    const tempId = `skew_${uid}_${Math.random().toString(36).substring(2)}`;
-    const ref = doc(collection(db, path, FIRESTORE_PATHS.MAINTENANCE), tempId);
+    const maintCollection = collection(db, path, FIRESTORE_PATHS.MAINTENANCE);
+    const tempRef = doc(maintCollection); // let firestore generate secure id
+    const tempId = `skew_${uid}_${tempRef.id}`;
+    const ref = doc(maintCollection, tempId);
 
     try {
         await setDoc(ref, { t: serverTimestamp() });

@@ -247,24 +247,38 @@ export async function compact(
         const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
         const candidate = await mergeUpdatesAsync(allContent);
 
+        let type: 'snapshot' | 'history' = 'snapshot';
+        let uploadContent = candidate;
+        let storagePath: string | undefined = undefined;
+
+        // Level 2 Fallback: If snapshot exists and total size exceeds threshold,
+        // merge into history instead of snapshot.
+        if (baseSnapshot && candidate.byteLength > DEFAULTS.TARGET_SNAPSHOT_SIZE) {
+            type = 'history';
+            // Only merge history and updates for the history segment
+            uploadContent = await mergeUpdatesAsync([...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)]);
+        }
+
         // Validate candidate before committing — a corrupted merge must never
-        // overwrite the canonical snapshot.
+        // overwrite the canonical state.
         try {
-            Y.decodeUpdate(candidate);
+            Y.decodeUpdate(uploadContent);
         } catch (decodeErr) {
             throw new Error(
-                `Compaction candidate failed validation (${candidate.byteLength} bytes): ${decodeErr}`
+                `Compaction ${type} candidate failed validation (${uploadContent.byteLength} bytes): ${decodeErr}`
             );
         }
 
-        const nextVersion = currentVersion + 1;
-        const snapshotFilename = `snapshot_v${nextVersion}.bin`;
-        const storagePath = `${path}/${snapshotFilename}`;
-        const storageRef = ref(storage, storagePath);
+        if (type === 'snapshot') {
+            const nextVersion = currentVersion + 1;
+            const snapshotFilename = `snapshot_v${nextVersion}.bin`;
+            storagePath = `${path}/${snapshotFilename}`;
+            const storageRef = ref(storage, storagePath);
 
-        // Upload candidate blob to Cloud Storage first
-        // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
-        await uploadBytes(storageRef, candidate);
+            // Upload candidate blob to Cloud Storage first
+            // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
+            await uploadBytes(storageRef, uploadContent);
+        }
 
         // === STEP 4: Transaction ===
         const result = await performCompactionTransaction({
@@ -274,8 +288,9 @@ export async function compact(
             verifiedUpdateRefs: updatesToProcess.map(u => u.ref),
             verifiedHistoryRefs: historyToMerge.map(h => h.ref),
             storagePath,
-            candidate,
+            candidate: uploadContent,
             expectedVersion: currentVersion,
+            type,
         });
 
         // Garbage Collect Old Storage Snapshot
@@ -310,11 +325,12 @@ async function performCompactionTransaction(params: {
     uid: string;
     verifiedUpdateRefs: DocumentReference[];
     verifiedHistoryRefs: DocumentReference[];
-    storagePath: string;
+    storagePath?: string;
     candidate: Uint8Array;
     expectedVersion: number;
+    type: 'snapshot' | 'history';
 }): Promise<CompactionResult> {
-    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, expectedVersion } = params;
+    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, expectedVersion, type } = params;
 
     return await runTransaction(db, async (transaction) => {
         // === STEP A: THE KILL SWITCH ===
@@ -363,16 +379,60 @@ async function performCompactionTransaction(params: {
         }
 
         // === STEP C: Commit Pointers ===
-        return compactToSnapshot({
-            transaction,
-            mainRef,
-            storagePath,
-            candidate,
-            currentVersion,
-            updatesToProcess,
-            historyToMerge,
-        });
+        if (type === 'history') {
+            return compactToHistory({
+                transaction,
+                db,
+                path,
+                candidate,
+                updatesToProcess,
+                historyToMerge,
+            });
+        } else {
+            return compactToSnapshot({
+                transaction,
+                mainRef,
+                storagePath: storagePath!,
+                candidate,
+                currentVersion,
+                updatesToProcess,
+                historyToMerge,
+            });
+        }
     });
+}
+
+/**
+ * Compacts updates into a history segment.
+ */
+function compactToHistory(params: {
+    transaction: any;
+    db: Firestore;
+    path: string;
+    candidate: Uint8Array;
+    updatesToProcess: { ref: DocumentReference }[];
+    historyToMerge: { ref: DocumentReference }[];
+}): CompactionResult {
+    const { transaction, db, path, candidate, updatesToProcess, historyToMerge } = params;
+
+    console.log(`Compacted to History Segment (Size: ${candidate.byteLength})`);
+
+    const historyRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY));
+    transaction.set(historyRef, {
+        segment: Bytes.fromUint8Array(candidate),
+        stateVector: calculateStateVector(candidate),
+        startTime: serverTimestamp(),
+    });
+
+    updatesToProcess.forEach(u => transaction.delete(u.ref));
+    historyToMerge.forEach(h => transaction.delete(h.ref));
+
+    return {
+        success: true,
+        type: 'history',
+        updatesCompacted: updatesToProcess.length,
+        historySegmentsMerged: historyToMerge.length,
+    };
 }
 
 /**

@@ -190,7 +190,7 @@ describe('P1 High Priority Issue Validation', () => {
 
                     // EXPECTED AFTER FIX: stateVector should be present
                     // CURRENT BUG: stateVector is missing
-                    // expect(data.stateVector).toBeDefined();
+                    expect(data.stateVector).toBeDefined();
 
                     // Document current behavior
                     expect(data.segment).toBeDefined();

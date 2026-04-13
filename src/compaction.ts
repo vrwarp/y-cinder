@@ -138,8 +138,6 @@ export async function compact(
     }
 
     try {
-        console.log(`Starting compaction (attempt ${attempt})...`);
-
         // Fetch work items
         const updatesQ = query(
             collection(db, path, FIRESTORE_PATHS.UPDATES),

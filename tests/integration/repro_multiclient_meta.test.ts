@@ -11,7 +11,6 @@ import * as Y from 'yjs';
 import { initializeApp } from '@firebase/app';
 import {
     getFirestore,
-    connectFirestoreEmulator,
     collection,
     addDoc,
     serverTimestamp,
@@ -39,11 +38,9 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
         // console.log(`Test Seed: ${seed}`);
         rng = seedFromString(seed);
 
-        const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
-        app = a;
-        db = d;
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
+        const setup = await import("../utils/emulator").then(m => m.setupEmulator());
+        app = setup.app;
+        db = setup.db;
 
         path = `tests/${seed}`;
     });

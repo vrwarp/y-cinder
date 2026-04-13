@@ -12,7 +12,6 @@ import { seedFromString, getStableDate } from '../unit/prng';
 import { initializeApp } from '@firebase/app';
 import {
     getFirestore,
-    connectFirestoreEmulator,
     collection,
     doc,
     getDocs,
@@ -39,11 +38,9 @@ describe('Issue 4: Clock Skew in Distributed Lock', () => {
         const seed = `clock-skew-${getStableDate()}-${counter++}`;
         // console.log(`Test Seed: ${seed}`); // Optional logging to reduce noise
         const rng = seedFromString(seed);
-        const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
-        app = a;
-        db = d;
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
+        const setup = await import("../utils/emulator").then(m => m.setupEmulator());
+        app = setup.app;
+        db = setup.db;
         path = `tests/${seed}`;
     });
 

@@ -11,7 +11,6 @@ import { seedFromString, getStableDate } from '../unit/prng';
 import { initializeApp } from '@firebase/app';
 import {
     getFirestore,
-    connectFirestoreEmulator,
     collection,
     doc,
     getDocs,
@@ -37,11 +36,9 @@ describe('Issue 12: Partial Compaction Failure', () => {
         const seed = `partial-compact-${getStableDate()}-${counter++}`;
         // console.log(`Test Seed: ${seed}`);
         const rng = seedFromString(seed);
-        const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
-        app = a;
-        db = d;
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
+        const setup = await import("../utils/emulator").then(m => m.setupEmulator());
+        app = setup.app;
+        db = setup.db;
         path = `tests/${seed}`;
     });
 

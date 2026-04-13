@@ -22,10 +22,13 @@ import { initializeApp, getApps, getApp } from "firebase/app";
 import {
     getFirestore,
     connectFirestoreEmulator,
-    terminate,
-    clearIndexedDbPersistence,
     setLogLevel,
 } from "firebase/firestore";
+import {
+    getAuth,
+    connectAuthEmulator,
+    signInAnonymously,
+} from "firebase/auth";
 
 /** Project ID for the demo Firebase project (emulator only) */
 const PROJECT_ID = "demo-test-project";
@@ -35,6 +38,9 @@ const EMULATOR_HOST = "127.0.0.1";
 
 /** Port number for the Firestore emulator */
 const FIRESTORE_PORT = 8080;
+
+/** Port number for the Auth emulator */
+const AUTH_PORT = 9099;
 
 /** Tracks whether emulator connection has been established (singleton pattern) */
 let emulatorConnected = false;
@@ -100,6 +106,7 @@ export const setupEmulator = async () => {
     }
 
     const db = getFirestore(app);
+    const auth = getAuth(app);
 
     const { getStorage, connectStorageEmulator } = await import("firebase/storage");
     const storage = getStorage(app);
@@ -108,10 +115,16 @@ export const setupEmulator = async () => {
     if (!emulatorConnected) {
         connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
         connectStorageEmulator(storage, EMULATOR_HOST, 9199);
+        connectAuthEmulator(auth, `http://${EMULATOR_HOST}:${AUTH_PORT}`);
         emulatorConnected = true;
     }
 
-    return { app, db, storage };
+    // Always ensure we are signed in for storage rules
+    if (!auth.currentUser) {
+        await signInAnonymously(auth);
+    }
+
+    return { app, db, storage, auth };
 };
 
 /**

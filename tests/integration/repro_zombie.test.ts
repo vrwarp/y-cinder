@@ -14,7 +14,6 @@ import * as Y from 'yjs';
 import { initializeApp } from '@firebase/app';
 import {
     getFirestore,
-    connectFirestoreEmulator,
     collection,
     doc,
     getDocs,
@@ -44,9 +43,9 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
 
     beforeEach(async () => {
         path = `tests/repro_zombie_${getStableDate()}-${counter++}`;
-        const { app: a, db: d } = await import('../utils/emulator').then(m => m.setupEmulator());
-        app = a;
-        db = d;
+        const setup = await import('../utils/emulator').then(m => m.setupEmulator());
+        app = setup.app;
+        db = setup.db;
 
         ydoc = new Y.Doc();
         provider = new FireProvider({

@@ -124,6 +124,8 @@ export class FireProvider extends ObservableV2<any> {
   private _syncRetryCount = 0;
   /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
   private _debounceTimerId: ReturnType<typeof setTimeout> | null = null;
+  /** P1.5 FIX: Sync retry timer ID for cancellation on destroy */
+  private _syncRetryTimerId: ReturnType<typeof setTimeout> | null = null;
   private _boundBeforeUnload: (() => void) | null = null;
   /** Per-session quarantine set for corrupted Firestore documents */
   private _corruptedDocIds = new Set<string>();
@@ -199,12 +201,16 @@ export class FireProvider extends ObservableV2<any> {
 
     // P1.5 FIX: Setup debounced save with timer tracking
     this._debouncedSave = () => {
+      if (this._isDestroyed) return;
+
       if (this._debounceTimerId) {
         clearTimeout(this._debounceTimerId);
       }
       this._debounceTimerId = setTimeout(() => {
         this._debounceTimerId = null;
-        this.saveToFirestore();
+        if (!this._isDestroyed) {
+          this.saveToFirestore();
+        }
       }, this.maxWaitTime);
     };
 
@@ -324,6 +330,11 @@ export class FireProvider extends ObservableV2<any> {
       this._debounceTimerId = null;
     }
 
+    if (this._syncRetryTimerId) {
+      clearTimeout(this._syncRetryTimerId);
+      this._syncRetryTimerId = null;
+    }
+
     // Clear all listeners
     this._unsubscribers.forEach(unsub => unsub());
     this._unsubscribers = [];
@@ -434,7 +445,8 @@ export class FireProvider extends ObservableV2<any> {
 
         const backoffMs = calculateBackoff(this._syncRetryCount);
         console.log(`Retrying sync in ${backoffMs}ms (attempt ${this._syncRetryCount}/${DEFAULTS.MAX_RETRIES})...`);
-        setTimeout(() => {
+        this._syncRetryTimerId = setTimeout(() => {
+          this._syncRetryTimerId = null;
           if (!this._isDestroyed) this.sync();
         }, backoffMs);
       }

@@ -670,8 +670,12 @@ function processUpdateMetadata(data: any, serverSVMap: Map<number, number>): voi
  */
 function processHistoryMetadata(data: any, serverSVMap: Map<number, number>): void {
     if (data.stateVector) {
-        const vector = fromBase64(data.stateVector);
-        const map = Y.decodeStateVector(vector);
+        // P3.1 OPTIMIZATION: Cache decoded state vector to avoid repeated parsing
+        if (!data._decodedSV) {
+            const vector = fromBase64(data.stateVector);
+            data._decodedSV = Y.decodeStateVector(vector);
+        }
+        const map = data._decodedSV;
         for (const [client, clock] of map.entries()) {
             const current = serverSVMap.get(client) || 0;
             if (clock > current) {
@@ -703,8 +707,12 @@ function processHistoryMetadata(data: any, serverSVMap: Map<number, number>): vo
  */
 function processSnapshotMetadata(data: any, serverSVMap: Map<number, number>): void {
     if (data.stateVector) {
-        const vector = fromBase64(data.stateVector);
-        const map = Y.decodeStateVector(vector);
+        // P3.1 OPTIMIZATION: Cache decoded state vector
+        if (!data._decodedSV) {
+            const vector = fromBase64(data.stateVector);
+            data._decodedSV = Y.decodeStateVector(vector);
+        }
+        const map = data._decodedSV;
         for (const [client, clock] of map.entries()) {
             const current = serverSVMap.get(client) || 0;
             if (clock > current) {
@@ -726,8 +734,12 @@ function processSnapshotMetadata(data: any, serverSVMap: Map<number, number>): v
  */
 function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, number>): boolean {
     if (item.type === 'snapshot' && item.data.stateVector) {
-        const sv = fromBase64(item.data.stateVector);
-        const map = Y.decodeStateVector(sv);
+        // P3.1 OPTIMIZATION: Use cached decoded state vector
+        if (!item.data._decodedSV) {
+            const sv = fromBase64(item.data.stateVector);
+            item.data._decodedSV = Y.decodeStateVector(sv);
+        }
+        const map = item.data._decodedSV;
         for (const [client, clock] of map) {
             const localClock = localSVMap.get(client) || 0;
             if (clock > localClock) return false;
@@ -738,8 +750,12 @@ function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, number>): 
     // P1.3 FIX: Handle history segments with stateVector
     if (item.type === 'history' && item.data.stateVector) {
         try {
-            const sv = fromBase64(item.data.stateVector);
-            const map = Y.decodeStateVector(sv);
+            // P3.1 OPTIMIZATION: Use cached decoded state vector
+            if (!item.data._decodedSV) {
+                const sv = fromBase64(item.data.stateVector);
+                item.data._decodedSV = Y.decodeStateVector(sv);
+            }
+            const map = item.data._decodedSV;
             for (const [client, clock] of map) {
                 const localClock = localSVMap.get(client) || 0;
                 if (clock > localClock) return false;

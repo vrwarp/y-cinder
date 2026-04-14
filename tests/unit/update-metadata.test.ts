@@ -83,12 +83,10 @@ describe('update-metadata', () => {
             expect(metas.length).toBe(0);
         });
 
-        it('should return empty array and log warning when Y.decodeUpdate throws', () => {
-            const malformed = new Uint8Array([0]);
+        it('should return empty array and log warning on parse error', () => {
+            // A non-empty array that is not a valid Yjs update will cause Y.decodeUpdate to throw
+            const malformed = new Uint8Array([1, 2, 3]);
             const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-            const decodeSpy = vi.spyOn(Y, 'decodeUpdate').mockImplementation(() => {
-                throw new Error('Parse error');
-            });
 
             const metas = extractAllMetadata(malformed);
 
@@ -99,7 +97,6 @@ describe('update-metadata', () => {
             );
 
             warnSpy.mockRestore();
-            decodeSpy.mockRestore();
         });
 
         it('should correctly compute clock ranges for multiple operations', () => {

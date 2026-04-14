@@ -13,8 +13,7 @@ import { initializeApp } from '@firebase/app';
 import {
     getFirestore,
     collection,
-    getDocs,
-    terminate
+    getDocs
 } from '@firebase/firestore';
 
 
@@ -39,7 +38,8 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
     });
 
     afterEach(async () => {
-        await terminate(db);
+        // We no longer call terminate(db) here because it is a singleton
+        // shared across tests. The emulator handles cleanup on exit.
     });
 
     it('should flush pending updates before destroy completes', async () => {

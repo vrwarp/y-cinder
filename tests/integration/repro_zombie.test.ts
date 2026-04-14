@@ -20,8 +20,7 @@ import {
     deleteDoc,
     addDoc,
     serverTimestamp,
-    Bytes,
-    terminate
+    Bytes
 } from '@firebase/firestore';
 import { waitForConditionEquals } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
@@ -65,7 +64,8 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         if (provider) {
             provider.destroy();
         }
-        await terminate(db);
+        // We no longer call terminate(db) here because it is a singleton
+        // shared across tests. The emulator handles cleanup on exit.
     });
 
     it('should correctly handle concurrent deletion of an update during compaction (No Zombie Updates)', async () => {

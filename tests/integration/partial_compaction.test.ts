@@ -18,8 +18,7 @@ import {
     addDoc,
     setDoc,
     serverTimestamp,
-    Bytes,
-    terminate
+    Bytes
 } from '@firebase/firestore';
 
 const EMULATOR_HOST = '127.0.0.1';
@@ -43,7 +42,8 @@ describe('Issue 12: Partial Compaction Failure', () => {
     });
 
     afterEach(async () => {
-        await terminate(db);
+        // We no longer call terminate(db) here because it is a singleton
+        // shared across tests. The emulator handles cleanup on exit.
     });
 
     it('should not duplicate data if transaction partially fails', { timeout: 30000 }, async () => {

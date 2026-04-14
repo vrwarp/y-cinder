@@ -14,8 +14,7 @@ import {
     collection,
     addDoc,
     serverTimestamp,
-    Bytes,
-    terminate
+    Bytes
 } from '@firebase/firestore';
 import { waitForConditionTruthy } from '../utils/wait';
 import { seedFromString, getStableDate } from '../unit/prng';
@@ -46,7 +45,8 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
     });
 
     afterEach(async () => {
-        await terminate(db);
+        // We no longer call terminate(db) here because it is a singleton
+        // shared across tests. The emulator handles cleanup on exit.
     });
 
     it('should sync updates that contain changes from multiple clients', async () => {

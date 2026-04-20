@@ -202,12 +202,15 @@ export class FireProvider extends ObservableV2<any> {
 
     // P1.5 FIX: Setup debounced save with timer tracking
     this._debouncedSave = () => {
+      if (this._isDestroyed) return;
       if (this._debounceTimerId) {
         clearTimeout(this._debounceTimerId);
       }
       this._debounceTimerId = setTimeout(() => {
         this._debounceTimerId = null;
-        this.saveToFirestore();
+        if (!this._isDestroyed) {
+          this.saveToFirestore();
+        }
       }, this.maxWaitTime);
     };
 
@@ -547,7 +550,7 @@ export class FireProvider extends ObservableV2<any> {
    * failures. Emits 'save-rejected' event instead of retrying forever.
    */
   private async saveToFirestore(): Promise<void> {
-    if (this._isDestroyed || !this.updateCache || this._isSaving) return;
+    if (!this.updateCache || this._isSaving) return;
 
     this._isSaving = true;
 
@@ -589,7 +592,7 @@ export class FireProvider extends ObservableV2<any> {
 
       // P0.5 FIX: Check if new updates arrived during save
       // If so, schedule another save
-      if (this.updateCache) {
+      if (this.updateCache && !this._isDestroyed) {
         this._debouncedSave();
       }
     } catch (err: any) {
@@ -645,7 +648,9 @@ export class FireProvider extends ObservableV2<any> {
       }
 
       // Retry
-      this._debouncedSave();
+      if (!this._isDestroyed) {
+        this._debouncedSave();
+      }
     } finally {
       this._isSaving = false;
     }

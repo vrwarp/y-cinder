@@ -18,6 +18,7 @@ import {
   persistentLocalCache,
   Firestore,
   Unsubscribe,
+  QueryDocumentSnapshot,
   collection,
   addDoc,
   Bytes,
@@ -110,7 +111,7 @@ export class FireProvider extends ObservableV2<any> {
   private _unsubscribers: Unsubscribe[] = [];
   // P1.9 FIX: Store history listener separately to pause during compaction
   private _unsubscribeHistory: Unsubscribe | null = null;
-  private _lastHistoryDoc: any = null; // QueryDocumentSnapshot
+  private _lastHistoryDoc: QueryDocumentSnapshot | null = null;
 
   private _debouncedSave: () => void;
   private _isDestroyed = false;
@@ -124,6 +125,8 @@ export class FireProvider extends ObservableV2<any> {
   private _syncRetryCount = 0;
   /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
   private _debounceTimerId: ReturnType<typeof setTimeout> | null = null;
+  /** P1.4 FIX: Sync retry timer ID for cancellation on destroy */
+  private _syncRetryTimerId: ReturnType<typeof setTimeout> | null = null;
   private _boundBeforeUnload: (() => void) | null = null;
   /** Per-session quarantine set for corrupted Firestore documents */
   private _corruptedDocIds = new Set<string>();
@@ -324,6 +327,11 @@ export class FireProvider extends ObservableV2<any> {
       this._debounceTimerId = null;
     }
 
+    if (this._syncRetryTimerId) {
+      clearTimeout(this._syncRetryTimerId);
+      this._syncRetryTimerId = null;
+    }
+
     // Clear all listeners
     this._unsubscribers.forEach(unsub => unsub());
     this._unsubscribers = [];
@@ -404,25 +412,28 @@ export class FireProvider extends ObservableV2<any> {
       // Reset retry count on successful sync
       this._syncRetryCount = 0;
 
-      // Cleanup any previous listener
+      // Cleanup any previous listeners
       this._unsubscribers.forEach(unsub => unsub());
       this._unsubscribers = [];
 
-      // Setup real-time listeners
-      // P1.9 FIX: Pass cursor to prevent gap
-      this._unsubscribers.push(createUpdateListener(syncCtx, result.lastSyncedDoc));
+      if (this._unsubscribeHistory) {
+        this._unsubscribeHistory();
+        this._unsubscribeHistory = null;
+      }
 
-      // FIX: Add Snapshot and History listeners for full synchronization
+      // Setup real-time listeners (Updates, Snapshot, and History)
+      // Pass cursor to prevent sync gaps
+      this._unsubscribers.push(createUpdateListener(syncCtx, result.lastSyncedDoc));
       this._unsubscribers.push(createSnapshotListener(syncCtx));
 
-      // FIX: Store history listener separately
+      // Store history listener separately so it can be paused during compaction
       this._lastHistoryDoc = result.lastHistoryDoc;
       this._unsubscribeHistory = createHistoryListener(syncCtx, result.lastHistoryDoc);
 
     } catch (err) {
       console.error("Sync failed", err);
 
-      // FIX: Circuit breaker - stop retrying after MAX_RETRIES
+      // Circuit breaker - stop retrying after MAX_RETRIES
       if (!this._isDestroyed) {
         this._syncRetryCount++;
 
@@ -434,7 +445,13 @@ export class FireProvider extends ObservableV2<any> {
 
         const backoffMs = calculateBackoff(this._syncRetryCount);
         console.log(`Retrying sync in ${backoffMs}ms (attempt ${this._syncRetryCount}/${DEFAULTS.MAX_RETRIES})...`);
-        setTimeout(() => {
+
+        if (this._syncRetryTimerId) {
+          clearTimeout(this._syncRetryTimerId);
+        }
+
+        this._syncRetryTimerId = setTimeout(() => {
+          this._syncRetryTimerId = null;
           if (!this._isDestroyed) this.sync();
         }, backoffMs);
       }
@@ -530,7 +547,7 @@ export class FireProvider extends ObservableV2<any> {
    * failures. Emits 'save-rejected' event instead of retrying forever.
    */
   private async saveToFirestore(): Promise<void> {
-    if (!this.updateCache || this._isSaving) return;
+    if (this._isDestroyed || !this.updateCache || this._isSaving) return;
 
     this._isSaving = true;
 

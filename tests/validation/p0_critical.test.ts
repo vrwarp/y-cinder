@@ -107,7 +107,7 @@ describe('P0 Critical Issue Validation', () => {
             await waitForConditionGreaterThan(
                 () => ydoc.getText('x').toString().length,
                 0,
-                { timeout: 300000, message: 'Sync should complete' }
+                { timeout: 30000, message: 'Sync should complete' }
             );
 
             await provider.destroy();
@@ -143,7 +143,7 @@ describe('P0 Critical Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('x').toString().includes('seg-'),
-                { timeout: 300000, message: 'History sync should complete' }
+                { timeout: 30000, message: 'History sync should complete' }
             );
 
             await provider.destroy();
@@ -187,7 +187,7 @@ describe('P0 Critical Issue Validation', () => {
             await waitForConditionGreaterThan(
                 () => ydoc.getText('x').toString().length,
                 0,
-                { timeout: 300000, message: 'Should sync with limit' }
+                { timeout: 30000, message: 'Should sync with limit' }
             );
 
             await provider.destroy();
@@ -240,7 +240,7 @@ describe('P0 Critical Issue Validation', () => {
             expect(maintenanceSnap.size).toBeLessThanOrEqual(5); // Relaxed for now
         });
 
-        it('should reuse cached clock offset for subsequent lock attempts', { timeout: 300000 }, async () => {
+        it('should reuse cached clock offset for subsequent lock attempts', { timeout: 30000 }, async () => {
             const path = `validation/p0-3-cache-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
@@ -286,7 +286,7 @@ describe('P0 Critical Issue Validation', () => {
     describe('P0.4: Stale State Vector During Sync', () => {
         let counter = 0;
 
-        it('should sync content correctly (fix prevents redundant applies)', { timeout: 300000 }, async () => {
+        it('should sync content correctly (fix prevents redundant applies)', { timeout: 30000 }, async () => {
             const path = `validation/p0-4-${getStableDate()}-${counter++}`;
 
             // Create update with content

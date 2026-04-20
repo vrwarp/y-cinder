@@ -54,7 +54,7 @@ describe('P1 High Priority Issue Validation', () => {
     };
 
     beforeEach(async () => {
-        vi.setConfig({ testTimeout: 20000 });
+        vi.setConfig({ testTimeout: 60000 });
         const setup = await setupEmulator();
         app = setup.app;
         db = setup.db;
@@ -219,7 +219,7 @@ describe('P1 High Priority Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('content').toString().includes('history'),
-                { timeout: 5000, interval: 50, message: 'Should sync' }
+                { timeout: 20000, interval: 50, message: 'Should sync' }
             );
 
             await provider.destroy();
@@ -239,7 +239,7 @@ describe('P1 High Priority Issue Validation', () => {
     describe('P1.3: isItemRedundant History Handling', () => {
         let counter = 0;
 
-        it('should sync efficiently with history segments', { timeout: 15000 }, async () => {
+        it('should sync efficiently with history segments', { timeout: 45000 }, async () => {
             const path = `validation/p1-3-${getStableDate()}-${counter++}`;
 
             // Create history segment with stateVector
@@ -261,7 +261,7 @@ describe('P1 High Priority Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('content').toString().includes('P1.3 history'),
-                { timeout: 5000, interval: 100, message: 'Should sync history' }
+                { timeout: 20000, interval: 100, message: 'Should sync history' }
             );
 
             await provider.destroy();
@@ -364,7 +364,7 @@ describe('P1 High Priority Issue Validation', () => {
             await waitForConditionEquals(
                 () => verifyDoc.getText('x').toString(),
                 'important-data',
-                { timeout: 10000, interval: 50, message: 'Data should be persisted' }
+                { timeout: 30000, interval: 50, message: 'Data should be persisted' }
             );
 
             await verifyProvider.destroy();

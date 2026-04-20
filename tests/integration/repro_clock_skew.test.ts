@@ -22,7 +22,7 @@ import {
     serverTimestamp,
     Bytes,
     Timestamp,
-    terminate
+
 } from '@firebase/firestore';
 
 const EMULATOR_HOST = '127.0.0.1';
@@ -48,7 +48,6 @@ describe('Issue 4: Clock Skew in Distributed Lock', () => {
     });
 
     afterEach(async () => {
-        await terminate(db);
     });
 
     it('should respect lock even when client clock is behind server', async () => {

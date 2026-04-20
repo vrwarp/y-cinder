@@ -15,7 +15,7 @@ import {
     connectFirestoreEmulator,
     collection,
     getDocs,
-    terminate
+
 } from '@firebase/firestore';
 
 
@@ -42,7 +42,6 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
     });
 
     afterEach(async () => {
-        await terminate(db);
     });
 
     it('should flush pending updates before destroy completes', async () => {

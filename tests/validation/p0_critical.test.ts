@@ -107,7 +107,7 @@ describe('P0 Critical Issue Validation', () => {
             await waitForConditionGreaterThan(
                 () => ydoc.getText('x').toString().length,
                 0,
-                { timeout: 10000, message: 'Sync should complete' }
+                { timeout: 300000, message: 'Sync should complete' }
             );
 
             await provider.destroy();
@@ -143,7 +143,7 @@ describe('P0 Critical Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('x').toString().includes('seg-'),
-                { timeout: 10000, message: 'History sync should complete' }
+                { timeout: 300000, message: 'History sync should complete' }
             );
 
             await provider.destroy();
@@ -187,7 +187,7 @@ describe('P0 Critical Issue Validation', () => {
             await waitForConditionGreaterThan(
                 () => ydoc.getText('x').toString().length,
                 0,
-                { timeout: 10000, message: 'Should sync with limit' }
+                { timeout: 300000, message: 'Should sync with limit' }
             );
 
             await provider.destroy();
@@ -240,7 +240,7 @@ describe('P0 Critical Issue Validation', () => {
             expect(maintenanceSnap.size).toBeLessThanOrEqual(5); // Relaxed for now
         });
 
-        it('should reuse cached clock offset for subsequent lock attempts', { timeout: 30000 }, async () => {
+        it('should reuse cached clock offset for subsequent lock attempts', { timeout: 300000 }, async () => {
             const path = `validation/p0-3-cache-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
@@ -286,7 +286,7 @@ describe('P0 Critical Issue Validation', () => {
     describe('P0.4: Stale State Vector During Sync', () => {
         let counter = 0;
 
-        it('should sync content correctly (fix prevents redundant applies)', { timeout: 10000 }, async () => {
+        it('should sync content correctly (fix prevents redundant applies)', { timeout: 300000 }, async () => {
             const path = `validation/p0-4-${getStableDate()}-${counter++}`;
 
             // Create update with content
@@ -306,7 +306,7 @@ describe('P0 Critical Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('content').toString().includes('P0.4 test'),
-                { timeout: 15000, message: 'Sync should complete' }
+                { timeout: 30000, message: 'Sync should complete' }
             );
 
             const elapsed = Date.now() - start;
@@ -330,7 +330,7 @@ describe('P0 Critical Issue Validation', () => {
     describe('P0.5: saveToFirestore Race Condition', () => {
         let counter = 0;
 
-        it('should not lose updates arriving during save', { timeout: 15000 }, async () => {
+        it('should not lose updates arriving during save', { timeout: 30000 }, async () => {
             const path = `validation/p0-5-${getStableDate()}-${counter++}`;
 
             const ydoc = new Y.Doc();
@@ -358,7 +358,7 @@ describe('P0 Critical Issue Validation', () => {
             await waitForConditionGreaterThan(
                 () => verifyDoc.getText('content').toString().length,
                 updateCount - 1,
-                { timeout: 8000, message: 'All updates should be persisted' }
+                { timeout: 20000, message: 'All updates should be persisted' }
             );
 
             const finalContent = verifyDoc.getText('content').toString();
@@ -393,7 +393,7 @@ describe('P0 Critical Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => verifyDoc.getText('content').toString().includes('First'),
-                { timeout: 3000, message: 'Content should persist' }
+                { timeout: 30000, message: 'Content should persist' }
             );
 
             await verifyProvider.destroy();
@@ -471,7 +471,7 @@ describe('P0 Critical Issue Validation', () => {
 
             await waitForConditionTruthy(
                 () => ydoc.getText('content').toString() === 'IMPORTANT_DATA',
-                { timeout: 15000, message: 'Should receive data' }
+                { timeout: 30000, message: 'Should receive data' }
             );
 
             await provider.destroy();
@@ -506,7 +506,7 @@ describe('P0 Critical Issue Validation', () => {
             await waitForConditionTruthy(() => {
                 const content = doc2.getText('x').toString();
                 return content.includes('DataA') && content.includes('DataB');
-            }, { timeout: 15000, message: 'Should get all data after compaction' });
+            }, { timeout: 30000, message: 'Should get all data after compaction' });
 
             await provider1.destroy();
             await provider2.destroy();

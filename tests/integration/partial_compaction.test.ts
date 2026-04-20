@@ -20,7 +20,7 @@ import {
     setDoc,
     serverTimestamp,
     Bytes,
-    terminate
+
 } from '@firebase/firestore';
 
 const EMULATOR_HOST = '127.0.0.1';
@@ -46,7 +46,6 @@ describe('Issue 12: Partial Compaction Failure', () => {
     });
 
     afterEach(async () => {
-        await terminate(db);
     });
 
     it('should not duplicate data if transaction partially fails', { timeout: 30000 }, async () => {

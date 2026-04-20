@@ -22,7 +22,7 @@ import {
     addDoc,
     serverTimestamp,
     Bytes,
-    terminate
+
 } from '@firebase/firestore';
 import { waitForConditionEquals } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
@@ -66,7 +66,6 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         if (provider) {
             provider.destroy();
         }
-        await terminate(db);
     });
 
     it('should correctly handle concurrent deletion of an update during compaction (No Zombie Updates)', async () => {

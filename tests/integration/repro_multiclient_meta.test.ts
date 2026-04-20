@@ -16,7 +16,7 @@ import {
     addDoc,
     serverTimestamp,
     Bytes,
-    terminate
+
 } from '@firebase/firestore';
 import { waitForConditionTruthy } from '../utils/wait';
 import { seedFromString, getStableDate } from '../unit/prng';
@@ -49,7 +49,6 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
     });
 
     afterEach(async () => {
-        await terminate(db);
     });
 
     it('should sync updates that contain changes from multiple clients', async () => {

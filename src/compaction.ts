@@ -192,49 +192,51 @@ export async function compact(
             }
         }
 
-        // Read updates
-        const updatesToProcess: { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp }[] = [];
-        for (const uDoc of updateDocs) {
+        // Read updates in parallel (P1.1 Optimization: Eliminate N+1 queries)
+        const updateResults = await Promise.all(updateDocs.map(async (uDoc) => {
             const freshSnap = await getDoc(uDoc.ref);
-            if (freshSnap.exists()) {
-                const data = freshSnap.data() as Record<string, any>;
-                if (data?.updateStoragePath && !data?.update) {
-                    try {
-                        const storageRef = ref(storage, data.updateStoragePath);
-                        const buffer = await getBytes(storageRef);
-                        updatesToProcess.push({
-                            ref: uDoc.ref,
-                            data: new Uint8Array(buffer),
-                            createdAt: data.createdAt,
-                        });
-                    } catch (e) {
-                        console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
-                        // Skip this update - do not process or delete it, but continue compacting the rest
-                    }
-                } else if (data?.update) {
-                    updatesToProcess.push({
-                        ref: uDoc.ref,
-                        data: (data.update as Bytes).toUint8Array(),
-                        createdAt: data.createdAt,
-                    });
-                }
-            }
-        }
+            if (!freshSnap.exists()) return null;
 
-        // Read history
-        const historyToMerge: { ref: DocumentReference; val: Uint8Array }[] = [];
-        for (const hDoc of historyDocs) {
-            const freshSnap = await getDoc(hDoc.ref);
-            if (freshSnap.exists()) {
-                const data = freshSnap.data() as Record<string, any>;
-                if (data?.segment) {
-                    historyToMerge.push({
-                        ref: hDoc.ref,
-                        val: (data.segment as Bytes).toUint8Array(),
-                    });
+            const data = freshSnap.data() as Record<string, any>;
+            if (data?.updateStoragePath && !data?.update) {
+                try {
+                    const storageRef = ref(storage, data.updateStoragePath);
+                    const buffer = await getBytes(storageRef);
+                    return {
+                        ref: uDoc.ref,
+                        data: new Uint8Array(buffer),
+                        createdAt: data.createdAt,
+                    };
+                } catch (e) {
+                    console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
+                    return null;
                 }
+            } else if (data?.update) {
+                return {
+                    ref: uDoc.ref,
+                    data: (data.update as Bytes).toUint8Array(),
+                    createdAt: data.createdAt,
+                };
             }
-        }
+            return null;
+        }));
+        const updatesToProcess = updateResults.filter((u): u is { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp } => u !== null);
+
+        // Read history in parallel (P1.1 Optimization: Eliminate N+1 queries)
+        const historyResults = await Promise.all(historyDocs.map(async (hDoc) => {
+            const freshSnap = await getDoc(hDoc.ref);
+            if (!freshSnap.exists()) return null;
+
+            const data = freshSnap.data() as Record<string, any>;
+            if (data?.segment) {
+                return {
+                    ref: hDoc.ref,
+                    val: (data.segment as Bytes).toUint8Array(),
+                };
+            }
+            return null;
+        }));
+        const historyToMerge = historyResults.filter((h): h is { ref: DocumentReference; val: Uint8Array } => h !== null);
 
         if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
@@ -339,21 +341,19 @@ async function performCompactionTransaction(params: {
         }
 
         // Verify updates still exist (avoid zombie bugs) before deleting
-        const updatesToProcess: { ref: DocumentReference }[] = [];
-        for (const ref of verifiedUpdateRefs) {
-            const freshSnap = await transaction.get(ref);
-            if (freshSnap.exists()) {
-                updatesToProcess.push({ ref });
-            }
-        }
+        // P1.1 Optimization: Use parallel transaction.get to eliminate N+1 queries
+        const [updateSnaps, historySnaps] = await Promise.all([
+            Promise.all(verifiedUpdateRefs.map(ref => transaction.get(ref))),
+            Promise.all(verifiedHistoryRefs.map(ref => transaction.get(ref)))
+        ]);
 
-        const historyToMerge: { ref: DocumentReference }[] = [];
-        for (const ref of verifiedHistoryRefs) {
-            const freshSnap = await transaction.get(ref);
-            if (freshSnap.exists()) {
-                historyToMerge.push({ ref });
-            }
-        }
+        const updatesToProcess = updateSnaps
+            .filter(snap => snap.exists())
+            .map(snap => ({ ref: snap.ref }));
+
+        const historyToMerge = historySnaps
+            .filter(snap => snap.exists())
+            .map(snap => ({ ref: snap.ref }));
 
         if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };

@@ -39,7 +39,8 @@
     "firebase-tools": "^15.4.0",
     "jsdom": "^29.0.1",
     "typescript": "^5.3.3",
-    "vitest": "^4.0.17"
+    "vitest": "^4.0.17",
+    "esbuild": "^0.20.0"
   },
   "peerDependencies": {
     "firebase": "^11.0.0",

@@ -630,6 +630,21 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
 // --- Helper Functions ---
 
 /**
+ * Ensures that the document data has a decoded state vector map cached.
+ * P3.1 OPTIMIZATION: Cache decoded state vector to avoid repeated parsing.
+ *
+ * @param data - Firestore document data containing stateVector
+ * @returns The decoded state vector map
+ */
+function ensureDecodedSV(data: any): Map<number, number> {
+    if (!data._decodedSV) {
+        const vector = fromBase64(data.stateVector);
+        data._decodedSV = Y.decodeStateVector(vector);
+    }
+    return data._decodedSV;
+}
+
+/**
  * Extracts and aggregates clock values from an update document into the server state vector.
  * Tries stored metadata first, falls back to parsing the update blob.
  * 
@@ -670,12 +685,7 @@ function processUpdateMetadata(data: any, serverSVMap: Map<number, number>): voi
  */
 function processHistoryMetadata(data: any, serverSVMap: Map<number, number>): void {
     if (data.stateVector) {
-        // P3.1 OPTIMIZATION: Cache decoded state vector to avoid repeated parsing
-        if (!data._decodedSV) {
-            const vector = fromBase64(data.stateVector);
-            data._decodedSV = Y.decodeStateVector(vector);
-        }
-        const map = data._decodedSV;
+        const map = ensureDecodedSV(data);
         for (const [client, clock] of map.entries()) {
             const current = serverSVMap.get(client) || 0;
             if (clock > current) {
@@ -707,12 +717,7 @@ function processHistoryMetadata(data: any, serverSVMap: Map<number, number>): vo
  */
 function processSnapshotMetadata(data: any, serverSVMap: Map<number, number>): void {
     if (data.stateVector) {
-        // P3.1 OPTIMIZATION: Cache decoded state vector
-        if (!data._decodedSV) {
-            const vector = fromBase64(data.stateVector);
-            data._decodedSV = Y.decodeStateVector(vector);
-        }
-        const map = data._decodedSV;
+        const map = ensureDecodedSV(data);
         for (const [client, clock] of map.entries()) {
             const current = serverSVMap.get(client) || 0;
             if (clock > current) {
@@ -734,12 +739,7 @@ function processSnapshotMetadata(data: any, serverSVMap: Map<number, number>): v
  */
 function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, number>): boolean {
     if (item.type === 'snapshot' && item.data.stateVector) {
-        // P3.1 OPTIMIZATION: Use cached decoded state vector
-        if (!item.data._decodedSV) {
-            const sv = fromBase64(item.data.stateVector);
-            item.data._decodedSV = Y.decodeStateVector(sv);
-        }
-        const map = item.data._decodedSV;
+        const map = ensureDecodedSV(item.data);
         for (const [client, clock] of map) {
             const localClock = localSVMap.get(client) || 0;
             if (clock > localClock) return false;
@@ -750,12 +750,7 @@ function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, number>): 
     // P1.3 FIX: Handle history segments with stateVector
     if (item.type === 'history' && item.data.stateVector) {
         try {
-            // P3.1 OPTIMIZATION: Use cached decoded state vector
-            if (!item.data._decodedSV) {
-                const sv = fromBase64(item.data.stateVector);
-                item.data._decodedSV = Y.decodeStateVector(sv);
-            }
-            const map = item.data._decodedSV;
+            const map = ensureDecodedSV(item.data);
             for (const [client, clock] of map) {
                 const localClock = localSVMap.get(client) || 0;
                 if (clock > localClock) return false;

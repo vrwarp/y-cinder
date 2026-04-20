@@ -11,7 +11,7 @@
  * @file update-metadata.test.ts
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
     extractAllMetadata,
     aggregateMetadata,
@@ -81,6 +81,22 @@ describe('update-metadata', () => {
 
             expect(Array.isArray(metas)).toBe(true);
             expect(metas.length).toBe(0);
+        });
+
+        it('should return empty array and log warning on parse error', () => {
+            // A non-empty array that is not a valid Yjs update will cause Y.decodeUpdate to throw
+            const malformed = new Uint8Array([1, 2, 3]);
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+            const metas = extractAllMetadata(malformed);
+
+            expect(metas).toEqual([]);
+            expect(warnSpy).toHaveBeenCalledWith(
+                "Failed to parse update metadata:",
+                expect.any(Error)
+            );
+
+            warnSpy.mockRestore();
         });
 
         it('should correctly compute clock ranges for multiple operations', () => {

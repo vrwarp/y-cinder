@@ -199,12 +199,15 @@ export class FireProvider extends ObservableV2<any> {
 
     // P1.5 FIX: Setup debounced save with timer tracking
     this._debouncedSave = () => {
+      if (this._isDestroyed) return;
       if (this._debounceTimerId) {
         clearTimeout(this._debounceTimerId);
       }
       this._debounceTimerId = setTimeout(() => {
         this._debounceTimerId = null;
-        this.saveToFirestore();
+        if (!this._isDestroyed) {
+          this.saveToFirestore();
+        }
       }, this.maxWaitTime);
     };
 
@@ -347,7 +350,13 @@ export class FireProvider extends ObservableV2<any> {
     await destroyAllSubdocs(this.subProviders);
 
     // Flush pending updates
-    if (this.updateCache) {
+    // P1.5 FIX: Loop until all updates are flushed, including those
+    // that might arrive while a previous save is in progress.
+    while (this.updateCache || this._isSaving) {
+      if (this._isSaving) {
+        await new Promise(r => setTimeout(r, 10)); // Busy wait for active write
+        continue;
+      }
       await this.saveToFirestore();
     }
 

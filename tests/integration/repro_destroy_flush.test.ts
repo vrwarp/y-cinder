@@ -97,7 +97,7 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
         // Bug: If flush wasn't awaited, content may be empty or partial
         expect(content).toBe('ImportantData');
 
-        provider2.destroy();
+        await provider2.destroy();
     });
 
     it('should wait for flush even with many pending updates', async () => {
@@ -140,7 +140,7 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
 
         expect(actualContent).toBe(expectedContent);
 
-        provider2.destroy();
+        await provider2.destroy();
     });
 
     it('should handle destroy called during active write', async () => {
@@ -185,6 +185,6 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
         expect(content).toContain('Data1');
         expect(content).toContain('Data2');
 
-        provider2.destroy();
+        await provider2.destroy();
     });
 });

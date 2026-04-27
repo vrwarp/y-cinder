@@ -192,20 +192,29 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             if (updatesSnap.empty) {
                 hasMoreUpdates = false;
             } else {
-                for (const snap of updatesSnap.docs) {
+                // Download storage-backed updates concurrently (Optimization)
+                const updatePromises = updatesSnap.docs.map(async (snap) => {
                     const data = snap.data();
-                    if (data) {
-                        // Download storage-backed update if present
-                        if (data.updateStoragePath && !data.update) {
-                            try {
-                                const storageRef = ref(ctx.storage, data.updateStoragePath);
-                                const buffer = await getBytes(storageRef);
-                                data.update = Bytes.fromUint8Array(new Uint8Array(buffer));
-                            } catch (storageErr) {
-                                console.error(`Failed to download storage-backed update: ${data.updateStoragePath}`, storageErr);
-                                continue; // Skip this update — cannot apply without data
-                            }
+                    if (!data) return null;
+
+                    if (data.updateStoragePath && !data.update) {
+                        try {
+                            const storageRef = ref(ctx.storage, data.updateStoragePath);
+                            const buffer = await getBytes(storageRef);
+                            data.update = Bytes.fromUint8Array(new Uint8Array(buffer));
+                        } catch (storageErr) {
+                            console.error(`Failed to download storage-backed update: ${data.updateStoragePath}`, storageErr);
+                            return null; // Skip this update — cannot apply without data
                         }
+                    }
+                    return data;
+                });
+
+                const updatesData = await Promise.all(updatePromises);
+                if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
+
+                for (const data of updatesData) {
+                    if (data) {
                         processUpdateMetadata(data, serverSVMap);
                         pendingUpdates.push({ type: 'update', data, priority: 3 });
                     }

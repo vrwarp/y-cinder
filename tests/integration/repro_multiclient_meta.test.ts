@@ -8,15 +8,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
-import { initializeApp } from '@firebase/app';
 import {
-    getFirestore,
-    connectFirestoreEmulator,
     collection,
     addDoc,
     serverTimestamp,
     Bytes,
-    terminate
 } from '@firebase/firestore';
 import { waitForConditionTruthy } from '../utils/wait';
 import { seedFromString, getStableDate } from '../unit/prng';
@@ -42,14 +38,11 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
         const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
         app = a;
         db = d;
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
 
         path = `tests/${seed}`;
     });
 
     afterEach(async () => {
-        await terminate(db);
     });
 
     it('should sync updates that contain changes from multiple clients', async () => {

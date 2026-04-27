@@ -11,10 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
-import { initializeApp } from '@firebase/app';
 import {
-    getFirestore,
-    connectFirestoreEmulator,
     collection,
     doc,
     getDocs,
@@ -22,7 +19,6 @@ import {
     addDoc,
     serverTimestamp,
     Bytes,
-    terminate
 } from '@firebase/firestore';
 import { waitForConditionEquals } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
@@ -66,7 +62,6 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         if (provider) {
             provider.destroy();
         }
-        await terminate(db);
     });
 
     it('should correctly handle concurrent deletion of an update during compaction (No Zombie Updates)', async () => {

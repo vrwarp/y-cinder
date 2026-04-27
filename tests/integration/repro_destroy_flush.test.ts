@@ -9,13 +9,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { seedFromString, getStableDate } from '../unit/prng';
-import { initializeApp } from '@firebase/app';
 import {
-    getFirestore,
-    connectFirestoreEmulator,
     collection,
     getDocs,
-    terminate
 } from '@firebase/firestore';
 
 
@@ -36,13 +32,10 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
         const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
         app = a;
         db = d;
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
         path = `tests/${seed}`;
     });
 
     afterEach(async () => {
-        await terminate(db);
     });
 
     it('should flush pending updates before destroy completes', async () => {

@@ -8,10 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { seedFromString, getStableDate } from '../unit/prng';
-import { initializeApp } from '@firebase/app';
 import {
-    getFirestore,
-    connectFirestoreEmulator,
     collection,
     doc,
     getDocs,
@@ -20,7 +17,6 @@ import {
     setDoc,
     serverTimestamp,
     Bytes,
-    terminate
 } from '@firebase/firestore';
 
 const EMULATOR_HOST = '127.0.0.1';
@@ -40,13 +36,10 @@ describe('Issue 12: Partial Compaction Failure', () => {
         const { app: a, db: d } = await import("../utils/emulator").then(m => m.setupEmulator());
         app = a;
         db = d;
-        db = getFirestore(app);
-        connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_PORT);
         path = `tests/${seed}`;
     });
 
     afterEach(async () => {
-        await terminate(db);
     });
 
     it('should not duplicate data if transaction partially fails', { timeout: 30000 }, async () => {

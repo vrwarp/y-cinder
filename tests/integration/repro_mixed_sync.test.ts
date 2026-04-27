@@ -8,7 +8,7 @@
  * @file repro_mixed_sync.test.ts
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator } from '../utils/emulator';
@@ -16,7 +16,6 @@ import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Sync Reproduction (Non-Empty)', () => {
     let app: any;
-    let db: any;
 
     const createProvider = (doc: Y.Doc, path: string, config: any = {}) => {
         return new FireProvider({
@@ -30,7 +29,6 @@ describe('FireProvider Sync Reproduction (Non-Empty)', () => {
     beforeEach(async () => {
         const setup = await setupEmulator();
         app = setup.app;
-        db = setup.db;
     });
 
     let counter = 0;

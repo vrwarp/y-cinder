@@ -178,10 +178,19 @@ describe('utils', () => {
             const originalCrypto = g.crypto;
 
             try {
-                g.crypto = undefined;
+                // Use Object.defineProperty because g.crypto might be read-only (getter only)
+                Object.defineProperty(g, 'crypto', {
+                    value: undefined,
+                    configurable: true,
+                    writable: true
+                });
                 expect(() => generateSessionId()).toThrow('Secure crypto PRNG not available for session ID generation');
             } finally {
-                g.crypto = originalCrypto;
+                Object.defineProperty(g, 'crypto', {
+                    value: originalCrypto,
+                    configurable: true,
+                    writable: true
+                });
             }
         });
     });

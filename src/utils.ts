@@ -139,8 +139,8 @@ export function generateSessionId(): string {
         g.crypto.getRandomValues(array);
         return Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('') + Date.now().toString(36);
     }
-    // In environments without crypto, we fallback to Math.random but this should be rare
-    return Math.random().toString(36).substring(2) + Date.now().toString(36);
+    // In environments without crypto, throw error to avoid insecure IDs
+    throw new Error('Secure crypto PRNG not available for session ID generation');
 }
 
 /**

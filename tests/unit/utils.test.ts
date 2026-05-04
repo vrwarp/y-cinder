@@ -172,6 +172,18 @@ describe('utils', () => {
 
             expect(ids.size).toBe(100);
         });
+
+        it('should throw error if crypto is not available', () => {
+            const g = globalThis as any;
+            const originalCrypto = g.crypto;
+
+            try {
+                g.crypto = undefined;
+                expect(() => generateSessionId()).toThrow('Secure crypto PRNG not available for session ID generation');
+            } finally {
+                g.crypto = originalCrypto;
+            }
+        });
     });
 
     describe('calculateBackoff', () => {

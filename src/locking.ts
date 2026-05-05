@@ -85,10 +85,13 @@ export async function measureClockSkew(
         return 0;
     } catch (e) {
         // If we can't write/read, assume 0 skew (best effort)
+        console.warn("Failed to measure clock skew:", e);
         return 0;
     } finally {
         // P1.6 FIX: Always attempt cleanup to prevent orphaned docs
-        deleteDoc(ref).catch(() => { });
+        deleteDoc(ref).catch((e) => {
+            console.warn("Failed to clean up clock skew document:", e);
+        });
     }
 }
 
@@ -271,6 +274,7 @@ export async function checkLockStatus(config: LockConfig): Promise<{
             ageMs,
         };
     } catch (e) {
+        console.warn("Failed to check lock status:", e);
         return { exists: false };
     }
 }

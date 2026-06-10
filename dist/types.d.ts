@@ -112,22 +112,33 @@ export declare const DEFAULTS: {
     readonly MAX_RETRIES: 5;
     /** Maximum docs to fetch per batch during initial sync (P0.1 fix) */
     readonly SYNC_BATCH_SIZE: 100;
-    /** Maximum updates to track in real-time listener (P0.2 fix) */
+    /** Pending-update count that forces a compaction trigger, bypassing the trigger cooldown */
     readonly REALTIME_LIMIT: 200;
+    /** Minimum time between compaction triggers from a single client's listener */
+    readonly COMPACTION_TRIGGER_COOLDOWN_MS: 10000;
     /** Firestore maximum document size in bytes (1MB) */
     readonly FIRESTORE_DOC_LIMIT: 1048576;
+    /**
+     * Updates larger than this are offloaded to Cloud Storage instead of
+     * being inlined in a Firestore document. Leaves headroom below
+     * FIRESTORE_DOC_LIMIT for field names, metadata arrays, and overhead.
+     */
+    readonly INLINE_UPDATE_LIMIT: 1040384;
     /** Maximum consecutive save failures before emitting save-rejected */
     readonly MAX_SAVE_RETRIES: 5;
+    /**
+     * Caps on documents deleted per compaction transaction. Firestore
+     * transactions allow at most 500 writes; updates + history + 1 snapshot
+     * set must stay within that budget (400 + 99 + 1 = 500).
+     */
+    readonly MAX_COMPACTION_UPDATES: 400;
+    readonly MAX_COMPACTION_HISTORY: 99;
+    /**
+     * Maximum size of the delete-set fingerprint stored inline on the main
+     * document. Larger delete-sets are simply not stored (clients fall back
+     * to a redundant-but-idempotent push), keeping the main document well
+     * under the Firestore size limit.
+     */
+    readonly MAX_DELETE_SET_FIELD_BYTES: 700000;
 };
-declare module 'yjs' {
-    function decodeUpdate(update: Uint8Array): {
-        structs: Array<{
-            id: {
-                client: number;
-                clock: number;
-            };
-            length: number;
-        }>;
-    };
-}
 //# sourceMappingURL=types.d.ts.map

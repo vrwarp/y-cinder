@@ -20,7 +20,7 @@
  * - Applies new updates from other clients
  * - Skips our own updates (using createdBy)
  * - Skips redundant updates (using clientID/clockEnd metadata)
- * - Probabilistically triggers compaction when threshold exceeded
+ * - Triggers compaction when threshold exceeded (rate-limited per client)
  *
  * ## Priority Order
  *
@@ -46,7 +46,7 @@ import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import { FIREBASE_ORIGINS, FIRESTORE_PATHS, DEFAULTS, } from "./types";
 import { writeStateVector } from "./utils";
-import { extractAllMetadata, aggregateMetadata, isUpdateRedundant } from "./update-metadata";
+import { extractAllMetadata, aggregateMetadata, isUpdateRedundant, diffCarriesNewData } from "./update-metadata";
 /**
  * Performs the initial sync operation.
  *
@@ -179,20 +179,32 @@ export function performInitialSync(ctx) {
                 const data = mainSnap.data();
                 if (data) {
                     processSnapshotMetadata(data, serverSVMap);
+                    // The delete-set fingerprint written by compaction is a tiny
+                    // structs-empty update. Treating it as a regular update both
+                    // proves delete-set coverage to the push guard below and
+                    // applies any deletions the local doc may have missed.
+                    if (data.deleteSet) {
+                        pendingUpdates.push({ type: 'update', data: { update: data.deleteSet }, priority: 2 });
+                    }
                     // Fetch snapshot from Cloud Storage if available
                     if (data.snapshotStoragePath) {
-                        try {
-                            const storageRef = ref(ctx.storage, data.snapshotStoragePath);
-                            const buffer = yield getBytes(storageRef);
-                            // Convert ArrayBuffer to Uint8Array and inject it into data.content
-                            data.content = Bytes.fromUint8Array(new Uint8Array(buffer));
-                            pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
-                        }
-                        catch (storageErr) {
-                            console.error("Failed to download snapshot from Cloud Storage", storageErr);
-                            // Cannot safely sync without the base snapshot — propagate so
-                            // the sync retry logic in provider.ts handles backoff/retry.
-                            throw storageErr;
+                        // Skip the (potentially large) blob download when the
+                        // local doc already covers the snapshot's state vector —
+                        // typical for reconnecting clients.
+                        if (!localCoversSnapshot(data, ydoc)) {
+                            try {
+                                const storageRef = ref(ctx.storage, data.snapshotStoragePath);
+                                const buffer = yield getBytes(storageRef);
+                                // Convert ArrayBuffer to Uint8Array and inject it into data.content
+                                data.content = Bytes.fromUint8Array(new Uint8Array(buffer));
+                                pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
+                            }
+                            catch (storageErr) {
+                                console.error("Failed to download snapshot from Cloud Storage", storageErr);
+                                // Cannot safely sync without the base snapshot — propagate so
+                                // the sync retry logic in provider.ts handles backoff/retry.
+                                throw storageErr;
+                            }
                         }
                     }
                     else if (data.stateVector || data.content) {
@@ -212,10 +224,16 @@ export function performInitialSync(ctx) {
                     const applied = applyItem(item, ydoc);
                     if (applied) {
                         updatesApplied++;
-                        // P0.4 FIX: Refresh localSVMap after applying snapshot or history
+                        // Incremental update of localSVMap instead of expensive re-encode/decode (P3.0 Optimization)
                         // This prevents redundant processing of history/updates already in snapshot/previous segments
-                        if (item.type === 'snapshot' || item.type === 'history') {
-                            localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+                        if (item.type === 'snapshot') {
+                            processSnapshotMetadata(item.data, localSVMap);
+                        }
+                        else if (item.type === 'history') {
+                            processHistoryMetadata(item.data, localSVMap);
+                        }
+                        else if (item.type === 'update') {
+                            processUpdateMetadata(item.data, localSVMap);
                         }
                     }
                 }
@@ -224,10 +242,16 @@ export function performInitialSync(ctx) {
             const serverSV = writeStateVector(serverSVMap);
             const localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
             let localUpdatesPushed = false;
-            if (localDiff.byteLength > 2) {
+            // Yjs embeds the full delete-set in every diff, so a fully-synced doc
+            // with deletion history still yields a non-empty diff. Only push when
+            // the diff carries structs or deletions the server is missing —
+            // otherwise every reconnect writes a spurious update document.
+            const shouldPush = localDiff.byteLength > 2 &&
+                diffCarriesNewData(localDiff, () => collectServerBlobs(pendingUpdates));
+            if (shouldPush) {
                 console.log("Pushing missing local updates to Firestore.");
                 const metas = extractAllMetadata(localDiff);
-                if (localDiff.byteLength > DEFAULTS.FIRESTORE_DOC_LIMIT) {
+                if (localDiff.byteLength > DEFAULTS.INLINE_UPDATE_LIMIT) {
                     // Storage-backed update: upload binary to Cloud Storage
                     const storagePath = `${path}/large_updates/${uid}_${Date.now()}.bin`;
                     const storageRef = ref(ctx.storage, storagePath);
@@ -290,15 +314,21 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
         // or there was nothing. If there was nothing, we want everything new.
         liveUpdatesQ = query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'));
     }
+    // Cache local state vector for redundancy checks (P3.0 Optimization)
+    let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+    // Rate-limit compaction triggers: above the threshold, every snapshot
+    // delivery on every client would otherwise fire a (mostly futile) lock
+    // transaction. The first trigger fires immediately; subsequent triggers
+    // are suppressed for a cooldown window unless the hard cap is reached.
+    let lastCompactionTrigger = 0;
     return onSnapshot(liveUpdatesQ, (snapshot) => {
-        // Check for compaction trigger based on actual size
-        // Note: snapshot.size may be capped by limitToLast, so we check docChanges for additions
-        if (snapshot.size >= DEFAULTS.REALTIME_LIMIT && onCompactionNeeded) {
-            // At capacity - definitely need compaction
-            onCompactionNeeded();
-        }
-        else if (snapshot.size > maxUpdatesThreshold && onCompactionNeeded) {
-            onCompactionNeeded();
+        if (onCompactionNeeded && snapshot.size > maxUpdatesThreshold) {
+            const now = Date.now();
+            const atHardCap = snapshot.size >= DEFAULTS.REALTIME_LIMIT;
+            if (atHardCap || now - lastCompactionTrigger >= DEFAULTS.COMPACTION_TRIGGER_COOLDOWN_MS) {
+                lastCompactionTrigger = now;
+                onCompactionNeeded();
+            }
         }
         snapshot.docChanges().forEach((change) => {
             var _a, _b, _c, _d, _e;
@@ -306,13 +336,13 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
                 const data = change.doc.data();
                 // Skip our own updates
                 if (data.createdBy === uid) {
+                    // Update our cache even for our own updates so subsequent checks are accurate
+                    processUpdateMetadata(data, localSVMap);
                     return;
                 }
                 // Check if we already have this update
                 if (((_a = data.clientIDs) === null || _a === void 0 ? void 0 : _a.length) > 0 && ((_b = data.clientClocks) === null || _b === void 0 ? void 0 : _b.length) > 0) {
-                    const freshSV = Y.encodeStateVector(ydoc);
-                    const freshMap = Y.decodeStateVector(freshSV);
-                    if (isUpdateRedundant(freshMap, data.clientIDs, data.clientClocks)) {
+                    if (isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks)) {
                         return; // Skip - we have all the data
                     }
                 }
@@ -328,8 +358,13 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
                         try {
                             const storageRef = ref(ctx.storage, data.updateStoragePath);
                             const buffer = yield getBytes(storageRef);
+                            // Provider may have been destroyed while downloading
+                            if (isDestroyed())
+                                return;
                             const update = new Uint8Array(buffer);
                             Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
+                            // Incremental update of cached state vector (P3.0 Optimization)
+                            processUpdateMetadata(data, localSVMap);
                         }
                         catch (e) {
                             console.error(`Failed to apply storage-backed update ${docId} (quarantined)`, e);
@@ -343,6 +378,8 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
                     try {
                         const update = data.update.toUint8Array();
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
+                        // Incremental update of cached state vector (P3.0 Optimization)
+                        processUpdateMetadata(data, localSVMap);
                     }
                     catch (e) {
                         console.error(`Failed to apply update ${docId} (quarantined)`, e);
@@ -365,9 +402,15 @@ export function createUpdateListener(ctx, startAfterDoc = null) {
  *
  * Ensures that if compaction replaces updates with a snapshot, this client
  * receives the new reference state.
+ *
+ * Before downloading the (potentially large) snapshot blob, the listener
+ * compares the snapshot's stored state vector against the local document.
+ * Snapshots produced by compacting data we already hold are skipped,
+ * avoiding a full-document download per compaction per client (and a
+ * duplicate download right after initial sync).
  */
 export function createSnapshotListener(ctx) {
-    const { db, path, doc: ydoc, onListenerError, storage } = ctx;
+    const { db, path, doc: ydoc, isDestroyed, onListenerError, storage } = ctx;
     // Track the last quarantined snapshot path so we can clear quarantine
     // when compaction produces a new snapshot at a different path.
     let lastQuarantinedPath = null;
@@ -376,8 +419,28 @@ export function createSnapshotListener(ctx) {
         if (!snapshot.exists())
             return;
         const data = snapshot.data();
+        if (!data)
+            return;
+        // Skip snapshots produced by our own compaction
+        if (data.origin === ctx.uid)
+            return;
+        // Redundancy check: if the local doc already covers the snapshot's
+        // state vector, downloading it would be a no-op. The delete-set
+        // fingerprint (tiny, inline) is still applied first to pick up any
+        // deletions that travelled in structs we already cover.
+        if (data.deleteSet) {
+            try {
+                Y.applyUpdate(ydoc, data.deleteSet.toUint8Array(), FIREBASE_ORIGINS.SNAPSHOT);
+            }
+            catch (e) {
+                console.warn("Failed to apply snapshot delete-set fingerprint", e);
+            }
+        }
+        if (localCoversSnapshot(data, ydoc)) {
+            return;
+        }
         // Handle Cloud Storage Snapshot
-        if ((data === null || data === void 0 ? void 0 : data.snapshotStoragePath) && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
+        if (data.snapshotStoragePath) {
             const snapshotKey = `snapshot:${data.snapshotStoragePath}`;
             // Clear quarantine if snapshot path changed (new compaction)
             if (lastQuarantinedPath && lastQuarantinedPath !== snapshotKey) {
@@ -391,6 +454,9 @@ export function createSnapshotListener(ctx) {
             try {
                 const storageRef = ref(storage, data.snapshotStoragePath);
                 const buffer = yield getBytes(storageRef);
+                // Provider may have been destroyed while downloading
+                if (isDestroyed())
+                    return;
                 const content = new Uint8Array(buffer);
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
             }
@@ -402,7 +468,7 @@ export function createSnapshotListener(ctx) {
             }
         }
         // Handle Firestore Document Snapshot (legacy/small documents)
-        else if ((data === null || data === void 0 ? void 0 : data.content) && (data.origin !== undefined ? data.origin !== ctx.uid : true)) {
+        else if (data.content) {
             const snapshotKey = 'snapshot:inline';
             if ((_e = ctx.corruptedDocIds) === null || _e === void 0 ? void 0 : _e.has(snapshotKey)) {
                 return;
@@ -443,6 +509,8 @@ export function createHistoryListener(ctx, startAfterDoc) {
         // Redundant segments will be filtered out by isItemRedundant() in the callback.
         q = query(collection(db, path, FIRESTORE_PATHS.HISTORY), orderBy('startTime', 'asc'));
     }
+    // Cache local state vector for redundancy checks (P3.0 Optimization)
+    let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
     return onSnapshot(q, (snapshot) => {
         snapshot.docChanges().forEach((change) => {
             var _a, _b, _c;
@@ -456,7 +524,6 @@ export function createHistoryListener(ctx, startAfterDoc) {
                 if (data && data.segment) {
                     try {
                         // Check redundancy using local state vector
-                        const localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
                         const item = {
                             type: 'history',
                             data: data,
@@ -465,6 +532,8 @@ export function createHistoryListener(ctx, startAfterDoc) {
                         if (!isItemRedundant(item, localSVMap)) {
                             // Apply it
                             Y.applyUpdate(ydoc, data.segment.toUint8Array(), FIREBASE_ORIGINS.HISTORY);
+                            // Incremental update of cached state vector (P3.0 Optimization)
+                            processHistoryMetadata(data, localSVMap);
                         }
                     }
                     catch (err) {
@@ -482,6 +551,71 @@ export function createHistoryListener(ctx, startAfterDoc) {
     });
 }
 // --- Helper Functions ---
+/**
+ * Extracts the raw binary blobs from all fetched server items.
+ * Used for delete-set coverage checks before pushing a local diff.
+ *
+ * Items without an inline blob (e.g., a legacy main document carrying only
+ * a stateVector) are skipped — missing coverage can only cause a redundant
+ * (idempotent) push, never data loss.
+ *
+ * @param items - Pending updates collected during initial sync
+ * @returns Array of update/segment/content blobs
+ */
+function collectServerBlobs(items) {
+    const blobs = [];
+    for (const item of items) {
+        const raw = item.type === 'snapshot' ? item.data.content
+            : item.type === 'history' ? item.data.segment
+                : item.data.update;
+        if (raw) {
+            blobs.push(raw.toUint8Array());
+        }
+    }
+    return blobs;
+}
+/**
+ * Ensures that the document data has a decoded state vector map cached.
+ * P3.1 OPTIMIZATION: Cache decoded state vector to avoid repeated parsing.
+ *
+ * @param data - Firestore document data containing stateVector
+ * @returns The decoded state vector map
+ */
+function ensureDecodedSV(data) {
+    if (!data._decodedSV) {
+        const vector = fromBase64(data.stateVector);
+        data._decodedSV = Y.decodeStateVector(vector);
+    }
+    return data._decodedSV;
+}
+/**
+ * Checks whether the local document already covers a snapshot's state
+ * vector, i.e. downloading/applying the snapshot blob would be a no-op.
+ *
+ * Returns false when the stateVector is missing or malformed, so callers
+ * fall back to fetching and applying the content (the safe direction).
+ *
+ * @param data - Main document data containing a stateVector field
+ * @param ydoc - Local Yjs document
+ */
+function localCoversSnapshot(data, ydoc) {
+    if (!data.stateVector)
+        return false;
+    try {
+        const remoteSV = ensureDecodedSV(data);
+        const localSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+        for (const [client, clock] of remoteSV) {
+            if ((localSV.get(client) || 0) < clock) {
+                return false;
+            }
+        }
+        return true;
+    }
+    catch (e) {
+        console.warn("Failed to decode snapshot stateVector", e);
+        return false;
+    }
+}
 /**
  * Extracts and aggregates clock values from an update document into the server state vector.
  * Tries stored metadata first, falls back to parsing the update blob.
@@ -525,8 +659,7 @@ function processUpdateMetadata(data, serverSVMap) {
  */
 function processHistoryMetadata(data, serverSVMap) {
     if (data.stateVector) {
-        const vector = fromBase64(data.stateVector);
-        const map = Y.decodeStateVector(vector);
+        const map = ensureDecodedSV(data);
         for (const [client, clock] of map.entries()) {
             const current = serverSVMap.get(client) || 0;
             if (clock > current) {
@@ -559,8 +692,7 @@ function processHistoryMetadata(data, serverSVMap) {
  */
 function processSnapshotMetadata(data, serverSVMap) {
     if (data.stateVector) {
-        const vector = fromBase64(data.stateVector);
-        const map = Y.decodeStateVector(vector);
+        const map = ensureDecodedSV(data);
         for (const [client, clock] of map.entries()) {
             const current = serverSVMap.get(client) || 0;
             if (clock > current) {
@@ -582,8 +714,7 @@ function processSnapshotMetadata(data, serverSVMap) {
 function isItemRedundant(item, localSVMap) {
     var _a, _b;
     if (item.type === 'snapshot' && item.data.stateVector) {
-        const sv = fromBase64(item.data.stateVector);
-        const map = Y.decodeStateVector(sv);
+        const map = ensureDecodedSV(item.data);
         for (const [client, clock] of map) {
             const localClock = localSVMap.get(client) || 0;
             if (clock > localClock)
@@ -594,8 +725,7 @@ function isItemRedundant(item, localSVMap) {
     // P1.3 FIX: Handle history segments with stateVector
     if (item.type === 'history' && item.data.stateVector) {
         try {
-            const sv = fromBase64(item.data.stateVector);
-            const map = Y.decodeStateVector(sv);
+            const map = ensureDecodedSV(item.data);
             for (const [client, clock] of map) {
                 const localClock = localSVMap.get(client) || 0;
                 if (clock > localClock)

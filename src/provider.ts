@@ -24,7 +24,7 @@ import {
   Bytes,
   serverTimestamp,
 } from "@firebase/firestore";
-import { getStorage, FirebaseStorage } from "@firebase/storage";
+import { getStorage, FirebaseStorage, ref, uploadBytes } from "@firebase/storage";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
 
@@ -35,7 +35,7 @@ import {
   FIREBASE_ORIGINS,
   FIRESTORE_PATHS,
 } from "./types";
-import { debounce, generateSessionId, calculateBackoff } from "./utils";
+import { generateSessionId, calculateBackoff } from "./utils";
 import { extractAllMetadata, aggregateMetadata } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext } from "./sync";
 import { compact as performTieredCompaction, CompactionContext } from "./compaction";
@@ -95,8 +95,12 @@ export class FireProvider extends ObservableV2<any> {
   /** Whether compaction is currently in progress */
   private _isCompacting: boolean = false;
 
-  /** Pending update cache for debouncing */
-  private updateCache: Uint8Array | null = null;
+  /**
+   * Buffered local updates awaiting the debounced save.
+   * Kept as an array and merged once at save time — merging on every
+   * update event would be quadratic across editing bursts.
+   */
+  private _pendingUpdates: Uint8Array[] = [];
 
   // Configuration
   private readonly maxUpdatesThreshold: number;
@@ -104,6 +108,7 @@ export class FireProvider extends ObservableV2<any> {
   private readonly compactionLimit: number;
   private readonly depth: number;
   private readonly lockTTL: number;
+  private readonly persistence?: FireProviderConfig['persistence'];
   private readonly _testHooks?: FireProviderConfig['testHooks'];
 
   // State
@@ -113,12 +118,17 @@ export class FireProvider extends ObservableV2<any> {
   private _unsubscribeHistory: Unsubscribe | null = null;
   private _lastHistoryDoc: QueryDocumentSnapshot | null = null;
 
-  private _debouncedSave: () => void;
   private _isDestroyed = false;
+  /** Whether initial sync has completed and listeners are attached */
+  private _synced = false;
   /** P0.3 FIX: Cached clock offset to avoid measuring on every lock attempt */
   private _cachedClockOffset: number | undefined = undefined;
-  /** P0.5 FIX: Flag to prevent race condition during save */
-  private _isSaving = false;
+  /**
+   * P0.5 FIX: The in-flight save operation, if any. Prevents concurrent
+   * saves, and lets destroy() wait it out so a final flush is never
+   * silently skipped while a save is mid-flight.
+   */
+  private _inflightSave: Promise<void> | null = null;
   /** Consecutive save failure counter for circuit breaker */
   private _saveRetryCount = 0;
   /** P1.4 FIX: Sync retry counter for exponential backoff */
@@ -198,21 +208,8 @@ export class FireProvider extends ObservableV2<any> {
     this.maxWaitTime = maxWaitTime;
     this.lockTTL = lockTTL;
     this.compactionLimit = compactionLimit;
+    this.persistence = config.persistence;
     this._testHooks = testHooks;
-
-    // P1.5 FIX: Setup debounced save with timer tracking
-    this._debouncedSave = () => {
-      if (this._isDestroyed) return;
-      if (this._debounceTimerId) {
-        clearTimeout(this._debounceTimerId);
-      }
-      this._debounceTimerId = setTimeout(() => {
-        this._debounceTimerId = null;
-        if (!this._isDestroyed) {
-          this.saveToFirestore();
-        }
-      }, this.maxWaitTime);
-    };
 
     // Attach document event handlers
     this.doc.on('update', this.handleUpdate);
@@ -240,6 +237,14 @@ export class FireProvider extends ObservableV2<any> {
    */
   get isCompacting(): boolean {
     return this._isCompacting;
+  }
+
+  /**
+   * Whether initial sync has completed and real-time listeners are active.
+   * Also emitted as a 'synced' event when the state becomes true.
+   */
+  get synced(): boolean {
+    return this._synced;
   }
 
   /**
@@ -357,8 +362,22 @@ export class FireProvider extends ObservableV2<any> {
     // Destroy all subdocument providers
     await destroyAllSubdocs(this.subProviders);
 
-    // Flush pending updates
-    if (this.updateCache) {
+    // Wait out any in-flight save: updates that arrived while it was
+    // running are sitting in _pendingUpdates and would otherwise be
+    // silently dropped (the in-flight save won't reschedule once
+    // _isDestroyed is set, and saveToFirestore() would have returned
+    // the in-flight promise instead of flushing).
+    if (this._inflightSave) {
+      try {
+        await this._inflightSave;
+      } catch (err) {
+        // Failure already logged and handled inside the save
+      }
+    }
+
+    // Flush pending updates (single best-effort attempt; retries are
+    // suppressed after destroy)
+    if (this._pendingUpdates.length > 0) {
       await this.saveToFirestore();
     }
 
@@ -412,6 +431,14 @@ export class FireProvider extends ObservableV2<any> {
       const result = await performInitialSync(syncCtx);
       if (this._isDestroyed) return;
 
+      // performInitialSync reports failures via its result rather than
+      // throwing — route them into the retry/backoff path below, otherwise
+      // a failed sync would be silently treated as success (no retry, no
+      // sync-failure event, local changes never pushed).
+      if (!result.success) {
+        throw result.error ?? new Error("Initial sync failed");
+      }
+
       // Reset retry count on successful sync
       this._syncRetryCount = 0;
 
@@ -432,6 +459,10 @@ export class FireProvider extends ObservableV2<any> {
       // Store history listener separately so it can be paused during compaction
       this._lastHistoryDoc = result.lastHistoryDoc;
       this._unsubscribeHistory = createHistoryListener(syncCtx, result.lastHistoryDoc);
+
+      // Initial sync complete and listeners attached
+      this._synced = true;
+      this.emit('synced', [true]);
 
     } catch (err) {
       console.error("Sync failed", err);
@@ -473,13 +504,11 @@ export class FireProvider extends ObservableV2<any> {
       return;
     }
 
-    // Merge into cache
-    this.updateCache = this.updateCache
-      ? Y.mergeUpdates([this.updateCache, update])
-      : update;
+    // Buffer the update; merging happens once at save time
+    this._pendingUpdates.push(update);
 
     // Trigger debounced write
-    this._debouncedSave();
+    this._scheduleSave();
   };
 
   /**
@@ -494,6 +523,7 @@ export class FireProvider extends ObservableV2<any> {
       maxWaitTime: this.maxWaitTime,
       lockTTL: this.lockTTL,
       compactionLimit: this.compactionLimit,
+      persistence: this.persistence,
       createProvider: (config) => new FireProvider(config),
       onConnectionError: (error) => {
         this.emit('connection-error', [error]);
@@ -516,7 +546,7 @@ export class FireProvider extends ObservableV2<any> {
    * - This is BEST EFFORT - not guaranteed delivery
    */
   private handleBeforeUnload = (): void => {
-    if (!this.updateCache || this._isDestroyed) return;
+    if (this._pendingUpdates.length === 0 || this._isDestroyed) return;
 
     // Cancel any pending debounce - we're saving now
     if (this._debounceTimerId) {
@@ -524,16 +554,14 @@ export class FireProvider extends ObservableV2<any> {
       this._debounceTimerId = null;
     }
 
-    // Attempt synchronous save via sendBeacon
-    // Note: Firestore SDK doesn't support sendBeacon, so we send to a minimal endpoint
-    // that Firestore rules can process. In practice, you'd need a Cloud Function endpoint.
-    // 
-    // For now, we trigger saveToFirestore() which starts the async operation.
-    // The browser may or may not complete it depending on timing.
-    // This is still better than not trying at all.
+    // Start the save operation - browser gives us a small window.
+    // If a save is already in flight, chain a follow-up flush for the
+    // updates that arrived during it.
+    const flush = this._inflightSave
+      ? this._inflightSave.then(() => this.saveToFirestore())
+      : this.saveToFirestore();
 
-    // Start the save operation - browser gives us a small window
-    this.saveToFirestore().catch(err => {
+    flush.catch(err => {
       console.warn('Best-effort save on unload failed:', err);
     });
 
@@ -542,63 +570,94 @@ export class FireProvider extends ObservableV2<any> {
   };
 
   /**
-   * Saves the cached update to Firestore.
-   * P0.5 FIX: Uses _isSaving flag to prevent race condition where
-   * updates arriving during save could be duplicated or lost.
-   * 
-   * Circuit breaker: Detects oversized documents and generic persistent
-   * failures. Emits 'save-rejected' event instead of retrying forever.
+   * Schedules a save after a delay, resetting any pending timer.
+   * P1.5 FIX: Timer is tracked for cancellation on destroy.
+   *
+   * @param delayMs - Delay before saving. Defaults to the debounce window;
+   *                  failure retries pass an exponential backoff delay.
    */
-  private async saveToFirestore(): Promise<void> {
-    if (!this.updateCache || this._isSaving) return;
-
-    this._isSaving = true;
-
-    // Take the current cache for this save operation
-    const update = this.updateCache;
-    this.updateCache = null;
-
-    // Proactive size check: reject before even attempting the write
-    if (update.byteLength > DEFAULTS.FIRESTORE_DOC_LIMIT) {
-      this._isSaving = false;
-      console.error(
-        `Update rejected: ${update.byteLength} bytes exceeds Firestore limit of ${DEFAULTS.FIRESTORE_DOC_LIMIT} bytes`
-      );
-      this.emit('save-rejected', [{
-        code: 'document-too-large' as const,
-        sizeBytes: update.byteLength,
-        limitBytes: DEFAULTS.FIRESTORE_DOC_LIMIT,
-        error: new Error(
-          `Update size (${update.byteLength} bytes) exceeds Firestore document limit (${DEFAULTS.FIRESTORE_DOC_LIMIT} bytes)`
-        ),
-        update,
-      }]);
-      return;
+  private _scheduleSave(delayMs: number = this.maxWaitTime): void {
+    if (this._isDestroyed) return;
+    if (this._debounceTimerId) {
+      clearTimeout(this._debounceTimerId);
     }
+    this._debounceTimerId = setTimeout(() => {
+      this._debounceTimerId = null;
+      if (!this._isDestroyed) {
+        this.saveToFirestore();
+      }
+    }, delayMs);
+  }
+
+  /**
+   * Saves buffered updates to Firestore.
+   *
+   * P0.5 FIX: Only one save runs at a time; while one is in flight this
+   * returns the in-flight promise. Updates arriving during a save stay
+   * buffered and are flushed by a follow-up save.
+   *
+   * Updates too large to inline are offloaded to Cloud Storage with a
+   * lightweight pointer document (same mechanism as oversized initial-sync
+   * diffs) instead of being rejected.
+   *
+   * Circuit breaker: persistent failures retry with exponential backoff,
+   * then emit 'save-rejected' after MAX_SAVE_RETRIES attempts.
+   */
+  private saveToFirestore(): Promise<void> {
+    if (this._inflightSave) return this._inflightSave;
+    if (this._pendingUpdates.length === 0) return Promise.resolve();
+
+    this._inflightSave = this._executeSave().finally(() => {
+      this._inflightSave = null;
+    });
+    return this._inflightSave;
+  }
+
+  private async _executeSave(): Promise<void> {
+    // Take the buffered updates for this save operation
+    const batch = this._pendingUpdates;
+    this._pendingUpdates = [];
+    const update = batch.length === 1 ? batch[0] : Y.mergeUpdates(batch);
 
     const metas = extractAllMetadata(update);
-    const docData: any = {
-      update: Bytes.fromUint8Array(update),
+    const baseData: Record<string, any> = {
       createdAt: serverTimestamp(),
       createdBy: this.uid,
       ...aggregateMetadata(metas),
-    } as Record<string, any>;
+    };
 
     try {
-      await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), docData);
+      if (update.byteLength > DEFAULTS.INLINE_UPDATE_LIMIT) {
+        // Storage-backed update: upload binary to Cloud Storage and write
+        // a lightweight pointer document to the updates collection
+        const storagePath = `${this.path}/large_updates/${this.uid}_${Date.now()}.bin`;
+        await uploadBytes(ref(this.storage, storagePath), update);
+        await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), {
+          ...baseData,
+          updateStoragePath: storagePath,
+        });
+        console.log(`Oversized update (${update.byteLength} bytes) offloaded to Cloud Storage: ${storagePath}`);
+      } else {
+        await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), {
+          ...baseData,
+          update: Bytes.fromUint8Array(update),
+        });
+      }
 
       // Reset retry counter on success
       this._saveRetryCount = 0;
 
       // P0.5 FIX: Check if new updates arrived during save
       // If so, schedule another save
-      if (this.updateCache && !this._isDestroyed) {
-        this._debouncedSave();
+      if (this._pendingUpdates.length > 0 && !this._isDestroyed) {
+        this._scheduleSave();
       }
     } catch (err: any) {
       console.error("Failed to save update to Firestore", err);
 
-      // Detect Firestore size-limit error (server-side rejection)
+      // Detect Firestore size-limit error (server-side rejection of an
+      // inline write; rare now that oversized updates are offloaded with
+      // headroom below the limit)
       const isDocTooLarge =
         err?.code === 'invalid-argument' ||
         err?.message?.includes('exceeds the maximum') ||
@@ -613,8 +672,8 @@ export class FireProvider extends ObservableV2<any> {
           error: err instanceof Error ? err : new Error(String(err)),
           update,
         }]);
-        if (this.updateCache) {
-          this._debouncedSave();
+        if (this._pendingUpdates.length > 0) {
+          this._scheduleSave();
         }
         return;
       }
@@ -633,26 +692,20 @@ export class FireProvider extends ObservableV2<any> {
           update,
         }]);
         this._saveRetryCount = 0;
-        if (this.updateCache) {
-          this._debouncedSave();
+        if (this._pendingUpdates.length > 0) {
+          this._scheduleSave();
         }
         return;
       }
 
-      // Recovery: Merge back the update we failed to save
-      // with any new updates that arrived during the attempt
-      if (this.updateCache) {
-        this.updateCache = Y.mergeUpdates([update, this.updateCache]);
-      } else {
-        this.updateCache = update;
-      }
+      // Recovery: put the failed batch back ahead of any updates
+      // that arrived during the attempt
+      this._pendingUpdates.unshift(update);
 
-      // Retry
+      // Retry with exponential backoff
       if (!this._isDestroyed) {
-        this._debouncedSave();
+        this._scheduleSave(calculateBackoff(this._saveRetryCount));
       }
-    } finally {
-      this._isSaving = false;
     }
   }
 }

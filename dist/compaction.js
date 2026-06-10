@@ -42,7 +42,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-import { doc, collection, runTransaction, query, orderBy, getDocs, getDoc, serverTimestamp, limit, } from "@firebase/firestore";
+import { doc, collection, Bytes, runTransaction, query, orderBy, getDocs, getDoc, serverTimestamp, deleteField, limit, } from "@firebase/firestore";
 import { ref, uploadBytes, deleteObject, getBytes } from "@firebase/storage";
 import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
@@ -85,11 +85,13 @@ export function compact(ctx, attempt = 1) {
             return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
         }
         try {
-            console.log(`Starting compaction (attempt ${attempt})...`);
-            // Fetch work items
-            const updatesQ = query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'), limit(compactionLimit));
+            // Fetch work items.
+            // Limits are clamped so deletes (updates + history) plus the snapshot
+            // write stay within Firestore's 500-op transaction budget. Anything
+            // left over is picked up by the next compaction cycle.
+            const updatesQ = query(collection(db, path, FIRESTORE_PATHS.UPDATES), orderBy('createdAt', 'asc'), limit(Math.min(compactionLimit, DEFAULTS.MAX_COMPACTION_UPDATES)));
             const updatesSnap = yield getDocs(updatesQ);
-            const historyQ = query(collection(db, path, FIRESTORE_PATHS.HISTORY), orderBy('startTime', 'asc'));
+            const historyQ = query(collection(db, path, FIRESTORE_PATHS.HISTORY), orderBy('startTime', 'asc'), limit(DEFAULTS.MAX_COMPACTION_HISTORY));
             const historySnaps = yield getDocs(historyQ);
             if (updatesSnap.empty && historySnaps.empty) {
                 return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
@@ -127,50 +129,50 @@ export function compact(ctx, attempt = 1) {
                     currentVersion = data.version;
                 }
             }
-            // Read updates
-            const updatesToProcess = [];
-            for (const uDoc of updateDocs) {
-                const freshSnap = yield getDoc(uDoc.ref);
-                if (freshSnap.exists()) {
-                    const data = freshSnap.data();
-                    if ((data === null || data === void 0 ? void 0 : data.updateStoragePath) && !(data === null || data === void 0 ? void 0 : data.update)) {
-                        try {
-                            const storageRef = ref(storage, data.updateStoragePath);
-                            const buffer = yield getBytes(storageRef);
-                            updatesToProcess.push({
-                                ref: uDoc.ref,
-                                data: new Uint8Array(buffer),
-                                createdAt: data.createdAt,
-                            });
-                        }
-                        catch (e) {
-                            console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
-                            // Skip this update - do not process or delete it, but continue compacting the rest
-                        }
-                    }
-                    else if (data === null || data === void 0 ? void 0 : data.update) {
-                        updatesToProcess.push({
+            // Use the data already returned by the queries above. Update and
+            // history documents are immutable (only ever created or deleted),
+            // and the transaction below re-verifies existence before deleting,
+            // so re-fetching each document individually would only double the
+            // read cost. Storage-backed payloads are downloaded in parallel.
+            const updateResults = yield Promise.all(updateDocs.map((uDoc) => __awaiter(this, void 0, void 0, function* () {
+                const data = uDoc.data();
+                if ((data === null || data === void 0 ? void 0 : data.updateStoragePath) && !(data === null || data === void 0 ? void 0 : data.update)) {
+                    try {
+                        const storageRef = ref(storage, data.updateStoragePath);
+                        const buffer = yield getBytes(storageRef);
+                        return {
                             ref: uDoc.ref,
-                            data: data.update.toUint8Array(),
+                            data: new Uint8Array(buffer),
                             createdAt: data.createdAt,
-                        });
+                        };
+                    }
+                    catch (e) {
+                        console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
+                        return null;
                     }
                 }
-            }
-            // Read history
-            const historyToMerge = [];
-            for (const hDoc of historyDocs) {
-                const freshSnap = yield getDoc(hDoc.ref);
-                if (freshSnap.exists()) {
-                    const data = freshSnap.data();
-                    if (data === null || data === void 0 ? void 0 : data.segment) {
-                        historyToMerge.push({
-                            ref: hDoc.ref,
-                            val: data.segment.toUint8Array(),
-                        });
-                    }
+                else if (data === null || data === void 0 ? void 0 : data.update) {
+                    return {
+                        ref: uDoc.ref,
+                        data: data.update.toUint8Array(),
+                        createdAt: data.createdAt,
+                    };
                 }
-            }
+                return null;
+            })));
+            const updatesToProcess = updateResults.filter((u) => u !== null);
+            const historyToMerge = historyDocs
+                .map((hDoc) => {
+                const data = hDoc.data();
+                if (data === null || data === void 0 ? void 0 : data.segment) {
+                    return {
+                        ref: hDoc.ref,
+                        val: data.segment.toUint8Array(),
+                    };
+                }
+                return null;
+            })
+                .filter((h) => h !== null);
             if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
                 return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
             }
@@ -184,6 +186,21 @@ export function compact(ctx, attempt = 1) {
             }
             catch (decodeErr) {
                 throw new Error(`Compaction candidate failed validation (${candidate.byteLength} bytes): ${decodeErr}`);
+            }
+            // Extract a structs-empty update carrying the candidate's full
+            // delete-set. Stored inline on the main document, it lets clients
+            // that already cover the snapshot's state vector skip downloading
+            // the blob while still proving their deletions are on the server.
+            let deleteSetUpdate = null;
+            try {
+                const candidateSV = Y.encodeStateVectorFromUpdate(candidate);
+                const dsUpdate = Y.diffUpdate(candidate, candidateSV);
+                if (dsUpdate.byteLength <= DEFAULTS.MAX_DELETE_SET_FIELD_BYTES) {
+                    deleteSetUpdate = dsUpdate;
+                }
+            }
+            catch (e) {
+                console.warn("Failed to extract delete-set fingerprint (optional optimization)", e);
             }
             const nextVersion = currentVersion + 1;
             const snapshotFilename = `snapshot_v${nextVersion}.bin`;
@@ -201,6 +218,7 @@ export function compact(ctx, attempt = 1) {
                 verifiedHistoryRefs: historyToMerge.map(h => h.ref),
                 storagePath,
                 candidate,
+                deleteSetUpdate,
                 expectedVersion: currentVersion,
             });
             // Garbage Collect Old Storage Snapshot
@@ -232,7 +250,7 @@ export function compact(ctx, attempt = 1) {
  */
 function performCompactionTransaction(params) {
     return __awaiter(this, void 0, void 0, function* () {
-        const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, expectedVersion } = params;
+        const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, deleteSetUpdate, expectedVersion } = params;
         return yield runTransaction(db, (transaction) => __awaiter(this, void 0, void 0, function* () {
             // === STEP A: THE KILL SWITCH ===
             const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
@@ -254,20 +272,17 @@ function performCompactionTransaction(params) {
                 throw new Error("Document version changed during compaction upload. Aborting to retry.");
             }
             // Verify updates still exist (avoid zombie bugs) before deleting
-            const updatesToProcess = [];
-            for (const ref of verifiedUpdateRefs) {
-                const freshSnap = yield transaction.get(ref);
-                if (freshSnap.exists()) {
-                    updatesToProcess.push({ ref });
-                }
-            }
-            const historyToMerge = [];
-            for (const ref of verifiedHistoryRefs) {
-                const freshSnap = yield transaction.get(ref);
-                if (freshSnap.exists()) {
-                    historyToMerge.push({ ref });
-                }
-            }
+            // P1.1 Optimization: Use parallel transaction.get to eliminate N+1 queries
+            const [updateSnaps, historySnaps] = yield Promise.all([
+                Promise.all(verifiedUpdateRefs.map(ref => transaction.get(ref))),
+                Promise.all(verifiedHistoryRefs.map(ref => transaction.get(ref)))
+            ]);
+            const updatesToProcess = updateSnaps
+                .filter(snap => snap.exists())
+                .map(snap => ({ ref: snap.ref }));
+            const historyToMerge = historySnaps
+                .filter(snap => snap.exists())
+                .map(snap => ({ ref: snap.ref }));
             if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
                 return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
             }
@@ -275,8 +290,10 @@ function performCompactionTransaction(params) {
             return compactToSnapshot({
                 transaction,
                 mainRef,
+                uid,
                 storagePath,
                 candidate,
+                deleteSetUpdate,
                 currentVersion,
                 updatesToProcess,
                 historyToMerge,
@@ -288,13 +305,18 @@ function performCompactionTransaction(params) {
  * Compacts everything into the base snapshot.
  */
 function compactToSnapshot(params) {
-    const { transaction, mainRef, storagePath, candidate, currentVersion, updatesToProcess, historyToMerge } = params;
+    const { transaction, mainRef, uid, storagePath, candidate, deleteSetUpdate, currentVersion, updatesToProcess, historyToMerge } = params;
     console.log(`Compacted to Snapshot (Size: ${candidate.byteLength})`);
     transaction.set(mainRef, {
         snapshotStoragePath: storagePath,
         stateVector: calculateStateVector(candidate),
+        // A stale fingerprint would hide newer deletions, so when the
+        // delete-set is too large to store we remove the field entirely
+        deleteSet: deleteSetUpdate ? Bytes.fromUint8Array(deleteSetUpdate) : deleteField(),
         version: currentVersion + 1,
         updatedAt: serverTimestamp(),
+        // Lets the compacting client's own snapshot listener skip this write
+        origin: uid,
     }, { merge: true });
     updatesToProcess.forEach(u => transaction.delete(u.ref));
     historyToMerge.forEach(h => transaction.delete(h.ref));

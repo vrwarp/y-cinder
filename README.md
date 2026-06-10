@@ -115,9 +115,11 @@ The `FireProvider` constructor accepts the following configuration options:
 ### API Methods
 
 - **`provider.destroy()`**:
-  Stops synchronization and cleans up resources. Call this when the provider is no longer needed (e.g., component unmount) to prevent memory leaks and duplicate connections.
+  Stops synchronization and cleans up resources. Call this when the provider is no longer needed (e.g., component unmount) to prevent memory leaks and duplicate connections. Waits for any in-flight save and flushes pending updates.
 - **`provider.compact()`**:
   Manually triggers the compaction process. Usually handled automatically.
+- **`provider.synced`** (property):
+  `true` once initial sync has completed and real-time listeners are active.
 
 ### Events
 
@@ -125,8 +127,10 @@ The provider extends `ObservableV2` and emits the following events:
 
 | Event | Payload | Description |
 | :--- | :--- | :--- |
+| `synced` | `boolean` | Emitted when initial sync completes and real-time listeners are attached. |
 | `connection-error` | `{ code: string, message: string, error: Error }` | Emitted when a Firestore listener encounters an error. |
 | `sync-failure` | `Error` | Emitted when initial sync fails after all retry attempts. |
+| `corrupted-document` | `{ docId: string, error: Error }` | Emitted when a corrupted Firestore document is quarantined. |
 | `save-rejected` | See below | Emitted when a local update **cannot** be persisted to Firestore. |
 
 **`save-rejected` payload:**
@@ -166,7 +170,19 @@ match /path/to/your/document/{document=**} {
 y-cinder writes to the following subcollections:
 - `updates`
 - `history`
+- `maintenance` (clock-skew measurement)
+- `metadata` (compaction lock)
 - `subdocs` (if using subdocuments)
+
+Cloud Storage rules must also allow read/write under the same path prefix —
+compacted snapshots (`snapshot_v*.bin`) and oversized updates
+(`large_updates/*.bin`) are stored there:
+
+```
+match /path/to/your/document/{allPaths=**} {
+  allow read, write: if <your-auth-condition>;
+}
+```
 
 ## Production Readiness
 
@@ -179,7 +195,7 @@ However, users should evaluate their specific constraints:
 - **Latency**: Firestore snapshot listeners typically have higher latency (500ms - 1s) compared to dedicated WebSocket servers (< 50ms). This makes `y-cinder` excellent for collaborative editing (docs, notes) but unsuitable for high-frequency real-time applications like gaming or cursor tracking.
 - **Cost vs. Scale**: While `y-cinder` is highly optimized, every keystroke debounced to a write is still a Firestore operation. Documents with extreme concurrency (50+ active users simultaneously) may still incur significant costs or hit Firestore's write rate limits on specific index ranges.
 - **Client-Side Maintenance**: Compaction tasks are distributed among clients. While this keeps the architecture "serverless," it means active clients must burn some CPU and bandwidth to maintain database health.
-- **Storage Limits**: Firestore has a strict 1MB limit per document. While `y-cinder` chunks history segments, individual updates and the base snapshot must each fit within 1MB. If an update exceeds this limit, the provider emits a `save-rejected` event with `code: 'document-too-large'` and includes the rejected update for consumer recovery.
+- **Storage Limits**: Firestore has a strict 1MB limit per document. Updates and snapshots that exceed the inline limit are automatically offloaded to Cloud Storage with a lightweight pointer document, so large payloads do not fail. A `save-rejected` event (`code: 'document-too-large'`) is only emitted in the rare case of a server-side size rejection; `code: 'max-retries-exceeded'` covers persistent write failures (with exponential backoff between attempts). Both payloads include the affected update for consumer recovery.
 
 ## Contributors
 

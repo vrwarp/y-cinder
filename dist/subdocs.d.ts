@@ -49,6 +49,10 @@ export interface SubdocContext {
     lockTTL: number;
     /** Compaction limit (inherited) */
     compactionLimit: number;
+    /** Offline persistence configuration (inherited) */
+    persistence?: {
+        enabled: boolean;
+    };
     /** Factory to create new providers */
     createProvider: (config: any) => any;
     /** Callback to emit connection errors */

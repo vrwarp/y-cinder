@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
-import { waitForConditionTruthy } from '../utils/wait';
+import { waitForConditionTruthy, waitForConditionEquals } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Advanced Integration (Emulator)', () => {
@@ -61,29 +61,30 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
 
         subdoc1.getText('inner').insert(0, 'Nested Content');
 
-        // Wait for propagation
+        // Wait for propagation (condition-based — fixed sleeps flake when
+        // the emulator is under load from earlier tests in the batch):
         // 1. Main doc update -> Client 2
         // 2. Client 2 sees new subdoc -> instantiates child provider
         // 3. Child provider syncs 'subdocs/guid'
-        await new Promise(r => setTimeout(r, 4000));
-
-        const subdoc2Candidate = subdocs2.get('child');
-        expect(subdoc2Candidate).toBeDefined();
+        const subdoc2Candidate = await waitForConditionTruthy(
+            () => subdocs2.get('child'),
+            { timeout: 15000, interval: 100, message: 'Client 2 should see the subdoc' }
+        );
 
         // Load subdoc on Client 2 by "requesting" it (Yjs lazy loading)
         // Note: Yjs map.get() returns the subdoc instance if available.
         // We verify that its content eventually syncs.
         const subdoc2 = subdoc2Candidate as Y.Doc;
 
-        // Need to wait for subdoc provider to sync content
-        // Child provider initialization + sync takes time
-        await new Promise(r => setTimeout(r, 6000));
-
-        expect(subdoc2.getText('inner').toString()).toBe('Nested Content');
+        await waitForConditionEquals(
+            () => subdoc2.getText('inner').toString(),
+            'Nested Content',
+            { timeout: 15000, interval: 100, message: 'Subdoc content should sync to Client 2' }
+        );
 
         provider1.destroy();
         provider2.destroy();
-    }, 20000);
+    }, 40000);
 
     it('should handle concurrent edits from multiple clients', async () => {
         const path = `integration-tests/concurrency-${getStableDate()}-${counter++}`;
@@ -113,7 +114,7 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
                 }
             }
             return true;
-        }, { timeout: 15000, interval: 100, message: 'Clients did not converge' });
+        }, { timeout: 30000, interval: 100, message: 'Clients did not converge' });
 
         const finalContent = clients[0].doc.getText('content').toString();
         expect(finalContent.length).toBe(numClients * 'Client0'.length);
@@ -124,5 +125,5 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
         }
 
         clients.forEach(c => c.provider.destroy());
-    }, 20000);
+    }, 40000);
 });

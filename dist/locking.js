@@ -78,11 +78,14 @@ export function measureClockSkew(db, path, uid) {
         }
         catch (e) {
             // If we can't write/read, assume 0 skew (best effort)
+            console.warn("Failed to measure clock skew:", e);
             return 0;
         }
         finally {
             // P1.6 FIX: Always attempt cleanup to prevent orphaned docs
-            deleteDoc(ref).catch(() => { });
+            deleteDoc(ref).catch((e) => {
+                console.warn("Failed to clean up clock skew document:", e);
+            });
         }
     });
 }
@@ -214,7 +217,16 @@ export function checkLockStatus(config) {
                 ? data.createdAt.toMillis()
                 : 0;
             // P1.1 FIX: Use cached clock offset for accurate age calculation
-            const serverNow = Date.now() + (cachedClockOffset !== null && cachedClockOffset !== void 0 ? cachedClockOffset : 0);
+            let serverOffset = cachedClockOffset !== null && cachedClockOffset !== void 0 ? cachedClockOffset : 0;
+            if (cachedClockOffset === undefined) {
+                try {
+                    serverOffset = yield measureClockSkew(db, path, uid);
+                }
+                catch (e) {
+                    console.warn("Failed to measure clock skew, defaulting to 0:", e);
+                }
+            }
+            const serverNow = Date.now() + serverOffset;
             const ageMs = serverNow - createdAt;
             return {
                 exists: true,
@@ -224,6 +236,7 @@ export function checkLockStatus(config) {
             };
         }
         catch (e) {
+            console.warn("Failed to check lock status:", e);
             return { exists: false };
         }
     });

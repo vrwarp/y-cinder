@@ -103,4 +103,25 @@ export declare function aggregateMetadata(metas: UpdateMetadata[]): {
  * ```
  */
 export declare function isUpdateRedundant(localSVMap: Map<number, number>, clientIDs: number[], clientClocks: number[]): boolean;
+/**
+ * Determines whether a diff produced by `Y.encodeStateAsUpdate(doc, serverSV)`
+ * actually carries data the server is missing.
+ *
+ * Yjs always embeds the document's *complete* delete-set in such diffs —
+ * state vectors don't cover deletions — so a fully-synced document whose
+ * history contains any deletion still produces a non-empty diff. Pushing
+ * those no-op diffs writes a spurious update document on every connect.
+ *
+ * A diff carries new data iff:
+ * - it contains any structs (insertions the server lacks), or
+ * - its delete-set is not fully covered by the union of the server blobs'
+ *   delete-sets (genuine offline deletions).
+ *
+ * @param diff - Diff produced against the server state vector
+ * @param getServerBlobs - Lazily provides all update/history/snapshot blobs
+ *                         fetched from the server (only invoked when the
+ *                         diff contains no structs)
+ * @returns true if the diff should be pushed
+ */
+export declare function diffCarriesNewData(diff: Uint8Array, getServerBlobs: () => Uint8Array[]): boolean;
 //# sourceMappingURL=update-metadata.d.ts.map

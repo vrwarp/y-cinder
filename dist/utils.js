@@ -87,8 +87,9 @@ export function writeStateVector(sv) {
 /**
  * Calculates the state vector of a Yjs update and returns it as a Base64 string.
  *
- * Creates a temporary Y.Doc, applies the update, extracts the state vector,
- * and encodes it to Base64. The temporary document is destroyed after use.
+ * Computes the state vector directly from the update blob without
+ * materializing a temporary Y.Doc, keeping the main thread responsive
+ * even for snapshot-sized updates.
  *
  * @param update - The Yjs update blob
  * @returns Base64-encoded state vector string
@@ -100,12 +101,7 @@ export function writeStateVector(sv) {
  * ```
  */
 export function calculateStateVector(update) {
-    const tempDoc = new Y.Doc();
-    Y.applyUpdate(tempDoc, update);
-    const sv = Y.encodeStateVector(tempDoc);
-    const svBase64 = toBase64(sv);
-    tempDoc.destroy();
-    return svBase64;
+    return toBase64(Y.encodeStateVectorFromUpdate(update));
 }
 /**
  * Generates a unique session ID combining random characters and timestamp.

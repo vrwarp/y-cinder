@@ -54,29 +54,41 @@ export declare class FireProvider extends ObservableV2<any> {
     private subProviders;
     /** Whether compaction is currently in progress */
     private _isCompacting;
-    /** Pending update cache for debouncing */
-    private updateCache;
+    /**
+     * Buffered local updates awaiting the debounced save.
+     * Kept as an array and merged once at save time — merging on every
+     * update event would be quadratic across editing bursts.
+     */
+    private _pendingUpdates;
     private readonly maxUpdatesThreshold;
     private readonly maxWaitTime;
     private readonly compactionLimit;
     private readonly depth;
     private readonly lockTTL;
+    private readonly persistence?;
     private readonly _testHooks?;
     private _unsubscribers;
     private _unsubscribeHistory;
     private _lastHistoryDoc;
-    private _debouncedSave;
     private _isDestroyed;
+    /** Whether initial sync has completed and listeners are attached */
+    private _synced;
     /** P0.3 FIX: Cached clock offset to avoid measuring on every lock attempt */
     private _cachedClockOffset;
-    /** P0.5 FIX: Flag to prevent race condition during save */
-    private _isSaving;
+    /**
+     * P0.5 FIX: The in-flight save operation, if any. Prevents concurrent
+     * saves, and lets destroy() wait it out so a final flush is never
+     * silently skipped while a save is mid-flight.
+     */
+    private _inflightSave;
     /** Consecutive save failure counter for circuit breaker */
     private _saveRetryCount;
     /** P1.4 FIX: Sync retry counter for exponential backoff */
     private _syncRetryCount;
     /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
     private _debounceTimerId;
+    /** P1.4 FIX: Sync retry timer ID for cancellation on destroy */
+    private _syncRetryTimerId;
     private _boundBeforeUnload;
     /** Per-session quarantine set for corrupted Firestore documents */
     private _corruptedDocIds;
@@ -91,6 +103,11 @@ export declare class FireProvider extends ObservableV2<any> {
      * Whether compaction is currently in progress.
      */
     get isCompacting(): boolean;
+    /**
+     * Whether initial sync has completed and real-time listeners are active.
+     * Also emitted as a 'synced' event when the state becomes true.
+     */
+    get synced(): boolean;
     /**
      * Manually trigger compaction.
      * Normally handled automatically when update threshold is exceeded.
@@ -141,13 +158,28 @@ export declare class FireProvider extends ObservableV2<any> {
      */
     private handleBeforeUnload;
     /**
-     * Saves the cached update to Firestore.
-     * P0.5 FIX: Uses _isSaving flag to prevent race condition where
-     * updates arriving during save could be duplicated or lost.
+     * Schedules a save after a delay, resetting any pending timer.
+     * P1.5 FIX: Timer is tracked for cancellation on destroy.
      *
-     * Circuit breaker: Detects oversized documents and generic persistent
-     * failures. Emits 'save-rejected' event instead of retrying forever.
+     * @param delayMs - Delay before saving. Defaults to the debounce window;
+     *                  failure retries pass an exponential backoff delay.
+     */
+    private _scheduleSave;
+    /**
+     * Saves buffered updates to Firestore.
+     *
+     * P0.5 FIX: Only one save runs at a time; while one is in flight this
+     * returns the in-flight promise. Updates arriving during a save stay
+     * buffered and are flushed by a follow-up save.
+     *
+     * Updates too large to inline are offloaded to Cloud Storage with a
+     * lightweight pointer document (same mechanism as oversized initial-sync
+     * diffs) instead of being rejected.
+     *
+     * Circuit breaker: persistent failures retry with exponential backoff,
+     * then emit 'save-rejected' after MAX_SAVE_RETRIES attempts.
      */
     private saveToFirestore;
+    private _executeSave;
 }
 //# sourceMappingURL=provider.d.ts.map

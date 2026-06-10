@@ -53,6 +53,8 @@ export interface SubdocContext {
     lockTTL: number;
     /** Compaction limit (inherited) */
     compactionLimit: number;
+    /** Offline persistence configuration (inherited) */
+    persistence?: { enabled: boolean };
     /** Factory to create new providers */
     createProvider: (config: any) => any;
     /** Callback to emit connection errors */
@@ -114,7 +116,9 @@ export function handleSubdocs(
         const guid = subdoc.guid;
         const provider = subProviders.get(guid);
         if (provider) {
-            provider.destroy();
+            Promise.resolve(provider.destroy()).catch((err: unknown) => {
+                console.error(`Failed to destroy subdoc provider ${guid}:`, err);
+            });
             subProviders.delete(guid);
         }
     });
@@ -177,6 +181,7 @@ export function startSubdocProvider(
         depth: ctx.depth + 1,
         lockTTL: ctx.lockTTL,
         compactionLimit: ctx.compactionLimit,
+        persistence: ctx.persistence,
     });
 
     subProviders.set(guid, provider);

@@ -20,7 +20,7 @@
  * - Applies new updates from other clients
  * - Skips our own updates (using createdBy)
  * - Skips redundant updates (using clientID/clockEnd metadata)
- * - Probabilistically triggers compaction when threshold exceeded
+ * - Triggers compaction when threshold exceeded (rate-limited per client)
  *
  * ## Priority Order
  *
@@ -139,6 +139,12 @@ export declare function createUpdateListener(ctx: SyncContext, startAfterDoc?: Q
  *
  * Ensures that if compaction replaces updates with a snapshot, this client
  * receives the new reference state.
+ *
+ * Before downloading the (potentially large) snapshot blob, the listener
+ * compares the snapshot's stored state vector against the local document.
+ * Snapshots produced by compacting data we already hold are skipped,
+ * avoiding a full-document download per compaction per client (and a
+ * duplicate download right after initial sync).
  */
 export declare function createSnapshotListener(ctx: SyncContext): Unsubscribe;
 /**

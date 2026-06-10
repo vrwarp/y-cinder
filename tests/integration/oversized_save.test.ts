@@ -1,10 +1,10 @@
 /**
  * Oversized Save Integration Tests
  *
- * Tests the provider's circuit breaker for oversized documents:
- * - Proactive size rejection before Firestore write
+ * Tests the provider's handling of oversized documents and save failures:
+ * - Proactive Cloud Storage offload for updates exceeding the inline limit
  * - Server-side size rejection detection
- * - Generic save failure retry cap (MAX_SAVE_RETRIES)
+ * - Generic save failure retry cap (MAX_SAVE_RETRIES) with backoff
  * - save-rejected event payload structure
  *
  * @file oversized_save.test.ts
@@ -42,10 +42,12 @@ vi.mock('@firebase/firestore', async (importOriginal: () => Promise<any>) => {
     };
 });
 
+import { collection, getDocs } from '@firebase/firestore';
 import { FireProvider } from '../../src/provider';
 import { DEFAULTS } from '../../src/types';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { waitForConditionEquals } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
 
 describe('Oversized Save Circuit Breaker (Emulator)', () => {
@@ -141,9 +143,10 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
         // Make an update
         doc1.getText('content').insert(0, 'Retry test data');
 
-        // Wait long enough for MAX_SAVE_RETRIES attempts
-        // Each attempt: ~30ms debounce + save attempt overhead
-        await new Promise(r => setTimeout(r, DEFAULTS.MAX_SAVE_RETRIES * 200 + 1000));
+        // Wait long enough for MAX_SAVE_RETRIES attempts.
+        // Retries use exponential backoff (~300ms, ~500ms, ~900ms, ~1700ms
+        // plus jitter), so the final attempt lands around the 4s mark.
+        await new Promise(r => setTimeout(r, 7000));
 
         // Restore original property
         Object.defineProperty(mockControls, 'shouldFailAddDoc', {
@@ -165,7 +168,7 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
         await provider1.destroy();
     });
 
-    it('should emit save-rejected proactively when update exceeds FIRESTORE_DOC_LIMIT', async () => {
+    it('should offload updates exceeding the inline limit to Cloud Storage', async () => {
         const path = `integration-tests/oversized-save-${getStableDate()}-${counter++}`;
         const doc1 = new Y.Doc();
         const provider1 = createProvider(doc1, path, { maxWaitTime: 50 });
@@ -178,24 +181,36 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
             rejectedEvents.push(event);
         });
 
-        // Create a very large update that exceeds FIRESTORE_DOC_LIMIT (1MB)
+        // Create a very large update that exceeds the inline limit (~1MB)
         // Yjs text encoding is ~1.5-2 bytes per character, so 1.2M characters should exceed 1MB
         const largeText = 'x'.repeat(1_200_000);
         doc1.getText('content').insert(0, largeText);
 
-        // Wait for debounce + save
-        await new Promise(r => setTimeout(r, 500));
+        // Wait for debounce + storage upload + pointer write
+        await new Promise(r => setTimeout(r, 3000));
 
-        // Should have been rejected proactively (no Firestore call needed)
-        expect(rejectedEvents.length).toBe(1);
-        expect(rejectedEvents[0].code).toBe('document-too-large');
-        expect(rejectedEvents[0].sizeBytes).toBeGreaterThan(DEFAULTS.FIRESTORE_DOC_LIMIT);
-        expect(rejectedEvents[0].limitBytes).toBe(DEFAULTS.FIRESTORE_DOC_LIMIT);
-        expect(rejectedEvents[0].update).toBeInstanceOf(Uint8Array);
+        // The update must NOT be rejected — it is offloaded to Cloud Storage
+        expect(rejectedEvents.length).toBe(0);
 
-        // addDoc should NOT have been called (proactive check)
-        expect(mockControls.addDocCallCount).toBe(0);
+        // Exactly one pointer doc written via addDoc
+        expect(mockControls.addDocCallCount).toBe(1);
+
+        const snap = await getDocs(collection(db, path, 'updates'));
+        expect(snap.size).toBe(1);
+        const pointer = snap.docs[0].data();
+        expect(pointer.updateStoragePath).toContain('large_updates/');
+        expect(pointer.update).toBeUndefined();
+
+        // A fresh client must be able to sync the offloaded content
+        const doc2 = new Y.Doc();
+        const provider2 = createProvider(doc2, path);
+        await waitForConditionEquals(
+            () => doc2.getText('content').length,
+            largeText.length,
+            { timeout: 20000, interval: 200, message: 'Fresh client should download offloaded update' }
+        );
 
         await provider1.destroy();
-    });
+        await provider2.destroy();
+    }, 40000);
 });

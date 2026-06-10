@@ -64,7 +64,9 @@ export function handleSubdocs(event, ctx, subProviders) {
         const guid = subdoc.guid;
         const provider = subProviders.get(guid);
         if (provider) {
-            provider.destroy();
+            Promise.resolve(provider.destroy()).catch((err) => {
+                console.error(`Failed to destroy subdoc provider ${guid}:`, err);
+            });
             subProviders.delete(guid);
         }
     });
@@ -117,6 +119,7 @@ export function startSubdocProvider(subdoc, ctx, subProviders) {
         depth: ctx.depth + 1,
         lockTTL: ctx.lockTTL,
         compactionLimit: ctx.compactionLimit,
+        persistence: ctx.persistence,
     });
     subProviders.set(guid, provider);
     return provider;

@@ -160,3 +160,53 @@ export function isUpdateRedundant(localSVMap, clientIDs, clientClocks) {
     }
     return true;
 }
+/**
+ * Determines whether a diff produced by `Y.encodeStateAsUpdate(doc, serverSV)`
+ * actually carries data the server is missing.
+ *
+ * Yjs always embeds the document's *complete* delete-set in such diffs —
+ * state vectors don't cover deletions — so a fully-synced document whose
+ * history contains any deletion still produces a non-empty diff. Pushing
+ * those no-op diffs writes a spurious update document on every connect.
+ *
+ * A diff carries new data iff:
+ * - it contains any structs (insertions the server lacks), or
+ * - its delete-set is not fully covered by the union of the server blobs'
+ *   delete-sets (genuine offline deletions).
+ *
+ * @param diff - Diff produced against the server state vector
+ * @param getServerBlobs - Lazily provides all update/history/snapshot blobs
+ *                         fetched from the server (only invoked when the
+ *                         diff contains no structs)
+ * @returns true if the diff should be pushed
+ */
+export function diffCarriesNewData(diff, getServerBlobs) {
+    let localDs;
+    try {
+        const decoded = Y.decodeUpdate(diff);
+        if (decoded.structs.length > 0) {
+            return true;
+        }
+        localDs = decoded.ds;
+    }
+    catch (e) {
+        // Unparseable diff — push it and let the server-side consumers decide
+        return true;
+    }
+    // Structs are empty: the diff is push-worthy only if it contains
+    // deletions the server doesn't already have.
+    const serverDeleteSets = [];
+    for (const blob of getServerBlobs()) {
+        try {
+            serverDeleteSets.push(Y.decodeUpdate(blob).ds);
+        }
+        catch (e) {
+            // Corrupted server blob contributes nothing to coverage;
+            // worst case we push a redundant (idempotent) diff.
+        }
+    }
+    const serverDs = Y.mergeDeleteSets(serverDeleteSets);
+    const unionDs = Y.mergeDeleteSets([serverDs, localDs]);
+    // If adding our delete-set changes nothing, the server already has it all
+    return !Y.equalDeleteSets(serverDs, unionDs);
+}

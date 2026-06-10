@@ -36,6 +36,8 @@ let workerSupported = true; // Assume supported until proven otherwise
 const pendingRequests = new Map<string, {
     resolve: (result: Uint8Array) => void;
     reject: (error: Error) => void;
+    /** Fallback timer — cleared as soon as the worker responds */
+    timer: ReturnType<typeof setTimeout>;
 }>();
 
 // Request ID counter
@@ -88,6 +90,7 @@ function initWorker(): boolean {
             }
 
             pendingRequests.delete(id);
+            clearTimeout(pending.timer);
 
             if (error) {
                 pending.reject(new Error(error));
@@ -101,6 +104,7 @@ function initWorker(): boolean {
             console.error('Worker error:', event);
             // Reject all pending requests
             pendingRequests.forEach((pending) => {
+                clearTimeout(pending.timer);
                 pending.reject(new Error('Worker crashed'));
             });
             pendingRequests.clear();
@@ -147,29 +151,33 @@ export async function mergeUpdatesAsync(updates: Uint8Array[]): Promise<Uint8Arr
     if (initWorker() && mergeWorker) {
         return new Promise((resolve, reject) => {
             const id = generateRequestId();
-            pendingRequests.set(id, { resolve, reject });
+
+            // Fallback timeout to prevent hanging; cleared when the worker responds
+            const timer = setTimeout(() => {
+                if (pendingRequests.has(id)) {
+                    pendingRequests.delete(id);
+                    console.warn('Worker merge timed out, falling back to main thread');
+                    // Fall back to sync merge
+                    try {
+                        const result = Y.mergeUpdates(updates);
+                        resolve(result);
+                    } catch (err) {
+                        reject(err);
+                    }
+                }
+            }, 30000); // 30 second timeout
+            // Don't keep Node.js processes alive just for this fallback timer
+            (timer as any).unref?.();
+
+            pendingRequests.set(id, { resolve, reject, timer });
 
             try {
                 // Send updates to worker
                 // Note: We don't transfer buffers here as we may need them for fallback
                 mergeWorker!.postMessage({ id, updates });
-
-                // Add timeout to prevent hanging
-                setTimeout(() => {
-                    if (pendingRequests.has(id)) {
-                        pendingRequests.delete(id);
-                        console.warn('Worker merge timed out, falling back to main thread');
-                        // Fall back to sync merge
-                        try {
-                            const result = Y.mergeUpdates(updates);
-                            resolve(result);
-                        } catch (err) {
-                            reject(err);
-                        }
-                    }
-                }, 30000); // 30 second timeout
             } catch (err) {
                 pendingRequests.delete(id);
+                clearTimeout(timer);
                 reject(err);
             }
         });
@@ -199,6 +207,10 @@ export function terminateMergeWorker(): void {
         mergeWorker.terminate();
         mergeWorker = null;
     }
+    pendingRequests.forEach((pending) => {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Merge worker terminated'));
+    });
     pendingRequests.clear();
     workerInitialized = false;
     workerSupported = true; // Reset for potential restart

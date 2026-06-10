@@ -45,6 +45,7 @@ import {
     getDocs,
     getDoc,
     serverTimestamp,
+    deleteField,
     limit,
     DocumentReference,
     Timestamp,
@@ -139,17 +140,21 @@ export async function compact(
     }
 
     try {
-        // Fetch work items
+        // Fetch work items.
+        // Limits are clamped so deletes (updates + history) plus the snapshot
+        // write stay within Firestore's 500-op transaction budget. Anything
+        // left over is picked up by the next compaction cycle.
         const updatesQ = query(
             collection(db, path, FIRESTORE_PATHS.UPDATES),
             orderBy('createdAt', 'asc'),
-            limit(compactionLimit)
+            limit(Math.min(compactionLimit, DEFAULTS.MAX_COMPACTION_UPDATES))
         );
         const updatesSnap = await getDocs(updatesQ);
 
         const historyQ = query(
             collection(db, path, FIRESTORE_PATHS.HISTORY),
-            orderBy('startTime', 'asc')
+            orderBy('startTime', 'asc'),
+            limit(DEFAULTS.MAX_COMPACTION_HISTORY)
         );
         const historySnaps = await getDocs(historyQ);
 
@@ -193,12 +198,13 @@ export async function compact(
             }
         }
 
-        // Read updates in parallel (P1.1 Optimization: Eliminate N+1 queries)
+        // Use the data already returned by the queries above. Update and
+        // history documents are immutable (only ever created or deleted),
+        // and the transaction below re-verifies existence before deleting,
+        // so re-fetching each document individually would only double the
+        // read cost. Storage-backed payloads are downloaded in parallel.
         const updateResults = await Promise.all(updateDocs.map(async (uDoc) => {
-            const freshSnap = await getDoc(uDoc.ref);
-            if (!freshSnap.exists()) return null;
-
-            const data = freshSnap.data() as Record<string, any>;
+            const data = uDoc.data() as Record<string, any>;
             if (data?.updateStoragePath && !data?.update) {
                 try {
                     const storageRef = ref(storage, data.updateStoragePath);
@@ -223,21 +229,18 @@ export async function compact(
         }));
         const updatesToProcess = updateResults.filter((u): u is { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp } => u !== null);
 
-        // Read history in parallel (P1.1 Optimization: Eliminate N+1 queries)
-        const historyResults = await Promise.all(historyDocs.map(async (hDoc) => {
-            const freshSnap = await getDoc(hDoc.ref);
-            if (!freshSnap.exists()) return null;
-
-            const data = freshSnap.data() as Record<string, any>;
-            if (data?.segment) {
-                return {
-                    ref: hDoc.ref,
-                    val: (data.segment as Bytes).toUint8Array(),
-                };
-            }
-            return null;
-        }));
-        const historyToMerge = historyResults.filter((h): h is { ref: DocumentReference; val: Uint8Array } => h !== null);
+        const historyToMerge = historyDocs
+            .map((hDoc) => {
+                const data = hDoc.data() as Record<string, any>;
+                if (data?.segment) {
+                    return {
+                        ref: hDoc.ref,
+                        val: (data.segment as Bytes).toUint8Array(),
+                    };
+                }
+                return null;
+            })
+            .filter((h): h is { ref: DocumentReference; val: Uint8Array } => h !== null);
 
         if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
@@ -255,6 +258,21 @@ export async function compact(
             throw new Error(
                 `Compaction candidate failed validation (${candidate.byteLength} bytes): ${decodeErr}`
             );
+        }
+
+        // Extract a structs-empty update carrying the candidate's full
+        // delete-set. Stored inline on the main document, it lets clients
+        // that already cover the snapshot's state vector skip downloading
+        // the blob while still proving their deletions are on the server.
+        let deleteSetUpdate: Uint8Array | null = null;
+        try {
+            const candidateSV = Y.encodeStateVectorFromUpdate(candidate);
+            const dsUpdate = Y.diffUpdate(candidate, candidateSV);
+            if (dsUpdate.byteLength <= DEFAULTS.MAX_DELETE_SET_FIELD_BYTES) {
+                deleteSetUpdate = dsUpdate;
+            }
+        } catch (e) {
+            console.warn("Failed to extract delete-set fingerprint (optional optimization)", e);
         }
 
         const nextVersion = currentVersion + 1;
@@ -275,6 +293,7 @@ export async function compact(
             verifiedHistoryRefs: historyToMerge.map(h => h.ref),
             storagePath,
             candidate,
+            deleteSetUpdate,
             expectedVersion: currentVersion,
         });
 
@@ -312,9 +331,10 @@ async function performCompactionTransaction(params: {
     verifiedHistoryRefs: DocumentReference[];
     storagePath: string;
     candidate: Uint8Array;
+    deleteSetUpdate: Uint8Array | null;
     expectedVersion: number;
 }): Promise<CompactionResult> {
-    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, expectedVersion } = params;
+    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, deleteSetUpdate, expectedVersion } = params;
 
     return await runTransaction(db, async (transaction) => {
         // === STEP A: THE KILL SWITCH ===
@@ -364,8 +384,10 @@ async function performCompactionTransaction(params: {
         return compactToSnapshot({
             transaction,
             mainRef,
+            uid,
             storagePath,
             candidate,
+            deleteSetUpdate,
             currentVersion,
             updatesToProcess,
             historyToMerge,
@@ -379,21 +401,28 @@ async function performCompactionTransaction(params: {
 function compactToSnapshot(params: {
     transaction: any;
     mainRef: DocumentReference;
+    uid: string;
     storagePath: string;
     candidate: Uint8Array;
+    deleteSetUpdate: Uint8Array | null;
     currentVersion: number;
     updatesToProcess: { ref: DocumentReference }[];
     historyToMerge: { ref: DocumentReference }[];
 }): CompactionResult {
-    const { transaction, mainRef, storagePath, candidate, currentVersion, updatesToProcess, historyToMerge } = params;
+    const { transaction, mainRef, uid, storagePath, candidate, deleteSetUpdate, currentVersion, updatesToProcess, historyToMerge } = params;
 
     console.log(`Compacted to Snapshot (Size: ${candidate.byteLength})`);
 
     transaction.set(mainRef, {
         snapshotStoragePath: storagePath,
         stateVector: calculateStateVector(candidate),
+        // A stale fingerprint would hide newer deletions, so when the
+        // delete-set is too large to store we remove the field entirely
+        deleteSet: deleteSetUpdate ? Bytes.fromUint8Array(deleteSetUpdate) : deleteField(),
         version: currentVersion + 1,
         updatedAt: serverTimestamp(),
+        // Lets the compacting client's own snapshot listener skip this write
+        origin: uid,
     }, { merge: true });
 
     updatesToProcess.forEach(u => transaction.delete(u.ref));

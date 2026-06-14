@@ -127,7 +127,8 @@ The provider extends `ObservableV2` and emits the following events:
 
 | Event | Payload | Description |
 | :--- | :--- | :--- |
-| `synced` | `boolean` | Emitted when initial sync completes and real-time listeners are attached. |
+| `sync` | `boolean` | Emitted when initial sync completes and real-time listeners are attached. Follows the y-fire / y-* provider convention. |
+| `saved` | `number` | Emitted after a local update batch is committed to Firestore, with the commit wall-clock time (`Date.now()`). The success counterpart to `save-rejected`. |
 | `connection-error` | `{ code: string, message: string, error: Error }` | Emitted when a Firestore listener encounters an error. |
 | `sync-failure` | `Error` | Emitted when initial sync fails after all retry attempts. |
 | `corrupted-document` | `{ docId: string, error: Error }` | Emitted when a corrupted Firestore document is quarantined. |

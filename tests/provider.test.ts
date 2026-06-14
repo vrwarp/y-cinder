@@ -89,6 +89,50 @@ describe('FireProvider', () => {
         provider.destroy();
     });
 
+    it("should emit 'saved' with the commit time after a successful save", async () => {
+        vi.useFakeTimers();
+        const provider = new FireProvider({ firebaseApp, ydoc, path, maxWaitTime: 100 });
+        (firestore.addDoc as any).mockResolvedValue({ id: 'doc-id' });
+
+        const savedAts: number[] = [];
+        provider.on('saved', (at: number) => savedAts.push(at));
+
+        const before = Date.now();
+        const source = new Y.Doc();
+        source.getMap('m').set('k', 'v');
+        provider.handleUpdate(Y.encodeStateAsUpdate(source), null);
+
+        await vi.advanceTimersByTimeAsync(110);
+
+        expect(firestore.addDoc).toHaveBeenCalledTimes(1);
+        expect(savedAts).toHaveLength(1);
+        expect(savedAts[0]).toBeGreaterThanOrEqual(before);
+
+        vi.useRealTimers();
+        await provider.destroy();
+    });
+
+    it("should NOT emit 'saved' when the save fails", async () => {
+        vi.useFakeTimers();
+        const provider = new FireProvider({ firebaseApp, ydoc, path, maxWaitTime: 100 });
+        (firestore.addDoc as any).mockRejectedValue(new Error('transient network failure'));
+
+        const savedAts: number[] = [];
+        provider.on('saved', (at: number) => savedAts.push(at));
+
+        const source = new Y.Doc();
+        source.getMap('m').set('k', 'v');
+        provider.handleUpdate(Y.encodeStateAsUpdate(source), null);
+
+        await vi.advanceTimersByTimeAsync(110);
+
+        expect(firestore.addDoc).toHaveBeenCalled();
+        expect(savedAts).toHaveLength(0);
+
+        vi.useRealTimers();
+        await provider.destroy();
+    });
+
     it('should trigger compaction when updates exceed threshold', async () => {
         const provider = new FireProvider({ firebaseApp, ydoc, path, maxUpdatesThreshold: 5 });
         const compactSpy = vi.spyOn(provider, 'compact');

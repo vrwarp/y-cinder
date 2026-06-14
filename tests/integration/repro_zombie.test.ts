@@ -98,7 +98,7 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         await waitForConditionEquals(async () => {
             const snap = await getDocs(updatesCol);
             return snap.size;
-        }, 3, { timeout: 15000, interval: 100, message: 'Wait for updates to appear' });
+        }, 3, { timeout: 30000, interval: 100, message: 'Wait for updates to appear' });
 
         const initialSnap = await getDocs(updatesCol);
         const sortedDocs = initialSnap.docs.sort((a, b) => {

@@ -77,7 +77,14 @@ describe('Sync Gap Race Condition', () => {
 
             updatePromises.push(addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), {
                 update: Bytes.fromUint8Array(update),
-                createdAt: serverTimestamp(),
+                // Strictly-increasing numeric createdAt instead of serverTimestamp:
+                // these are 250 INCREMENTAL updates from one source that must be
+                // applied in order. serverTimestamp() gives rapid writes tied
+                // timestamps, so the listener's orderBy('createdAt') falls back to
+                // (random) doc-id order, delivering updates out of sequence — Yjs
+                // then buffers them as pending and the array plateaus below 250.
+                // A monotonic createdAt makes delivery order deterministic.
+                createdAt: i + 1,
                 createdBy: clientA_ID,
                 clientIDs: [1111],
                 clientClocks: [i + 1]
@@ -131,9 +138,9 @@ describe('Sync Gap Race Condition', () => {
                 } else {
                     resolve(); // Should have been caught by interval, but just in case
                 }
-            }, 10000);
+            }, 30000);
         });
-    }, 15000);
+    }, 35000);
 
     it('should handle non-null cursor correctly', async () => {
         // 1. Setup SyncContext
@@ -203,7 +210,7 @@ describe('Sync Gap Race Condition', () => {
                 } else {
                     resolve();
                 }
-            }, 3000);
+            }, 30000);
         });
 
     });

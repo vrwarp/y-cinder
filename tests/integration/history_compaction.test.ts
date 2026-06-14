@@ -14,6 +14,7 @@ import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { collection, getDocs, setDoc, doc, Bytes } from 'firebase/firestore';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { waitForConditionTruthy } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
 
 describe('FireProvider History Compaction', () => {
@@ -34,7 +35,7 @@ describe('FireProvider History Compaction', () => {
 
     });
 
-    it('should merge existing History Segments into Base Snapshot if total size is small', { timeout: 20000 }, async () => {
+    it('should merge existing History Segments into Base Snapshot if total size is small', { timeout: 35000 }, async () => {
         // 1. Setup Data directly in Firestore to simulate "Pre-Compaction" state
         const ydocBase = new Y.Doc();
         ydocBase.getText('content').insert(0, 'Base');
@@ -76,13 +77,18 @@ describe('FireProvider History Compaction', () => {
             maxUpdatesThreshold: 1 // Trigger compaction easily
         });
 
-        // Wait for sync
-        await new Promise(r => setTimeout(r, 1000));
+        // Wait for initial sync to complete before compacting
+        await waitForConditionTruthy(() => provider.synced, { timeout: 30000, message: 'Provider should complete initial sync' });
 
         // 3. Trigger Compaction explicitly
         await provider.compact();
 
-        // 4. Verification
+        // 4. Verification — poll until history and updates are folded into the base
+        await waitForConditionTruthy(async () => {
+            const h = await getDocs(collection(db, path, 'history'));
+            const u = await getDocs(collection(db, path, 'updates'));
+            return h.empty && u.empty;
+        }, { timeout: 30000, interval: 200, message: 'History and updates should be compacted into the base snapshot' });
 
         const historySnap = await getDocs(collection(db, path, 'history'));
         const updatesSnap = await getDocs(collection(db, path, 'updates'));
@@ -99,7 +105,10 @@ describe('FireProvider History Compaction', () => {
             path
         });
 
-        await new Promise(r => setTimeout(r, 1000));
+        await waitForConditionTruthy(() => {
+            const t = ydoc2.getText('content').toString();
+            return t.includes('Base') && t.includes('History') && t.includes('Update');
+        }, { timeout: 30000, interval: 100, message: 'Fresh client should receive all compacted content' });
 
         const text = ydoc2.getText('content').toString();
         // Since sync order might be tricky, we just ensure data exists

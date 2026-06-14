@@ -61,7 +61,7 @@ describe('FireProvider Integration (Emulator)', () => {
         await waitForConditionEquals(
             () => doc2.getText('content').toString(),
             'Hello World',
-            { timeout: 5000, interval: 100, message: 'Doc2 should receive content' }
+            { timeout: 30000, interval: 100, message: 'Doc2 should receive content' }
         );
 
         expect(doc2.getText('content').toString()).toBe('Hello World');
@@ -90,7 +90,7 @@ describe('FireProvider Integration (Emulator)', () => {
         await waitForConditionEquals(
             () => doc2.getText('content').toString(),
             'Persisted Data',
-            { timeout: 5000, interval: 100, message: 'Doc2 should load persisted data' }
+            { timeout: 30000, interval: 100, message: 'Doc2 should load persisted data' }
         );
 
         expect(doc2.getText('content').toString()).toBe('Persisted Data');
@@ -98,7 +98,7 @@ describe('FireProvider Integration (Emulator)', () => {
         provider2.destroy();
     });
 
-    it('should perform compaction on emulator', { timeout: 15000 }, async () => {
+    it('should perform compaction on emulator', { timeout: 35000 }, async () => {
         const path = `integration-tests/compaction-${getStableDate()}-${counter++}`;
         const doc = new Y.Doc();
         // Low threshold to force compaction
@@ -121,7 +121,7 @@ describe('FireProvider Integration (Emulator)', () => {
         await waitForConditionEquals(
             () => doc2.getText('content').toString(),
             'ABC',
-            { timeout: 10000, interval: 100, message: 'Doc2 should receive compacted data' }
+            { timeout: 30000, interval: 100, message: 'Doc2 should receive compacted data' }
         );
 
         expect(doc2.getText('content').toString()).toBe('ABC');

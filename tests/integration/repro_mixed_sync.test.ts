@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator } from '../utils/emulator';
+import { waitForConditionTruthy } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Sync Reproduction (Non-Empty)', () => {
@@ -40,9 +41,10 @@ describe('FireProvider Sync Reproduction (Non-Empty)', () => {
         const doc1 = new Y.Doc();
         const provider1 = createProvider(doc1, path, { maxWaitTime: 10 });
         doc1.getText('content').insert(0, 'Hello');
-        // Wait for sync
-        await new Promise(r => setTimeout(r, 1000));
-        provider1.destroy(); // Disconnect client 1
+        // Flush 'Hello' to Firestore deterministically: destroy() awaits the
+        // final save, so awaiting it guarantees the data landed before we
+        // disconnect client 1.
+        await provider1.destroy(); // Disconnect client 1
 
         // 2. New Client with Local Data ("World") connecting to same path
         const doc2 = new Y.Doc();
@@ -51,10 +53,13 @@ describe('FireProvider Sync Reproduction (Non-Empty)', () => {
         // Connect
         const provider2 = createProvider(doc2, path, { maxWaitTime: 10 });
 
-        // Wait for sync
+        // Wait for sync (poll until merged)
         // Expected: Pull "Hello", Push "World ". Result: "World Hello" or "Hello World" (depends on order/IDs)
         // AND Firestore should have BOTH.
-        await new Promise(r => setTimeout(r, 2000));
+        await waitForConditionTruthy(() => {
+            const t = doc2.getText('content').toString();
+            return t.includes('Hello') && t.includes('World');
+        }, { timeout: 30000, interval: 100, message: 'Client 2 should merge both Hello and World' });
 
         // 3. Verify Client 2 has merged state
         const text2 = doc2.getText('content').toString();
@@ -64,10 +69,13 @@ describe('FireProvider Sync Reproduction (Non-Empty)', () => {
         // 4. Verify Firestore has merged state via Client 3
         const doc3 = new Y.Doc();
         const provider3 = createProvider(doc3, path);
-        await new Promise(r => setTimeout(r, 1000));
+        // This fails if Client 2 didn't push "World" because it saw "Hello" on server and thought "not empty, do nothing".
+        await waitForConditionTruthy(
+            () => doc3.getText('content').toString().includes('World'),
+            { timeout: 30000, interval: 100, message: 'Client 3 should receive World from Firestore' }
+        );
 
         const text3 = doc3.getText('content').toString();
-        // This fails if Client 2 didn't push "World" because it saw "Hello" on server and thought "not empty, do nothing".
         expect(text3).toContain('World');
 
         provider2.destroy();

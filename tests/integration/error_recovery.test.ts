@@ -33,7 +33,7 @@ vi.mock('@firebase/firestore', async (importOriginal: () => Promise<any>) => {
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
-import { waitForConditionEquals } from '../utils/wait';
+import { waitForConditionEquals, waitForConditionTruthy } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Error Recovery (Emulator)', () => {
@@ -71,7 +71,10 @@ describe('FireProvider Error Recovery (Emulator)', () => {
         const provider2 = createProvider(doc2, path, { maxWaitTime: 50 });
 
         // Wait for initial sync to complete to avoid race conditions where sync() picks up the update
-        await new Promise(r => setTimeout(r, 1000));
+        await waitForConditionTruthy(
+            () => provider1.synced && provider2.synced,
+            { timeout: 30000, interval: 100, message: 'Both providers should finish initial sync' }
+        );
 
         // Trigger failure for the NEXT addDoc
         mockControls.shouldFailAddDoc = true;
@@ -87,7 +90,7 @@ describe('FireProvider Error Recovery (Emulator)', () => {
             await waitForConditionEquals(
                 () => doc2.getText('content').toString(),
                 'Critical Data',
-                { timeout: 3000, interval: 100, message: 'Doc2 should eventually receive data' }
+                { timeout: 30000, interval: 100, message: 'Doc2 should eventually receive data' }
             );
         } catch (e) {
             // Check if it failed

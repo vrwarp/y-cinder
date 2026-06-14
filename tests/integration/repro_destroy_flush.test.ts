@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { seedFromString, getStableDate } from '../unit/prng';
+import { waitForConditionEquals, waitForConditionTruthy } from '../utils/wait';
 import { initializeApp } from '@firebase/app';
 import {
     getFirestore,
@@ -89,7 +90,11 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
             maxWaitTime: 50
         });
 
-        await new Promise(r => setTimeout(r, 2000));
+        await waitForConditionEquals(
+            () => ydoc2.getText('content').toString(),
+            'ImportantData',
+            { timeout: 30000, interval: 100, message: 'Recovered content should match flushed data' }
+        );
 
         const content = ydoc2.getText('content').toString();
         console.log(`Recovered content: "${content}"`);
@@ -133,7 +138,11 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
             maxWaitTime: 50
         });
 
-        await new Promise(r => setTimeout(r, 2000));
+        await waitForConditionEquals(
+            () => ydoc2.getText('content').toString(),
+            expectedContent,
+            { timeout: 30000, interval: 100, message: 'Recovered content should match all flushed updates' }
+        );
 
         const actualContent = ydoc2.getText('content').toString();
         console.log(`Actual content length: ${actualContent.length}`);
@@ -177,7 +186,10 @@ describe('Issue 5: destroy() Fire-and-Forget Flush', () => {
             maxWaitTime: 50
         });
 
-        await new Promise(r => setTimeout(r, 2000));
+        await waitForConditionTruthy(() => {
+            const c = ydoc2.getText('content').toString();
+            return c.includes('Data1') && c.includes('Data2');
+        }, { timeout: 30000, interval: 100, message: 'Recovered content should contain both writes' });
 
         const content = ydoc2.getText('content').toString();
         console.log(`Content after destroy during write: "${content}"`);

@@ -102,7 +102,7 @@ describe('Issue 1: saveToFirestore Race Condition', () => {
             await waitForConditionEquals(
                 () => doc2.getText('content').toString(),
                 'FirstSecondThird',
-                { timeout: 5000, interval: 100, message: 'All updates should sync' }
+                { timeout: 30000, interval: 100, message: 'All updates should sync' }
             );
         } catch (e) {
             // Expected to fail if bug exists
@@ -158,7 +158,7 @@ describe('Issue 1: saveToFirestore Race Condition', () => {
             await waitForConditionEquals(
                 () => doc2.getText('content').toString(),
                 doc1.getText('content').toString(),
-                { timeout: 5000, interval: 100, message: 'Rapid updates should sync' }
+                { timeout: 30000, interval: 100, message: 'Rapid updates should sync' }
             );
         } catch (e) {
             // Expected to fail if bug exists

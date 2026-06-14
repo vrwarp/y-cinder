@@ -6,7 +6,7 @@
  * sync was treated as success: no retry, no sync-failure event, and local
  * changes were never pushed.
  *
- * Also covers the 'synced' event and synced property.
+ * Also covers the 'sync' event and synced property.
  *
  * @file sync_failure_retry.test.ts
  */
@@ -130,7 +130,7 @@ describe('Initial sync failure handling', () => {
         await provider.destroy();
     }, 30000);
 
-    it('emits synced event on successful initial sync', async () => {
+    it('emits sync event on successful initial sync', async () => {
         const path = `integration-tests/sync-ok-${getStableDate()}-${counter++}`;
 
         const doc = new Y.Doc();
@@ -142,13 +142,13 @@ describe('Initial sync failure handling', () => {
         });
 
         let syncedEvent = false;
-        provider.on('synced', (state: boolean) => {
+        provider.on('sync', (state: boolean) => {
             syncedEvent = state;
         });
 
         await waitForConditionTruthy(
             () => syncedEvent && provider.synced,
-            { timeout: 10000, interval: 100, message: 'synced event should fire' }
+            { timeout: 10000, interval: 100, message: 'sync event should fire' }
         );
 
         await provider.destroy();

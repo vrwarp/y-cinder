@@ -48,7 +48,7 @@ import {
 } from "./subdocs";
 
 // Re-export types for external consumers
-export { FireProviderConfig } from "./types";
+export type { FireProviderConfig } from "./types";
 
 /**
  * Yjs persistence provider for Firebase Firestore.
@@ -241,7 +241,7 @@ export class FireProvider extends ObservableV2<any> {
 
   /**
    * Whether initial sync has completed and real-time listeners are active.
-   * Also emitted as a 'synced' event when the state becomes true.
+   * Also emitted as a 'sync' event when the state becomes true.
    */
   get synced(): boolean {
     return this._synced;
@@ -460,9 +460,11 @@ export class FireProvider extends ObservableV2<any> {
       this._lastHistoryDoc = result.lastHistoryDoc;
       this._unsubscribeHistory = createHistoryListener(syncCtx, result.lastHistoryDoc);
 
-      // Initial sync complete and listeners attached
+      // Initial sync complete and listeners attached. The 'sync' event name
+      // follows the y-fire / y-* provider convention (y-websocket, y-indexeddb)
+      // so consumers can treat this provider as a drop-in.
       this._synced = true;
-      this.emit('synced', [true]);
+      this.emit('sync', [true]);
 
     } catch (err) {
       console.error("Sync failed", err);
@@ -646,6 +648,13 @@ export class FireProvider extends ObservableV2<any> {
 
       // Reset retry counter on success
       this._saveRetryCount = 0;
+
+      // Announce the committed save with the commit wall-clock time — the
+      // success half of the persistence event surface (every failure mode
+      // already emits 'save-rejected'). Fires for the debounced path, the
+      // threshold-forced path, and the destroy() final flush alike, since
+      // they all funnel through here. Consumers map it to a last-sync time.
+      this.emit('saved', [Date.now()]);
 
       // P0.5 FIX: Check if new updates arrived during save
       // If so, schedule another save

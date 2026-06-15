@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { seedFromString, getStableDate } from '../unit/prng';
+import { waitForConditionTruthy, waitForConditionEquals } from '../utils/wait';
 import { initializeApp } from '@firebase/app';
 import {
     getFirestore,
@@ -58,6 +59,11 @@ describe('Issue 12: Partial Compaction Failure', () => {
             maxUpdatesThreshold: 1000
         });
 
+        // Wait for the background initial sync to finish before issuing manual
+        // writes/compaction — otherwise the constructor's sync races with the
+        // manual addDoc loop and compact() and can collide (ALREADY_EXISTS).
+        await waitForConditionTruthy(() => provider.synced, { timeout: 30000, message: 'Provider should complete initial sync' });
+
         // Add several updates with content
         const contentDoc = new Y.Doc();
         contentDoc.getText('text').insert(0, 'TestData');
@@ -103,17 +109,19 @@ describe('Issue 12: Partial Compaction Failure', () => {
         });
 
         // Wait for sync
-        await new Promise(r => setTimeout(r, 500));
+        await waitForConditionTruthy(() => provider.synced, { timeout: 30000, message: 'Provider should complete initial sync' });
 
         // Add unique content
         ydoc.getText('content').insert(0, 'UniqueContent123');
 
-        // Wait for save
-        await new Promise(r => setTimeout(r, 1000));
+        // Wait for the debounced save to land in the updates collection
+        await waitForConditionTruthy(
+            async () => (await getDocs(collection(db, path, 'updates'))).size > 0,
+            { timeout: 30000, interval: 100, message: 'Update should be saved before compaction' }
+        );
 
         // Trigger compaction
         await provider.compact();
-        await new Promise(r => setTimeout(r, 500));
 
         // Verify with new provider
         await provider.destroy();
@@ -125,7 +133,11 @@ describe('Issue 12: Partial Compaction Failure', () => {
             path
         });
 
-        await new Promise(r => setTimeout(r, 2000));
+        await waitForConditionEquals(
+            () => ydoc2.getText('content').toString(),
+            'UniqueContent123',
+            { timeout: 30000, interval: 100, message: 'Provider2 should recover compacted content' }
+        );
 
         const content = ydoc2.getText('content').toString();
         console.log(`Recovered content: "${content}"`);

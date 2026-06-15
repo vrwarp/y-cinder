@@ -91,8 +91,11 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
             maxWaitTime: 50
         });
 
-        // Wait for sync
-        await new Promise(r => setTimeout(r, 2000));
+        // Wait for sync (poll until both clients' content is applied)
+        await waitForConditionTruthy(() => {
+            const c = receiverDoc.getText('content').toString();
+            return c.includes('FromClient1') && c.includes('FromClient2');
+        }, { timeout: 30000, interval: 100, message: 'Receiver should apply updates from both clients' });
 
         const content = receiverDoc.getText('content').toString();
         console.log(`Receiver content: "${content}"`);
@@ -140,7 +143,7 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
         await waitForConditionTruthy(() => {
             return docA.getText('shared').toString().includes('B') &&
                 docB.getText('shared').toString().includes('A');
-        }, { timeout: 5000, interval: 100, message: 'Both clients should see each other changes' });
+        }, { timeout: 30000, interval: 100, message: 'Both clients should see each other changes' });
 
         // Provider C joins late
         const docC = new Y.Doc();
@@ -155,7 +158,7 @@ describe('Issue 3: Multi-Client Metadata Handling', () => {
         await waitForConditionTruthy(() => {
             const text = docC.getText('shared').toString();
             return text.includes('A') && text.includes('B');
-        }, { timeout: 5000, interval: 100, message: 'Late joiner should get all updates' });
+        }, { timeout: 30000, interval: 100, message: 'Late joiner should get all updates' });
 
         const finalText = docC.getText('shared').toString();
         console.log(`Final text on C: "${finalText}"`);

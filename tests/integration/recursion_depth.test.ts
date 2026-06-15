@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
+import { waitForConditionTruthy } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Recursion Depth Guard (Emulator)', () => {
@@ -93,8 +94,11 @@ describe('FireProvider Recursion Depth Guard (Emulator)', () => {
         const subdoc1 = new Y.Doc();
         rootDoc.getArray('subdocs').push([subdoc1]);
 
-        // Wait for handler
-        await new Promise(r => setTimeout(r, 100));
+        // Wait for the subdocs handler to spin up the child provider
+        await waitForConditionTruthy(
+            () => !!(rootProvider as any).subProviders.values().next().value,
+            { timeout: 10000, interval: 50, message: 'Child provider should be created' }
+        );
 
         // Get the child provider
         const childProvider = (rootProvider as any).subProviders.values().next().value;
@@ -109,8 +113,11 @@ describe('FireProvider Recursion Depth Guard (Emulator)', () => {
         const subdoc2 = new Y.Doc();
         subdoc1.getArray('subdocs').push([subdoc2]);
 
-        // Wait for handler
-        await new Promise(r => setTimeout(r, 100));
+        // Wait for the recursion-limit signal to fire
+        await waitForConditionTruthy(
+            () => errorSpy.mock.calls.length > 0,
+            { timeout: 10000, interval: 50, message: 'recursion-limit connection-error should fire' }
+        );
 
         expect(errorSpy).toHaveBeenCalled();
         const errorArgs = errorSpy.mock.calls[0][0];

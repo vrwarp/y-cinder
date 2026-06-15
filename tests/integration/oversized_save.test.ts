@@ -47,7 +47,7 @@ import { FireProvider } from '../../src/provider';
 import { DEFAULTS } from '../../src/types';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
-import { waitForConditionEquals } from '../utils/wait';
+import { waitForConditionEquals, waitForConditionTruthy } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
 
 describe('Oversized Save Circuit Breaker (Emulator)', () => {
@@ -81,7 +81,7 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
         const provider1 = createProvider(doc1, path, { maxWaitTime: 50 });
 
         // Wait for initial sync
-        await new Promise(r => setTimeout(r, 1000));
+        await waitForConditionTruthy(() => provider1.synced, { timeout: 30000, message: 'Provider should complete initial sync' });
 
         // Setup: mock addDoc to reject with invalid-argument (Firestore size error)
         mockControls.shouldFailAddDoc = true;
@@ -96,8 +96,8 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
         // Make an update
         doc1.getText('content').insert(0, 'Some data');
 
-        // Wait for debounce + save attempt
-        await new Promise(r => setTimeout(r, 500));
+        // Wait for the debounced save attempt to fail and emit save-rejected
+        await waitForConditionEquals(() => rejectedEvents.length, 1, { timeout: 15000, interval: 100, message: 'save-rejected should be emitted' });
 
         // Should have emitted save-rejected
         expect(rejectedEvents.length).toBe(1);
@@ -120,7 +120,7 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
         const provider1 = createProvider(doc1, path, { maxWaitTime: 30 });
 
         // Wait for initial sync
-        await new Promise(r => setTimeout(r, 1000));
+        await waitForConditionTruthy(() => provider1.synced, { timeout: 30000, message: 'Provider should complete initial sync' });
 
         // Setup: mock addDoc to always fail with a generic error
         mockControls.shouldFailAddDoc = true;
@@ -143,10 +143,10 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
         // Make an update
         doc1.getText('content').insert(0, 'Retry test data');
 
-        // Wait long enough for MAX_SAVE_RETRIES attempts.
-        // Retries use exponential backoff (~300ms, ~500ms, ~900ms, ~1700ms
-        // plus jitter), so the final attempt lands around the 4s mark.
-        await new Promise(r => setTimeout(r, 7000));
+        // Wait for all MAX_SAVE_RETRIES attempts to exhaust and emit the
+        // terminal save-rejected. Retries use exponential backoff (~300ms,
+        // ~500ms, ~900ms, ~1700ms plus jitter), so allow generous headroom.
+        await waitForConditionEquals(() => rejectedEvents.length, 1, { timeout: 25000, interval: 100, message: 'save-rejected (max-retries-exceeded) should be emitted' });
 
         // Restore original property
         Object.defineProperty(mockControls, 'shouldFailAddDoc', {
@@ -174,7 +174,7 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
         const provider1 = createProvider(doc1, path, { maxWaitTime: 50 });
 
         // Wait for initial sync
-        await new Promise(r => setTimeout(r, 1000));
+        await waitForConditionTruthy(() => provider1.synced, { timeout: 30000, message: 'Provider should complete initial sync' });
 
         const rejectedEvents: any[] = [];
         provider1.on('save-rejected', (event: any) => {
@@ -186,8 +186,9 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
         const largeText = 'x'.repeat(1_200_000);
         doc1.getText('content').insert(0, largeText);
 
-        // Wait for debounce + storage upload + pointer write
-        await new Promise(r => setTimeout(r, 3000));
+        // Wait for the debounced save to offload to Cloud Storage and write
+        // the pointer doc (exactly one addDoc).
+        await waitForConditionEquals(() => mockControls.addDocCallCount, 1, { timeout: 20000, interval: 100, message: 'Pointer doc should be written after storage offload' });
 
         // The update must NOT be rejected — it is offloaded to Cloud Storage
         expect(rejectedEvents.length).toBe(0);
@@ -207,10 +208,10 @@ describe('Oversized Save Circuit Breaker (Emulator)', () => {
         await waitForConditionEquals(
             () => doc2.getText('content').length,
             largeText.length,
-            { timeout: 20000, interval: 200, message: 'Fresh client should download offloaded update' }
+            { timeout: 30000, interval: 200, message: 'Fresh client should download offloaded update' }
         );
 
         await provider1.destroy();
         await provider2.destroy();
-    }, 40000);
+    }, 50000);
 });

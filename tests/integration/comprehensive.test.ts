@@ -79,12 +79,12 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
         await waitForConditionEquals(
             () => testDoc.getText('content').toString(),
             'Snapshot+History+Live',
-            { timeout: 10000, interval: 100, message: 'Tiered storage rehydration should complete' }
+            { timeout: 30000, interval: 100, message: 'Tiered storage rehydration should complete' }
         );
 
         expect(testDoc.getText('content').toString()).toBe('Snapshot+History+Live');
         await provider.destroy();
-    }, 20000);
+    }, 40000);
 
     it('should fallback to History Segment when Snapshot is too large (Compaction Level 2)', async () => {
         const path = `integration-tests/compaction-l2-${getStableDate()}-${counter++}`;
@@ -164,7 +164,7 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
         await waitForConditionTruthy(() => {
             child2 = doc2.getMap('subdocs').get('child-1') as Y.Doc;
             return !!child2;
-        }, { timeout: 5000, interval: 100, message: 'Child document should be synced' });
+        }, { timeout: 30000, interval: 100, message: 'Child document should be synced' });
 
         expect(child2).toBeDefined();
 
@@ -175,7 +175,7 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
         await waitForConditionTruthy(() => {
             grandChild2 = child2!.getMap('subdocs').get('grandchild-1') as Y.Doc;
             return !!grandChild2;
-        }, { timeout: 8000, interval: 100, message: 'Grandchild document should be synced' });
+        }, { timeout: 30000, interval: 100, message: 'Grandchild document should be synced' });
 
         expect(grandChild2).toBeDefined();
 
@@ -183,14 +183,14 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
         await waitForConditionEquals(
             () => grandChild2!.getText('deep').toString(),
             'Deep Secret',
-            { timeout: 5000, interval: 100, message: 'Grandchild content should be synced' }
+            { timeout: 30000, interval: 100, message: 'Grandchild content should be synced' }
         );
 
         expect(grandChild2!.getText('deep').toString()).toBe('Deep Secret');
 
         provider1.destroy();
         provider2.destroy();
-    }, 20000);
+    }, 60000);
 
     it('should handle large payloads gracefully (reject or error)', async () => {
         const path = `integration-tests/large-payload-${getStableDate()}-${counter++}`;

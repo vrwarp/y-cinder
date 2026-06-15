@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator } from '../utils/emulator';
+import { waitForConditionEquals } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
 
 describe('FireProvider Sync Reproduction', () => {
@@ -42,18 +43,17 @@ describe('FireProvider Sync Reproduction', () => {
         // 2. Connect to FireProvider (empty firestore path)
         const provider1 = createProvider(doc1, path, { maxWaitTime: 50 });
 
-        // Wait for potential sync
-        await new Promise(r => setTimeout(r, 2000));
-
         // 3. Connect a second client to verify data exists in Firestore
         const doc2 = new Y.Doc();
         const provider2 = createProvider(doc2, path);
 
-        // Wait for sync
-        await new Promise(r => setTimeout(r, 2000));
-
-        // 4. Expect doc2 to have the content
+        // 4. Expect doc2 to receive the content (poll until propagated)
         // If this fails, it means the issue is reproduced
+        await waitForConditionEquals(
+            () => doc2.getText('content').toString(),
+            'Initial Content',
+            { timeout: 30000, interval: 100, message: 'Doc2 should receive content from doc1' }
+        );
         expect(doc2.getText('content').toString()).toBe('Initial Content');
 
         provider1.destroy();

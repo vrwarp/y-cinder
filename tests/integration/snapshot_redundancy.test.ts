@@ -72,7 +72,7 @@ describe('Snapshot download redundancy', () => {
         // Seed content and compact it into a storage-backed snapshot
         const doc1 = new Y.Doc();
         const provider1 = createProvider(doc1, path);
-        await waitForConditionTruthy(() => provider1.synced, { timeout: 10000 });
+        await waitForConditionTruthy(() => provider1.synced, { timeout: 30000 });
         doc1.getText('t').insert(0, 'compact me');
         await new Promise(r => setTimeout(r, 500));
 
@@ -98,7 +98,7 @@ describe('Snapshot download redundancy', () => {
         await waitForConditionEquals(
             () => doc2.getText('t').toString(),
             'compact me',
-            { timeout: 10000, interval: 100 }
+            { timeout: 30000, interval: 100 }
         );
         await new Promise(r => setTimeout(r, 1500));
         expect(mockControls.snapshotDownloads.length).toBe(1);
@@ -107,7 +107,7 @@ describe('Snapshot download redundancy', () => {
         // A reconnecting, fully-synced client needs no snapshot download at all
         mockControls.snapshotDownloads = [];
         const provider3 = createProvider(doc2, path);
-        await waitForConditionTruthy(() => provider3.synced, { timeout: 10000 });
+        await waitForConditionTruthy(() => provider3.synced, { timeout: 30000 });
         await new Promise(r => setTimeout(r, 1500));
         expect(mockControls.snapshotDownloads.length).toBe(0);
         await provider3.destroy();

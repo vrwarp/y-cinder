@@ -14,7 +14,8 @@
     "emulators:start": "firebase emulators:start",
     "emulators:stop": "lsof -t -i:5001 -i:5002 -i:8080 -i:9000 -i:9099 -i:9199 -i:9090 | xargs kill -9",
     "debugger": "cd debugger && npm run dev",
-    "test:ui": "cd debugger && npx playwright test"
+    "test:ui": "cd debugger && npx playwright test",
+    "prepare": "node scripts/bundle-worker.js && tsc"
   },
   "repository": {
     "type": "git",
@@ -43,6 +44,7 @@
   },
   "peerDependencies": {
     "firebase": "^11.0.0",
+    "lib0": "^0.2.74",
     "yjs": "^13.6.29"
   }
 }

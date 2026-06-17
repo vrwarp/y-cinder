@@ -415,6 +415,12 @@ function compactToSnapshot(params: {
 
     transaction.set(mainRef, {
         snapshotStoragePath: storagePath,
+        // Drop any legacy inline snapshot now that content lives in Storage.
+        // Without this, a merge:true write over an ancient inline-`content`
+        // doc keeps `content` alongside snapshotStoragePath + a <=700KB
+        // deleteSet, which can exceed Firestore's 1MB doc limit and abort
+        // every future compaction on that doc.
+        content: deleteField(),
         stateVector: calculateStateVector(candidate),
         // A stale fingerprint would hide newer deletions, so when the
         // delete-set is too large to store we remove the field entirely

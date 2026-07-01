@@ -85,6 +85,81 @@ describe('mergeUpdatesCore', () => {
     });
 });
 
+describe('mergeUpdatesCore with nested types (arrays of Y.Maps)', () => {
+    /**
+     * Deleting a nested type (e.g. a Y.Map row inside a Y.Array) takes a
+     * different GC path than in-place edits: the whole subtree is replaced
+     * by GC id-range structs (parentGCd). This covers array move
+     * (delete + re-insert) and delete/recreate workloads.
+     */
+    function arrayChurnUpdates(): Uint8Array[] {
+        const doc = new Y.Doc();
+        doc.clientID = 555;
+        const blobs: Uint8Array[] = [];
+        doc.on('update', (u: Uint8Array) => blobs.push(u));
+        const a = doc.getArray<Y.Map<any>>('rows');
+        const makeRow = (id: number, i: number) => {
+            const m = new Y.Map<any>();
+            m.set('id', id);
+            m.set('v', `value ${id} revision ${i} with some content payload`);
+            return m;
+        };
+        doc.transact(() => {
+            for (let i = 0; i < 20; i++) a.push([makeRow(i, 0)]);
+        });
+        // Churn: delete + recreate rows (the "move"/"replace" pattern)
+        for (let i = 0; i < 80; i++) {
+            const idx = i % a.length;
+            doc.transact(() => {
+                const id = a.get(idx).get('id');
+                a.delete(idx, 1);
+                a.insert(idx, [makeRow(id, i + 1)]);
+            });
+        }
+        const json = JSON.stringify(a.toJSON());
+        doc.destroy();
+        return Object.assign(blobs, { json }) as Uint8Array[] & { json: string };
+    }
+
+    it('shrinks nested-type churn while preserving structure and content', () => {
+        const blobs = arrayChurnUpdates() as Uint8Array[] & { json: string };
+        const plain = Y.mergeUpdates(blobs);
+        const gcd = mergeUpdatesCore(blobs, { gc: true });
+
+        expect(gcd.byteLength).toBeLessThan(plain.byteLength * 0.7);
+
+        const rebuild = (u: Uint8Array) => {
+            const d = new Y.Doc();
+            Y.applyUpdate(d, u);
+            const s = JSON.stringify(d.getArray('rows').toJSON());
+            d.destroy();
+            return s;
+        };
+        expect(rebuild(gcd)).toBe(rebuild(plain));
+        expect(rebuild(gcd)).toBe(blobs.json);
+        expect(Y.encodeStateVectorFromUpdate(gcd))
+            .toEqual(Y.encodeStateVectorFromUpdate(plain));
+    });
+
+    it('converges with an un-GCd client after concurrent nested edits', () => {
+        const blobs = arrayChurnUpdates();
+        const full = new Y.Doc();
+        Y.applyUpdate(full, Y.mergeUpdates(blobs));
+        const fresh = new Y.Doc();
+        Y.applyUpdate(fresh, mergeUpdatesCore(blobs, { gc: true }));
+
+        (fresh.getArray('rows').get(0) as Y.Map<any>).set('v', 'fresh-edit');
+        (full.getArray('rows').get(3) as Y.Map<any>).set('v', 'full-edit');
+        Y.applyUpdate(full, Y.encodeStateAsUpdate(fresh, Y.encodeStateVector(full)));
+        Y.applyUpdate(fresh, Y.encodeStateAsUpdate(full, Y.encodeStateVector(fresh)));
+
+        expect(JSON.stringify(fresh.getArray('rows').toJSON()))
+            .toBe(JSON.stringify(full.getArray('rows').toJSON()));
+        full.destroy();
+        fresh.destroy();
+    });
+});
+
 describe('gcMergedUpdate', () => {
     it('returns the input unchanged when dependencies are missing', () => {
         const blobs = churnedUpdates();

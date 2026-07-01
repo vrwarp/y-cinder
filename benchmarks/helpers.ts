@@ -305,6 +305,90 @@ function createObject(root: Y.Map<any>, key: string, rng: SeededRandom, style: '
     }
 }
 
+export interface ChurnWorkloadOptions {
+    seed: number;
+    sessions: number;
+    opsPerSession: number;
+    compactionThreshold: number;
+    compact: CompactStrategy;
+    /** Populates the document in the first session */
+    setup: (doc: Y.Doc, rng: SeededRandom) => void;
+    /** Performs one high-level operation (may be multiple transactions) */
+    op: (doc: Y.Doc, rng: SeededRandom) => void;
+    /** Extracts a JSON-comparable view of the final state */
+    materialize: (doc: Y.Doc) => unknown;
+}
+
+export interface ChurnWorkloadResult {
+    samples: CompactionSample[];
+    snapshot: Uint8Array | null;
+    pending: Uint8Array[];
+    totalMergeMs: number;
+    /** JSON of the final state (for cross-strategy equivalence checks) */
+    finalJson: string;
+}
+
+/**
+ * Generic churn simulator: runs a caller-defined workload across sessions
+ * (fresh deterministic client per session, bootstrapped from persisted
+ * snapshot + pending updates), flushing one blob per operation and
+ * compacting at the threshold — the FireProvider persistence shape.
+ * Used for workloads that don't fit the text/object simulators above.
+ */
+export function simulateChurnWorkload(opts: ChurnWorkloadOptions): ChurnWorkloadResult {
+    const rng = new SeededRandom(opts.seed);
+    const samples: CompactionSample[] = [];
+    let snapshot: Uint8Array | null = null;
+    let pending: Uint8Array[] = [];
+    let totalMergeMs = 0;
+    let totalOps = 0;
+    let finalJson = '';
+
+    for (let session = 0; session < opts.sessions; session++) {
+        const doc = new Y.Doc();
+        doc.clientID = opts.seed * 100_000 + session + 1;
+        if (snapshot) Y.applyUpdate(doc, snapshot);
+        for (const u of pending) Y.applyUpdate(doc, u);
+
+        const captured: Uint8Array[] = [];
+        doc.on('update', (u: Uint8Array) => captured.push(u));
+        const flush = () => {
+            if (captured.length > 0) {
+                pending.push(captured.length === 1 ? captured[0] : Y.mergeUpdates(captured));
+                captured.length = 0;
+            }
+            while (pending.length >= opts.compactionThreshold) {
+                const blobs = [...(snapshot ? [snapshot] : []), ...pending.splice(0, pending.length)];
+                const t0 = performance.now();
+                snapshot = opts.compact(blobs);
+                const mergeMs = performance.now() - t0;
+                totalMergeMs += mergeMs;
+                samples.push({
+                    index: samples.length + 1,
+                    editsSoFar: totalOps,
+                    snapshotBytes: snapshot.byteLength,
+                    mergeMs,
+                });
+            }
+        };
+
+        if (session === 0) {
+            opts.setup(doc, rng);
+            flush();
+        }
+        for (let op = 0; op < opts.opsPerSession; op++) {
+            totalOps++;
+            opts.op(doc, rng);
+            flush();
+        }
+
+        finalJson = JSON.stringify(opts.materialize(doc));
+        doc.destroy();
+    }
+
+    return { samples, snapshot, pending, totalMergeMs, finalJson };
+}
+
 /**
  * Rebuilds a document from persisted state (snapshot + pending updates)
  * and returns its text content — used to verify strategy equivalence.

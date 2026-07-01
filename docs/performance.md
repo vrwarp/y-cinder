@@ -181,6 +181,43 @@ Two structural takeaways:
   an editor or canvas bound to the document, that's one re-render per
   network delivery instead of one per remote mutation.
 
+## Array-heavy documents (Y.Array)
+
+Lists, kanban boards, layer stacks, and row collections churn through
+arrays, and array churn has its own shapes
+(`benchmarks/array-heavy.bench.ts`, 1000–1500 operations each):
+
+| pattern | plain merge | GC | ratio |
+| --- | ---: | ---: | ---: |
+| reorder-heavy (kanban moves) | 231.5 KB | 34.4 KB | 6.7× |
+| full-array rewrite (anti-pattern) | 1.46 MB | 7.9 KB | 190× |
+| nested rows, delete+recreate | 155.4 KB | 34.9 KB | 4.5× |
+
+Why arrays benefit the most from GC compaction:
+
+- **Move = delete + re-insert.** Yjs has no native array move, so every
+  reorder duplicates the item's full content in history. GC reclaims the
+  old copy; without it a kanban board's snapshot grows by one card-size
+  per drag, forever.
+- **Deleting a nested type GCs its whole subtree.** When a `Y.Map` row is
+  removed from an array, all of its items are replaced by plain GC
+  id-ranges (`parentGCd`), which merge with adjacent ranges. This is the
+  *opposite* trade-off from in-place map-key overwrites (whose tombstone
+  structure must be kept individually) — bulk delete/replace of array
+  entries compacts nearly to the live-state floor.
+- **The full-rewrite anti-pattern is fatal without GC.** Apps that sync
+  external state with `arr.delete(0, len); arr.insert(0, rows)` tombstone
+  every element on every save: after only 600 such rewrites of a 50-row
+  array the un-GC'd snapshot passes Firestore's 1 MB document limit. With
+  GC it stays at ~8 KB. (Prefer minimal diffs over full rewrites anyway —
+  every rewrite also makes concurrent edits from other clients conflict
+  spuriously.)
+
+Correctness of the nested-type GC path (subtree → GC ranges) is pinned by
+`tests/unit/merge-core.test.ts`: identical materialized JSON, identical
+state vectors, and convergence with clients holding full un-GC'd history
+after concurrent edits.
+
 ### Many objects as subdocuments
 
 Apps that model each object as a Yjs subdocument get one `FireProvider`

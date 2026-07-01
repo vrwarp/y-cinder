@@ -144,6 +144,11 @@ corruption `Y.decodeUpdate` did — covered by
 `tests/unit/data-integrity.test.ts` and the fuzz suites — and the state
 vector is computed once, outside the transaction.
 
+These passes were subsequently moved off the main thread entirely
+(`mergeUpdatesWithMeta`, worker-side): see
+[Very large single documents](#very-large-single-documents-multi-megabyte-snapshots)
+for why that matters at multi-MB scale.
+
 ## Object-modification-heavy documents (Y.Map overwrites)
 
 Canvas/whiteboard/board-style apps store objects as nested `Y.Map`s and
@@ -217,6 +222,61 @@ Correctness of the nested-type GC path (subtree → GC ranges) is pinned by
 `tests/unit/merge-core.test.ts`: identical materialized JSON, identical
 state vectors, and convergence with clients holding full un-GC'd history
 after concurrent edits.
+
+## Very large single documents (multi-megabyte snapshots)
+
+Profiled on realistic fragmented documents (~60-char items, 10 clients,
+scattered churn — item *count*, not byte count, is what drives Yjs costs;
+see `benchmarks/large-doc.bench.ts` for the 1–4 MB tier, prototype numbers
+at 10 MB / 300k structs):
+
+| operation | ~1 MB | ~5 MB | ~10 MB |
+| --- | ---: | ---: | ---: |
+| merge + GC (worker-side) | ~150 ms | ~1 s | ~3.1 s |
+| old main-thread meta walks (SV + DS fingerprint) | 40 ms | 138 ms | ~670 ms |
+| delete-set fingerprint size | 22 KB | 89 KB | 178 KB |
+
+The finding: compaction already merged in the Web Worker, but then
+**walked the multi-MB result twice on the main thread** — once for
+validation + state vector, once for the delete-set fingerprint. At 10 MB
+that's ~670 ms of UI stall per compaction (every ~50 updates).
+
+`mergeUpdatesWithMeta` now derives the result, state vector, and
+delete-set fingerprint in a single worker-side call, so compaction's
+main-thread Yjs cost is ~zero at any document size. On the GC path the
+metadata is nearly free: the rebuilt `Y.Doc` is already in hand, so the
+state vector is `O(clients)` and the delete-set encodes straight from the
+store instead of re-walking the binary (total CPU drops too — 912 ms vs
+1098 ms at ~5 MB). Applying cleanly to the doc doubles as the structural
+validation the old `Y.decodeUpdate` guard provided; the non-GC/fallback
+path keeps the lazy-walk validation, also worker-side.
+
+Also verified at scale: the delete-set fingerprint grows slowly (~178 KB
+at 10 MB of fragmented churn), staying well under the 700 KB inline cap —
+so reconnecting clients keep the early-exit fast path even on very old
+documents.
+
+## Subdocument fan-out at scale
+
+Every subdocument gets its own `FireProvider`: one initial sync (three
+paginated queries + main doc read) and **three Firestore listeners**, all
+started eagerly the moment the subdoc appears — whether or not the app
+ever renders it. A board with 500 object-subdocs opens 1,500 listeners at
+startup.
+
+`subdocLoadingMode: 'lazy'` follows the Yjs lazy-loading convention:
+remote-arriving subdocs (`shouldLoad === false`) are not synced until the
+app calls `subdoc.load()`; locally created and `autoLoad` subdocs still
+sync immediately. Measured at just 20 subdocs on the emulator, a client
+reaches parent-synced in ~200 ms in lazy mode vs ~470 ms for a full eager
+sync — and the gap on production Firestore is larger, since each avoided
+subdoc sync is several network round-trips and each avoided listener is
+ongoing read/broadcast cost. Covered by
+`tests/integration/subdoc_lazy.test.ts`.
+
+The default remains `'eager'` for backward compatibility: lazy mode
+requires the app to call `subdoc.load()` (which is also what makes it
+fast).
 
 ### Many objects as subdocuments
 

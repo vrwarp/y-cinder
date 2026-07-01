@@ -51,12 +51,11 @@ import {
     Timestamp,
 } from "@firebase/firestore";
 import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
-import * as Y from "yjs";
 import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
 import { wait, calculateBackoff } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
-import { mergeUpdatesAsync } from "./merge-utils";
+import { mergeUpdatesWithMetaAsync } from "./merge-utils";
 
 /**
  * Context required for compaction operations.
@@ -255,32 +254,33 @@ export async function compact(
         // GC (default on) rewrites the merged result so deleted-item content
         // is dropped: without it the snapshot grows with total historical
         // churn instead of live content.
+        //
+        // The merge also validates the candidate and derives the snapshot
+        // metadata (state vector + delete-set fingerprint) — all inside the
+        // merge Web Worker when available. At multi-megabyte snapshot sizes
+        // those walks cost hundreds of milliseconds; doing them worker-side
+        // keeps compaction's main-thread cost near zero. A validation
+        // failure rejects, and a corrupted merge must never overwrite the
+        // canonical snapshot.
         const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
-        const candidate = await mergeUpdatesAsync(allContent, { gc: ctx.gc !== false });
-
-        // Validate the candidate before committing — a corrupted merge must
-        // never overwrite the canonical snapshot. encodeStateVectorFromUpdate
-        // walks every struct and diffUpdate additionally parses the
-        // delete-set, so together they reject the same corruption
-        // Y.decodeUpdate would, without materializing the full struct tree
-        // on the main thread. Both outputs are needed below anyway.
+        let candidate: Uint8Array;
         let stateVectorB64: string;
         let deleteSetUpdate: Uint8Array | null = null;
         try {
-            const candidateSV = Y.encodeStateVectorFromUpdate(candidate);
-            stateVectorB64 = toBase64(candidateSV);
+            const merged = await mergeUpdatesWithMetaAsync(allContent, { gc: ctx.gc !== false });
+            candidate = merged.result;
+            stateVectorB64 = toBase64(merged.stateVector);
 
-            // Extract a structs-empty update carrying the candidate's full
-            // delete-set. Stored inline on the main document, it lets clients
-            // that already cover the snapshot's state vector skip downloading
-            // the blob while still proving their deletions are on the server.
-            const dsUpdate = Y.diffUpdate(candidate, candidateSV);
-            if (dsUpdate.byteLength <= DEFAULTS.MAX_DELETE_SET_FIELD_BYTES) {
-                deleteSetUpdate = dsUpdate;
+            // The structs-empty delete-set fingerprint is stored inline on
+            // the main document: it lets clients that already cover the
+            // snapshot's state vector skip downloading the blob while still
+            // proving their deletions are on the server.
+            if (merged.dsUpdate.byteLength <= DEFAULTS.MAX_DELETE_SET_FIELD_BYTES) {
+                deleteSetUpdate = merged.dsUpdate;
             }
         } catch (decodeErr) {
             throw new Error(
-                `Compaction candidate failed validation (${candidate.byteLength} bytes): ${decodeErr}`
+                `Compaction candidate failed validation: ${decodeErr}`
             );
         }
 

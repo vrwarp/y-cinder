@@ -64,6 +64,12 @@ export interface SubdocContext {
      * not spend 3 Firestore ops re-measuring per-client clock skew.
      */
     cachedClockOffset?: number;
+    /**
+     * 'lazy' only starts providers for subdocs whose shouldLoad flag is
+     * set (locally created, autoLoad, or explicitly load()ed) — the Yjs
+     * lazy-loading convention. 'eager' starts a provider for every subdoc.
+     */
+    subdocLoadingMode?: 'eager' | 'lazy';
     /** Factory to create new providers */
     createProvider: (config: any) => any;
     /** Callback to emit connection errors */
@@ -110,12 +116,21 @@ export function handleSubdocs(
 ): void {
     const { added, removed, loaded } = event;
 
-    // Handle added subdocs
+    // Handle added subdocs.
+    // In lazy mode, remote-arriving subdocs (shouldLoad === false) are NOT
+    // synced yet: a document with hundreds of subdocs would otherwise pay
+    // an initial sync plus three Firestore listeners per subdoc at
+    // startup. They sync when the app calls subdoc.load(), which re-emits
+    // them in the `loaded` set below. Locally created subdocs and
+    // autoLoad subdocs have shouldLoad === true and sync immediately.
     added.forEach(subdoc => {
+        if (ctx.subdocLoadingMode === 'lazy' && !subdoc.shouldLoad) {
+            return;
+        }
         startSubdocProvider(subdoc, ctx, subProviders);
     });
 
-    // Handle loaded subdocs
+    // Handle loaded subdocs (explicit subdoc.load() calls)
     loaded.forEach(subdoc => {
         startSubdocProvider(subdoc, ctx, subProviders);
     });
@@ -194,6 +209,7 @@ export function startSubdocProvider(
         compactionLimit: ctx.compactionLimit,
         persistence: ctx.persistence,
         cachedClockOffset: ctx.cachedClockOffset,
+        subdocLoadingMode: ctx.subdocLoadingMode,
     });
 
     subProviders.set(guid, provider);

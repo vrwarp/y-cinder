@@ -13,7 +13,7 @@
 
 import { describe, it, expect } from 'vitest';
 import * as Y from 'yjs';
-import { mergeUpdatesCore, gcMergedUpdate } from '../../src/merge-core';
+import { mergeUpdatesCore, gcMergedUpdate, mergeUpdatesWithMeta } from '../../src/merge-core';
 
 /** Builds a doc with contiguous churn and returns its incremental updates. */
 function churnedUpdates(): Uint8Array[] {
@@ -157,6 +157,56 @@ describe('mergeUpdatesCore with nested types (arrays of Y.Maps)', () => {
             .toBe(JSON.stringify(full.getArray('rows').toJSON()));
         full.destroy();
         fresh.destroy();
+    });
+});
+
+describe('mergeUpdatesWithMeta', () => {
+    /**
+     * Compaction relies on this single call for three things previously
+     * done in separate main-thread passes: the merged candidate, its state
+     * vector, and its delete-set fingerprint — plus validation (a throw
+     * means the candidate must not be committed).
+     */
+    it('returns the same result and metadata as the separate passes', () => {
+        const blobs = churnedUpdates();
+        for (const gc of [true, false]) {
+            const meta = mergeUpdatesWithMeta(blobs, { gc });
+            const expected = mergeUpdatesCore(blobs, { gc });
+
+            expect(meta.result).toEqual(expected);
+            expect(meta.stateVector).toEqual(Y.encodeStateVectorFromUpdate(expected));
+            // Fingerprint: structs-empty, delete-set equal to the result's
+            const decodedDs = Y.decodeUpdate(meta.dsUpdate);
+            expect(decodedDs.structs).toHaveLength(0);
+            expect(Y.equalDeleteSets(decodedDs.ds, Y.decodeUpdate(expected).ds)).toBe(true);
+            // And it matches what Y.diffUpdate would have produced
+            expect(meta.dsUpdate).toEqual(Y.diffUpdate(expected, meta.stateVector));
+        }
+    });
+
+    it('throws on corrupted candidates (the compaction validation guard)', () => {
+        const garbage = new Uint8Array([7, 7, 7, 7, 7, 7]);
+        // Y.mergeUpdates passes garbage through single-item arrays without
+        // validating (see data-integrity tests) — the meta derivation is
+        // what must catch it, for both gc and plain paths.
+        expect(() => mergeUpdatesWithMeta([garbage], { gc: false })).toThrow();
+        expect(() => mergeUpdatesWithMeta([garbage], { gc: true })).toThrow();
+
+        const doc = new Y.Doc();
+        doc.getText('t').insert(0, 'hello world content');
+        const truncated = Y.encodeStateAsUpdate(doc).slice(0, -4);
+        doc.destroy();
+        expect(() => mergeUpdatesWithMeta([truncated], { gc: false })).toThrow();
+        expect(() => mergeUpdatesWithMeta([truncated], { gc: true })).toThrow();
+    });
+
+    it('falls back safely when dependencies are missing (gc path)', () => {
+        const blobs = churnedUpdates();
+        const gapped = blobs.slice(Math.floor(blobs.length / 2));
+        const meta = mergeUpdatesWithMeta(gapped, { gc: true });
+        // Result must be the gap-preserving plain merge, with valid metadata
+        expect(meta.result).toEqual(Y.mergeUpdates(gapped));
+        expect(meta.stateVector).toEqual(Y.encodeStateVectorFromUpdate(meta.result));
     });
 });
 

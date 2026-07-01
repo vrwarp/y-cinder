@@ -24,10 +24,17 @@
  * @module merge-utils
  */
 
-import { mergeUpdatesCore, MergeOptions } from './merge-core';
+import { mergeUpdatesCore, mergeUpdatesWithMeta, MergeOptions, MergeWithMetaResult } from './merge-core';
 import { MERGE_WORKER_CODE } from './generated/merge-worker-blob';
 
-export type { MergeOptions } from './merge-core';
+export type { MergeOptions, MergeWithMetaResult } from './merge-core';
+
+/** Response payload from the worker (plain or meta request) */
+interface WorkerResponse {
+    result: Uint8Array;
+    stateVector?: Uint8Array;
+    dsUpdate?: Uint8Array;
+}
 
 // Worker instance (lazily initialized, singleton)
 let mergeWorker: Worker | null = null;
@@ -36,7 +43,7 @@ let workerSupported = true; // Assume supported until proven otherwise
 
 // Pending merge requests
 const pendingRequests = new Map<string, {
-    resolve: (result: Uint8Array) => void;
+    resolve: (response: WorkerResponse) => void;
     reject: (error: Error) => void;
     /** Fallback timer — cleared as soon as the worker responds */
     timer: ReturnType<typeof setTimeout>;
@@ -78,7 +85,7 @@ function initWorker(): boolean {
 
         // Handle worker messages
         mergeWorker.onmessage = (event) => {
-            const { id, result, error, type } = event.data;
+            const { id, result, stateVector, dsUpdate, error, type } = event.data;
 
             if (type === 'ready') {
                 console.debug('Merge worker ready');
@@ -97,7 +104,7 @@ function initWorker(): boolean {
             if (error) {
                 pending.reject(new Error(error));
             } else if (result) {
-                pending.resolve(result);
+                pending.resolve({ result, stateVector, dsUpdate });
             }
         };
 
@@ -154,43 +161,95 @@ export async function mergeUpdatesAsync(updates: Uint8Array[], options?: MergeOp
 
     // Try to use worker
     if (initWorker() && mergeWorker) {
-        return new Promise((resolve, reject) => {
-            const id = generateRequestId();
-
-            // Fallback timeout to prevent hanging; cleared when the worker responds
-            const timer = setTimeout(() => {
-                if (pendingRequests.has(id)) {
-                    pendingRequests.delete(id);
-                    console.warn('Worker merge timed out, falling back to main thread');
-                    // Fall back to sync merge
-                    try {
-                        const result = mergeUpdatesCore(updates, options);
-                        resolve(result);
-                    } catch (err) {
-                        reject(err);
-                    }
-                }
-            }, 30000); // 30 second timeout
-            // Don't keep Node.js processes alive just for this fallback timer
-            (timer as any).unref?.();
-
-            pendingRequests.set(id, { resolve, reject, timer });
-
-            try {
-                // Send updates to worker
-                // Note: We don't transfer buffers here as we may need them for fallback
-                mergeWorker!.postMessage({ id, updates, gc: !!options?.gc });
-            } catch (err) {
-                pendingRequests.delete(id);
-                clearTimeout(timer);
-                reject(err);
-            }
-        });
+        const response = await postToWorker(
+            { updates, gc: !!options?.gc, meta: false },
+            () => ({ result: mergeUpdatesCore(updates, options) })
+        );
+        return response.result;
     }
 
     // Fallback: sync merge on main thread
     // Wrap in Promise.resolve to keep API consistent
     return Promise.resolve(mergeUpdatesCore(updates, options));
+}
+
+/**
+ * Merge updates AND derive compaction metadata (state vector + delete-set
+ * fingerprint), validating the result — all inside the Web Worker when
+ * available.
+ *
+ * At multi-megabyte snapshot sizes the metadata walks alone cost hundreds
+ * of main-thread milliseconds (~670 ms at 10 MB / 300k structs), so
+ * compaction uses this instead of merging in the worker and then walking
+ * the result on the main thread. Rejects if the merged candidate fails
+ * structural validation.
+ *
+ * @param updates - Array of Uint8Array updates to merge
+ * @param options - Merge options (gc)
+ * @returns Promise resolving to the merged update plus its metadata
+ */
+export async function mergeUpdatesWithMetaAsync(
+    updates: Uint8Array[],
+    options?: MergeOptions
+): Promise<MergeWithMetaResult> {
+    if (initWorker() && mergeWorker) {
+        const response = await postToWorker(
+            { updates, gc: !!options?.gc, meta: true },
+            () => mergeUpdatesWithMeta(updates, options)
+        );
+        if (response.stateVector && response.dsUpdate) {
+            return { result: response.result, stateVector: response.stateVector, dsUpdate: response.dsUpdate };
+        }
+        // Worker dropped the meta fields — derive on the main thread from
+        // its merge result (defensive; should not happen since worker and
+        // client are bundled together). gc already happened in the worker.
+        return mergeUpdatesWithMeta([response.result], { gc: false });
+    }
+
+    return Promise.resolve(mergeUpdatesWithMeta(updates, options));
+}
+
+/**
+ * Posts a request to the merge worker with a 30s main-thread fallback.
+ *
+ * @param message - Request fields (id is added here)
+ * @param fallback - Synchronous main-thread computation used if the worker
+ *                   does not respond in time
+ */
+function postToWorker(
+    message: { updates: Uint8Array[]; gc: boolean; meta: boolean },
+    fallback: () => WorkerResponse
+): Promise<WorkerResponse> {
+    return new Promise((resolve, reject) => {
+        const id = generateRequestId();
+
+        // Fallback timeout to prevent hanging; cleared when the worker responds
+        const timer = setTimeout(() => {
+            if (pendingRequests.has(id)) {
+                pendingRequests.delete(id);
+                console.warn('Worker merge timed out, falling back to main thread');
+                try {
+                    resolve(fallback());
+                } catch (err) {
+                    reject(err instanceof Error ? err : new Error(String(err)));
+                }
+            }
+        }, 30000); // 30 second timeout
+        // Don't keep Node.js processes alive just for this fallback timer
+        (timer as any).unref?.();
+
+        pendingRequests.set(id, { resolve, reject, timer });
+
+        try {
+            // Send updates to worker
+            // Note: We don't transfer buffers here as we may need them for fallback
+            mergeWorker!.postMessage({ id, ...message });
+        } catch (err) {
+            pendingRequests.delete(id);
+            clearTimeout(timer);
+            reject(err instanceof Error ? err : new Error(String(err)));
+        }
+    });
 }
 
 /**

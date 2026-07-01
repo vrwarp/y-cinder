@@ -94,6 +94,22 @@ export interface FireProviderConfig {
      */
     compactionLimit?: number;
     /**
+     * How subdocument providers are started.
+     *
+     * - `'eager'` (default): every subdocument that appears in the document
+     *   gets a FireProvider immediately. Simple, but a document with N
+     *   subdocuments pays N initial syncs and 3N Firestore listeners at
+     *   startup even if the UI renders none of them.
+     * - `'lazy'`: follows the Yjs lazy-loading convention — subdocuments
+     *   arriving from remote peers are only synced once `subdoc.load()` is
+     *   called (or when created with `autoLoad: true`). Locally created
+     *   subdocuments (whose `shouldLoad` is true by default) still sync
+     *   immediately.
+     *
+     * @default 'eager'
+     */
+    subdocLoadingMode?: 'eager' | 'lazy';
+    /**
      * Pre-measured clock offset (serverTime - clientTime, ms) to reuse for
      * distributed locking. Passed by parent providers to their subdocument
      * providers: clock skew is a property of the client, not the document,

@@ -109,6 +109,8 @@ export class FireProvider extends ObservableV2<any> {
   private readonly maxAggregationTime: number;
   /** Whether compaction garbage-collects deleted content */
   private readonly gcCompaction: boolean;
+  /** Subdocument sync strategy: eager (all) or lazy (shouldLoad only) */
+  private readonly subdocLoadingMode: 'eager' | 'lazy';
   private readonly compactionLimit: number;
   private readonly depth: number;
   private readonly lockTTL: number;
@@ -168,6 +170,7 @@ export class FireProvider extends ObservableV2<any> {
       maxWaitTime = DEFAULTS.MAX_WAIT_TIME,
       maxAggregationTime = maxWaitTime * DEFAULTS.MAX_AGGREGATION_MULTIPLIER,
       gcCompaction = true,
+      subdocLoadingMode = 'eager',
       depth = DEFAULTS.DEPTH,
       lockTTL = DEFAULTS.LOCK_TTL,
       compactionLimit = DEFAULTS.COMPACTION_LIMIT,
@@ -223,6 +226,7 @@ export class FireProvider extends ObservableV2<any> {
     this.maxWaitTime = maxWaitTime;
     this.maxAggregationTime = maxAggregationTime;
     this.gcCompaction = gcCompaction;
+    this.subdocLoadingMode = subdocLoadingMode;
     // Reuse a parent provider's measured clock offset (subdoc case): skew
     // is per-client, and measuring costs 3 Firestore ops per provider.
     this._cachedClockOffset = config.cachedClockOffset;
@@ -555,6 +559,7 @@ export class FireProvider extends ObservableV2<any> {
       // May still be undefined if a subdoc is added before the parent's
       // initial sync measures skew — the child then measures it itself.
       cachedClockOffset: this._cachedClockOffset,
+      subdocLoadingMode: this.subdocLoadingMode,
       createProvider: (config) => new FireProvider(config),
       onConnectionError: (error) => {
         this.emit('connection-error', [error]);

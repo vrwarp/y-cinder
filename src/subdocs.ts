@@ -49,12 +49,21 @@ export interface SubdocContext {
     maxUpdatesThreshold: number;
     /** Maximum wait time (inherited) */
     maxWaitTime: number;
+    /** Debounce deferral cap (inherited) */
+    maxAggregationTime: number;
+    /** Whether compaction garbage-collects deleted content (inherited) */
+    gcCompaction: boolean;
     /** Lock TTL (inherited) */
     lockTTL: number;
     /** Compaction limit (inherited) */
     compactionLimit: number;
     /** Offline persistence configuration (inherited) */
     persistence?: { enabled: boolean };
+    /**
+     * Parent's measured clock offset, shared so each subdoc provider does
+     * not spend 3 Firestore ops re-measuring per-client clock skew.
+     */
+    cachedClockOffset?: number;
     /** Factory to create new providers */
     createProvider: (config: any) => any;
     /** Callback to emit connection errors */
@@ -178,10 +187,13 @@ export function startSubdocProvider(
         path: subPath,
         maxUpdatesThreshold: ctx.maxUpdatesThreshold,
         maxWaitTime: ctx.maxWaitTime,
+        maxAggregationTime: ctx.maxAggregationTime,
+        gcCompaction: ctx.gcCompaction,
         depth: ctx.depth + 1,
         lockTTL: ctx.lockTTL,
         compactionLimit: ctx.compactionLimit,
         persistence: ctx.persistence,
+        cachedClockOffset: ctx.cachedClockOffset,
     });
 
     subProviders.set(guid, provider);

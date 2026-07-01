@@ -144,6 +144,57 @@ corruption `Y.decodeUpdate` did — covered by
 `tests/unit/data-integrity.test.ts` and the fuzz suites — and the state
 vector is computed once, outside the transaction.
 
+## Object-modification-heavy documents (Y.Map overwrites)
+
+Canvas/whiteboard/board-style apps store objects as nested `Y.Map`s and
+mutate them constantly — a drag is a burst of `x`/`y` overwrites. Every
+`map.set` on an existing key tombstones the previous item, so history
+grows with the number of *modifications*, not the number of objects.
+`benchmarks/object-heavy.bench.ts` measures this workload (150 objects,
+2400 operations including drag bursts):
+
+| value style | plain merge | GC | live-state floor |
+| --- | ---: | ---: | ---: |
+| numeric (positions/colors) | 369.0 KB | 226.3 KB (1.6×) | 14.2 KB |
+| strings (labels/serialized props) | 287.9 KB | 60.2 KB (4.8×) | 42.8 KB |
+
+Two structural takeaways:
+
+- **GC removes tombstone content, not tombstone structure.** Item ids, key
+  names, and origin references of overwritten entries must survive for
+  CRDT convergence. With string values, content dominates and GC lands
+  near the live-state floor. With tiny numeric values the win is real but
+  bounded — the residual (~212 KB above) is inherent to Yjs map semantics,
+  not something a provider can compact away. Interleaved key overwrites
+  (`x`,`y`,`x`,`y`…) also fragment clock ranges so tombstones can't merge.
+
+  *App-level guidance:* batch object mutations into one transaction per
+  gesture frame (one `doc.transact` setting both `x` and `y`, or a single
+  `position` value), and prefer replacing one serialized value over many
+  scalar keys for high-churn properties. Fewer distinct overwrites →
+  fewer tombstones.
+
+- **Remote modification bursts are delivered as many small updates.** The
+  update and history listeners now batch each Firestore delivery into a
+  single Yjs transaction. For a 150-update remote drag burst: 150 observer
+  flushes / `'update'` events → 1, and 2.94 ms → 0.98 ms apply time. For
+  an editor or canvas bound to the document, that's one re-render per
+  network delivery instead of one per remote mutation.
+
+### Many objects as subdocuments
+
+Apps that model each object as a Yjs subdocument get one `FireProvider`
+per object. Two fixed costs were removed:
+
+- **Clock-skew measurement is now shared.** Skew is a property of the
+  client, not the document, but each subdoc provider used to measure it
+  independently — 3 Firestore ops (write + read + delete) per subdoc at
+  startup, i.e. 1,500 wasted ops for a 500-object board. Subdoc providers
+  now inherit the parent's measured offset.
+- **`gcCompaction` and `maxAggregationTime` are now inherited** by subdoc
+  providers along with the other settings (they previously silently reset
+  to defaults).
+
 ## Unbounded update aggregation while typing
 
 `FireProvider`'s save debounce reset its timer on **every** local update.

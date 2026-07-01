@@ -223,6 +223,9 @@ export class FireProvider extends ObservableV2<any> {
     this.maxWaitTime = maxWaitTime;
     this.maxAggregationTime = maxAggregationTime;
     this.gcCompaction = gcCompaction;
+    // Reuse a parent provider's measured clock offset (subdoc case): skew
+    // is per-client, and measuring costs 3 Firestore ops per provider.
+    this._cachedClockOffset = config.cachedClockOffset;
     this.lockTTL = lockTTL;
     this.compactionLimit = compactionLimit;
     this.persistence = config.persistence;
@@ -544,9 +547,14 @@ export class FireProvider extends ObservableV2<any> {
       depth: this.depth,
       maxUpdatesThreshold: this.maxUpdatesThreshold,
       maxWaitTime: this.maxWaitTime,
+      maxAggregationTime: this.maxAggregationTime,
+      gcCompaction: this.gcCompaction,
       lockTTL: this.lockTTL,
       compactionLimit: this.compactionLimit,
       persistence: this.persistence,
+      // May still be undefined if a subdoc is added before the parent's
+      // initial sync measures skew — the child then measures it itself.
+      cachedClockOffset: this._cachedClockOffset,
       createProvider: (config) => new FireProvider(config),
       onConnectionError: (error) => {
         this.emit('connection-error', [error]);

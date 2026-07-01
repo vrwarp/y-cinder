@@ -94,6 +94,15 @@ export interface FireProviderConfig {
      */
     compactionLimit?: number;
     /**
+     * Pre-measured clock offset (serverTime - clientTime, ms) to reuse for
+     * distributed locking. Passed by parent providers to their subdocument
+     * providers: clock skew is a property of the client, not the document,
+     * so re-measuring it per subdoc costs 3 Firestore ops each for no
+     * benefit — with hundreds of object subdocs that is a startup storm.
+     * @internal
+     */
+    cachedClockOffset?: number;
+    /**
      * Test hooks for dependency injection.
      * @internal
      */

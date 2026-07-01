@@ -111,6 +111,8 @@ The `FireProvider` constructor accepts the following configuration options:
 | `path` | `string` | Yes | - | Firestore document path (e.g., `users/alice/notes/note-1`). |
 | `maxUpdatesThreshold` | `number` | No | `50` | Number of updates before triggering compaction. |
 | `maxWaitTime` | `number` | No | `500` | Debounce time (ms) for writing updates to Firestore. |
+| `maxAggregationTime` | `number` | No | `maxWaitTime * 10` | Hard cap (ms) on how long the sliding debounce may defer a save during continuous editing. |
+| `gcCompaction` | `boolean` | No | `true` | Garbage-collect deleted content when compacting snapshots. Keeps long-lived documents proportional to live content instead of total historical churn. See [docs/performance.md](docs/performance.md). |
 
 ### API Methods
 

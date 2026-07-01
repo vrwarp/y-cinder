@@ -10,6 +10,7 @@
   "scripts": {
     "build": "node scripts/bundle-worker.js && npm run version-bump && tsc",
     "test": "node scripts/bundle-worker.js && ./scripts/test.sh",
+    "bench": "node scripts/bundle-worker.js && vitest run --config benchmarks/vitest.config.ts",
     "version-bump": "node scripts/bump-version.js",
     "emulators:start": "firebase emulators:start",
     "emulators:stop": "lsof -t -i:5001 -i:5002 -i:8080 -i:9000 -i:9099 -i:9199 -i:9090 | xargs kill -9",

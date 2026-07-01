@@ -51,11 +51,32 @@ export interface FireProviderConfig {
      * @default 50 
      */
     maxUpdatesThreshold?: number;
-    /** 
+    /**
      * Debounce wait time in milliseconds before saving updates.
-     * @default 500 
+     * @default 500
      */
     maxWaitTime?: number;
+    /**
+     * Upper bound in milliseconds on how long buffered local updates may be
+     * deferred. The debounce timer resets on every local edit, so without
+     * this cap a user typing continuously would never trigger a save: the
+     * buffer grows unboundedly and nothing is persisted until they pause.
+     * Once the oldest buffered update is older than this, a save is forced
+     * even while edits keep arriving.
+     * @default maxWaitTime * 10
+     */
+    maxAggregationTime?: number;
+    /**
+     * Whether compaction garbage-collects the content of deleted items when
+     * building the snapshot. Without GC, snapshots produced by
+     * Y.mergeUpdates grow with the document's total historical churn rather
+     * than its live content, so long-lived documents pay ever-growing
+     * download/merge/upload costs. GC preserves state vectors and
+     * delete-sets (only tombstone *content* is dropped) and matches the
+     * default behavior of live Y.Doc instances.
+     * @default true
+     */
+    gcCompaction?: boolean;
     /** 
      * Current subdocument depth. Used internally for recursion limiting.
      * @default 0 
@@ -111,6 +132,8 @@ export const FIRESTORE_PATHS = {
 export const DEFAULTS = {
     MAX_UPDATES_THRESHOLD: 50,
     MAX_WAIT_TIME: 500,
+    /** maxAggregationTime = maxWaitTime * this, unless configured explicitly */
+    MAX_AGGREGATION_MULTIPLIER: 10,
     DEPTH: 0,
     LOCK_TTL: 60000,
     COMPACTION_LIMIT: 200, // P0: Reduced from 500 to stay under Firestore 500 op limit

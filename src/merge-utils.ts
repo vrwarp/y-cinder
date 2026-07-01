@@ -24,8 +24,10 @@
  * @module merge-utils
  */
 
-import * as Y from 'yjs';
+import { mergeUpdatesCore, MergeOptions } from './merge-core';
 import { MERGE_WORKER_CODE } from './generated/merge-worker-blob';
+
+export type { MergeOptions } from './merge-core';
 
 // Worker instance (lazily initialized, singleton)
 let mergeWorker: Worker | null = null;
@@ -130,14 +132,17 @@ function initWorker(): boolean {
  * 2. Falls back to main thread sync merge if Worker fails
  * 
  * @param updates - Array of Uint8Array updates to merge
+ * @param options - Merge options; `gc: true` garbage-collects deleted
+ *                  content from the result (used for snapshot compaction)
  * @returns Promise resolving to merged Uint8Array
- * 
+ *
  * @example
  * ```typescript
  * const merged = await mergeUpdatesAsync([update1, update2, update3]);
+ * const snapshot = await mergeUpdatesAsync(blobs, { gc: true });
  * ```
  */
-export async function mergeUpdatesAsync(updates: Uint8Array[]): Promise<Uint8Array> {
+export async function mergeUpdatesAsync(updates: Uint8Array[], options?: MergeOptions): Promise<Uint8Array> {
     // Edge case: empty array
     if (updates.length === 0) {
         return new Uint8Array(0);
@@ -159,7 +164,7 @@ export async function mergeUpdatesAsync(updates: Uint8Array[]): Promise<Uint8Arr
                     console.warn('Worker merge timed out, falling back to main thread');
                     // Fall back to sync merge
                     try {
-                        const result = Y.mergeUpdates(updates);
+                        const result = mergeUpdatesCore(updates, options);
                         resolve(result);
                     } catch (err) {
                         reject(err);
@@ -174,7 +179,7 @@ export async function mergeUpdatesAsync(updates: Uint8Array[]): Promise<Uint8Arr
             try {
                 // Send updates to worker
                 // Note: We don't transfer buffers here as we may need them for fallback
-                mergeWorker!.postMessage({ id, updates });
+                mergeWorker!.postMessage({ id, updates, gc: !!options?.gc });
             } catch (err) {
                 pendingRequests.delete(id);
                 clearTimeout(timer);
@@ -185,7 +190,7 @@ export async function mergeUpdatesAsync(updates: Uint8Array[]): Promise<Uint8Arr
 
     // Fallback: sync merge on main thread
     // Wrap in Promise.resolve to keep API consistent
-    return Promise.resolve(Y.mergeUpdates(updates));
+    return Promise.resolve(mergeUpdatesCore(updates, options));
 }
 
 /**

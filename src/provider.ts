@@ -36,7 +36,7 @@ import {
   FIRESTORE_PATHS,
 } from "./types";
 import { generateSessionId, calculateBackoff } from "./utils";
-import { extractAllMetadata, aggregateMetadata } from "./update-metadata";
+import { extractClockEnds, aggregateClockEnds } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext } from "./sync";
 import { compact as performTieredCompaction, CompactionContext } from "./compaction";
 import { measureClockSkew } from "./locking";
@@ -105,6 +105,10 @@ export class FireProvider extends ObservableV2<any> {
   // Configuration
   private readonly maxUpdatesThreshold: number;
   private readonly maxWaitTime: number;
+  /** Hard cap on how long the sliding debounce may defer buffered updates */
+  private readonly maxAggregationTime: number;
+  /** Whether compaction garbage-collects deleted content */
+  private readonly gcCompaction: boolean;
   private readonly compactionLimit: number;
   private readonly depth: number;
   private readonly lockTTL: number;
@@ -133,6 +137,11 @@ export class FireProvider extends ObservableV2<any> {
   private _saveRetryCount = 0;
   /** P1.4 FIX: Sync retry counter for exponential backoff */
   private _syncRetryCount = 0;
+  /**
+   * Wall-clock time when the oldest currently-buffered update arrived.
+   * Used to enforce maxAggregationTime against the sliding debounce.
+   */
+  private _pendingSince: number | null = null;
   /** P1.5 FIX: Debounce timer ID for cancellation on destroy */
   private _debounceTimerId: ReturnType<typeof setTimeout> | null = null;
   /** P1.4 FIX: Sync retry timer ID for cancellation on destroy */
@@ -157,6 +166,8 @@ export class FireProvider extends ObservableV2<any> {
       path,
       maxUpdatesThreshold = DEFAULTS.MAX_UPDATES_THRESHOLD,
       maxWaitTime = DEFAULTS.MAX_WAIT_TIME,
+      maxAggregationTime = maxWaitTime * DEFAULTS.MAX_AGGREGATION_MULTIPLIER,
+      gcCompaction = true,
       depth = DEFAULTS.DEPTH,
       lockTTL = DEFAULTS.LOCK_TTL,
       compactionLimit = DEFAULTS.COMPACTION_LIMIT,
@@ -172,6 +183,10 @@ export class FireProvider extends ObservableV2<any> {
 
     if (maxUpdatesThreshold <= 0) {
       throw new Error(`Invalid maxUpdatesThreshold: ${maxUpdatesThreshold}. Must be positive.`);
+    }
+
+    if (maxAggregationTime <= 0) {
+      throw new Error(`Invalid maxAggregationTime: ${maxAggregationTime}. Must be positive.`);
     }
 
     if (depth < 0 || depth > 100) {
@@ -206,6 +221,8 @@ export class FireProvider extends ObservableV2<any> {
 
     this.maxUpdatesThreshold = maxUpdatesThreshold;
     this.maxWaitTime = maxWaitTime;
+    this.maxAggregationTime = maxAggregationTime;
+    this.gcCompaction = gcCompaction;
     this.lockTTL = lockTTL;
     this.compactionLimit = compactionLimit;
     this.persistence = config.persistence;
@@ -271,6 +288,7 @@ export class FireProvider extends ObservableV2<any> {
       // P0.3 FIX: Pass cached clock offset to avoid re-measuring
       cachedClockOffset: this._cachedClockOffset,
       storage: this.storage,
+      gc: this.gcCompaction,
     };
 
     // FIX: Pause history listener during compaction to avoid contention/deadlock in emulator
@@ -507,6 +525,9 @@ export class FireProvider extends ObservableV2<any> {
     }
 
     // Buffer the update; merging happens once at save time
+    if (this._pendingUpdates.length === 0) {
+      this._pendingSince = Date.now();
+    }
     this._pendingUpdates.push(update);
 
     // Trigger debounced write
@@ -575,11 +596,25 @@ export class FireProvider extends ObservableV2<any> {
    * Schedules a save after a delay, resetting any pending timer.
    * P1.5 FIX: Timer is tracked for cancellation on destroy.
    *
-   * @param delayMs - Delay before saving. Defaults to the debounce window;
-   *                  failure retries pass an exponential backoff delay.
+   * The default (debounce) path is additionally capped by
+   * maxAggregationTime: because the timer resets on every local update,
+   * continuous editing would otherwise defer the save indefinitely while
+   * the update buffer grows without bound. Once the oldest buffered update
+   * has waited maxAggregationTime, the save fires even mid-burst.
+   *
+   * @param delayMs - Explicit delay before saving (used by failure retries
+   *                  with exponential backoff, exempt from the aggregation
+   *                  cap). When omitted, the debounce window applies.
    */
-  private _scheduleSave(delayMs: number = this.maxWaitTime): void {
+  private _scheduleSave(delayMs?: number): void {
     if (this._isDestroyed) return;
+
+    let delay = delayMs ?? this.maxWaitTime;
+    if (delayMs === undefined && this._pendingSince !== null) {
+      const deadline = this._pendingSince + this.maxAggregationTime;
+      delay = Math.max(0, Math.min(delay, deadline - Date.now()));
+    }
+
     if (this._debounceTimerId) {
       clearTimeout(this._debounceTimerId);
     }
@@ -588,7 +623,7 @@ export class FireProvider extends ObservableV2<any> {
       if (!this._isDestroyed) {
         this.saveToFirestore();
       }
-    }, delayMs);
+    }, delay);
   }
 
   /**
@@ -619,13 +654,17 @@ export class FireProvider extends ObservableV2<any> {
     // Take the buffered updates for this save operation
     const batch = this._pendingUpdates;
     this._pendingUpdates = [];
+    this._pendingSince = null;
     const update = batch.length === 1 ? batch[0] : Y.mergeUpdates(batch);
 
-    const metas = extractAllMetadata(update);
+    // Lazy clock extraction: on large batches (long offline sessions) a
+    // full Y.decodeUpdate here would materialize every struct on the main
+    // thread right on the save path.
+    const clockEnds = extractClockEnds(update);
     const baseData: Record<string, any> = {
       createdAt: serverTimestamp(),
       createdBy: this.uid,
-      ...aggregateMetadata(metas),
+      ...aggregateClockEnds(clockEnds),
     };
 
     try {
@@ -710,6 +749,11 @@ export class FireProvider extends ObservableV2<any> {
       // Recovery: put the failed batch back ahead of any updates
       // that arrived during the attempt
       this._pendingUpdates.unshift(update);
+      // Restart the aggregation clock: retries pace themselves via
+      // explicit backoff, the cap only guards the debounce path
+      if (this._pendingSince === null) {
+        this._pendingSince = Date.now();
+      }
 
       // Retry with exponential backoff
       if (!this._isDestroyed) {

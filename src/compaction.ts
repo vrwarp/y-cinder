@@ -51,12 +51,11 @@ import {
     Timestamp,
 } from "@firebase/firestore";
 import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
-import * as Y from "yjs";
 import { toBase64 } from "lib0/buffer";
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
-import { calculateStateVector, wait, calculateBackoff } from "./utils";
+import { wait, calculateBackoff } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
-import { mergeUpdatesAsync } from "./merge-utils";
+import { mergeUpdatesWithMetaAsync } from "./merge-utils";
 
 /**
  * Context required for compaction operations.
@@ -80,6 +79,11 @@ export interface CompactionContext {
     cachedClockOffset?: number;
     /** Firebase Storage instance */
     storage: FirebaseStorage;
+    /**
+     * Whether to garbage-collect deleted content when building the snapshot.
+     * Defaults to true; see FireProviderConfig.gcCompaction.
+     */
+    gc?: boolean;
 }
 
 /**
@@ -247,32 +251,37 @@ export async function compact(
         }
 
         // === STEP 3: Merge and Upload (Outside Transaction) ===
+        // GC (default on) rewrites the merged result so deleted-item content
+        // is dropped: without it the snapshot grows with total historical
+        // churn instead of live content.
+        //
+        // The merge also validates the candidate and derives the snapshot
+        // metadata (state vector + delete-set fingerprint) — all inside the
+        // merge Web Worker when available. At multi-megabyte snapshot sizes
+        // those walks cost hundreds of milliseconds; doing them worker-side
+        // keeps compaction's main-thread cost near zero. A validation
+        // failure rejects, and a corrupted merge must never overwrite the
+        // canonical snapshot.
         const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
-        const candidate = await mergeUpdatesAsync(allContent);
-
-        // Validate candidate before committing — a corrupted merge must never
-        // overwrite the canonical snapshot.
-        try {
-            Y.decodeUpdate(candidate);
-        } catch (decodeErr) {
-            throw new Error(
-                `Compaction candidate failed validation (${candidate.byteLength} bytes): ${decodeErr}`
-            );
-        }
-
-        // Extract a structs-empty update carrying the candidate's full
-        // delete-set. Stored inline on the main document, it lets clients
-        // that already cover the snapshot's state vector skip downloading
-        // the blob while still proving their deletions are on the server.
+        let candidate: Uint8Array;
+        let stateVectorB64: string;
         let deleteSetUpdate: Uint8Array | null = null;
         try {
-            const candidateSV = Y.encodeStateVectorFromUpdate(candidate);
-            const dsUpdate = Y.diffUpdate(candidate, candidateSV);
-            if (dsUpdate.byteLength <= DEFAULTS.MAX_DELETE_SET_FIELD_BYTES) {
-                deleteSetUpdate = dsUpdate;
+            const merged = await mergeUpdatesWithMetaAsync(allContent, { gc: ctx.gc !== false });
+            candidate = merged.result;
+            stateVectorB64 = toBase64(merged.stateVector);
+
+            // The structs-empty delete-set fingerprint is stored inline on
+            // the main document: it lets clients that already cover the
+            // snapshot's state vector skip downloading the blob while still
+            // proving their deletions are on the server.
+            if (merged.dsUpdate.byteLength <= DEFAULTS.MAX_DELETE_SET_FIELD_BYTES) {
+                deleteSetUpdate = merged.dsUpdate;
             }
-        } catch (e) {
-            console.warn("Failed to extract delete-set fingerprint (optional optimization)", e);
+        } catch (decodeErr) {
+            throw new Error(
+                `Compaction candidate failed validation: ${decodeErr}`
+            );
         }
 
         const nextVersion = currentVersion + 1;
@@ -293,6 +302,7 @@ export async function compact(
             verifiedHistoryRefs: historyToMerge.map(h => h.ref),
             storagePath,
             candidate,
+            stateVectorB64,
             deleteSetUpdate,
             expectedVersion: currentVersion,
         });
@@ -331,10 +341,11 @@ async function performCompactionTransaction(params: {
     verifiedHistoryRefs: DocumentReference[];
     storagePath: string;
     candidate: Uint8Array;
+    stateVectorB64: string;
     deleteSetUpdate: Uint8Array | null;
     expectedVersion: number;
 }): Promise<CompactionResult> {
-    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, deleteSetUpdate, expectedVersion } = params;
+    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, stateVectorB64, deleteSetUpdate, expectedVersion } = params;
 
     return await runTransaction(db, async (transaction) => {
         // === STEP A: THE KILL SWITCH ===
@@ -387,6 +398,7 @@ async function performCompactionTransaction(params: {
             uid,
             storagePath,
             candidate,
+            stateVectorB64,
             deleteSetUpdate,
             currentVersion,
             updatesToProcess,
@@ -404,12 +416,13 @@ function compactToSnapshot(params: {
     uid: string;
     storagePath: string;
     candidate: Uint8Array;
+    stateVectorB64: string;
     deleteSetUpdate: Uint8Array | null;
     currentVersion: number;
     updatesToProcess: { ref: DocumentReference }[];
     historyToMerge: { ref: DocumentReference }[];
 }): CompactionResult {
-    const { transaction, mainRef, uid, storagePath, candidate, deleteSetUpdate, currentVersion, updatesToProcess, historyToMerge } = params;
+    const { transaction, mainRef, uid, storagePath, candidate, stateVectorB64, deleteSetUpdate, currentVersion, updatesToProcess, historyToMerge } = params;
 
     console.log(`Compacted to Snapshot (Size: ${candidate.byteLength})`);
 
@@ -421,7 +434,10 @@ function compactToSnapshot(params: {
         // deleteSet, which can exceed Firestore's 1MB doc limit and abort
         // every future compaction on that doc.
         content: deleteField(),
-        stateVector: calculateStateVector(candidate),
+        // Precomputed outside the transaction: the transaction body can
+        // re-run on contention, and re-walking a large candidate each
+        // attempt is wasted CPU.
+        stateVector: stateVectorB64,
         // A stale fingerprint would hide newer deletions, so when the
         // delete-set is too large to store we remove the field entirely
         deleteSet: deleteSetUpdate ? Bytes.fromUint8Array(deleteSetUpdate) : deleteField(),

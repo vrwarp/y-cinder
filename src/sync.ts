@@ -59,7 +59,7 @@ import {
     DEFAULTS,
 } from "./types";
 import { writeStateVector } from "./utils";
-import { extractAllMetadata, aggregateMetadata, isUpdateRedundant, diffCarriesNewData } from "./update-metadata";
+import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, diffCarriesNewData } from "./update-metadata";
 
 /**
  * Context required for sync operations.
@@ -324,25 +324,32 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // Sort by priority (Snapshot first, then History, then Updates)
         pendingUpdates.sort((a, b) => a.priority - b.priority);
 
-        for (const item of pendingUpdates) {
-            if (isDestroyed()) break;
+        // Apply everything inside a single Yjs transaction. Each top-level
+        // applyItem call would otherwise commit its own transaction, firing
+        // doc observers and encoding an 'update' event per blob — on a
+        // long-lived document with hundreds of pending items that means
+        // hundreds of editor re-renders during initial load instead of one.
+        ydoc.transact(() => {
+            for (const item of pendingUpdates) {
+                if (isDestroyed()) break;
 
-            if (!isItemRedundant(item, localSVMap)) {
-                const applied = applyItem(item, ydoc);
-                if (applied) {
-                    updatesApplied++;
-                    // Incremental update of localSVMap instead of expensive re-encode/decode (P3.0 Optimization)
-                    // This prevents redundant processing of history/updates already in snapshot/previous segments
-                    if (item.type === 'snapshot') {
-                        processSnapshotMetadata(item.data, localSVMap);
-                    } else if (item.type === 'history') {
-                        processHistoryMetadata(item.data, localSVMap);
-                    } else if (item.type === 'update') {
-                        processUpdateMetadata(item.data, localSVMap);
+                if (!isItemRedundant(item, localSVMap)) {
+                    const applied = applyItem(item, ydoc);
+                    if (applied) {
+                        updatesApplied++;
+                        // Incremental update of localSVMap instead of expensive re-encode/decode (P3.0 Optimization)
+                        // This prevents redundant processing of history/updates already in snapshot/previous segments
+                        if (item.type === 'snapshot') {
+                            processSnapshotMetadata(item.data, localSVMap);
+                        } else if (item.type === 'history') {
+                            processHistoryMetadata(item.data, localSVMap);
+                        } else if (item.type === 'update') {
+                            processUpdateMetadata(item.data, localSVMap);
+                        }
                     }
                 }
             }
-        }
+        }, FIREBASE_ORIGINS.UPDATE);
 
         // 5. Push Missing Local Updates
         const serverSV = writeStateVector(serverSVMap);
@@ -358,7 +365,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
 
         if (shouldPush) {
             console.log("Pushing missing local updates to Firestore.");
-            const metas = extractAllMetadata(localDiff);
+            const clockEnds = extractClockEnds(localDiff);
 
             if (localDiff.byteLength > DEFAULTS.INLINE_UPDATE_LIMIT) {
                 // Storage-backed update: upload binary to Cloud Storage
@@ -371,7 +378,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     updateStoragePath: storagePath,
                     createdAt: serverTimestamp(),
                     createdBy: uid,
-                    ...aggregateMetadata(metas)
+                    ...aggregateClockEnds(clockEnds)
                 };
                 await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
                 console.log(`Oversized initial sync diff (${localDiff.byteLength} bytes) offloaded to Cloud Storage: ${storagePath}`);
@@ -381,7 +388,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     update: Bytes.fromUint8Array(localDiff),
                     createdAt: serverTimestamp(),
                     createdBy: uid,
-                    ...aggregateMetadata(metas)
+                    ...aggregateClockEnds(clockEnds)
                 };
                 await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
             }
@@ -461,6 +468,13 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
             }
         }
 
+        // Collect inline-appliable updates from this delivery first, then
+        // apply them in ONE Yjs transaction. Object-heavy workloads (e.g.
+        // another client dragging shapes) arrive as bursts of small update
+        // documents; applying each in its own top-level transaction fires
+        // an observer flush + 'update' event (editor re-render) per doc.
+        const inlineBatch: { docId: string; data: any }[] = [];
+
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
@@ -508,6 +522,20 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 }
 
                 if (data.update) {
+                    inlineBatch.push({ docId, data });
+                }
+            }
+        });
+
+        if (inlineBatch.length > 0) {
+            const applyBatch = () => {
+                for (const { docId, data } of inlineBatch) {
+                    // Re-check redundancy as the state vector evolves within
+                    // the batch (preserves the sequential semantics)
+                    if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0 &&
+                        isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks)) {
+                        continue;
+                    }
                     try {
                         const update = (data.update as Bytes).toUint8Array();
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
@@ -519,8 +547,13 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                         ctx.onCorruptedDocument?.(docId, e instanceof Error ? e : new Error(String(e)));
                     }
                 }
+            };
+            if (inlineBatch.length === 1) {
+                applyBatch();
+            } else {
+                ydoc.transact(applyBatch, FIREBASE_ORIGINS.UPDATE);
             }
-        });
+        }
     }, (error) => {
         console.error("onSnapshot listener failed", error);
         // P1.7 FIX: Emit error event so caller can handle disconnect
@@ -657,6 +690,11 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
     let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
 
     return onSnapshot(q, (snapshot) => {
+        // Collect first, then apply in one transaction (see
+        // createUpdateListener): several segments can land in a single
+        // delivery, e.g. when the listener resumes after compaction.
+        const batch: { docId: string; data: any }[] = [];
+
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
@@ -668,6 +706,14 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
                 }
 
                 if (data && data.segment) {
+                    batch.push({ docId, data });
+                }
+            }
+        });
+
+        if (batch.length > 0) {
+            const applyBatch = () => {
+                for (const { docId, data } of batch) {
                     try {
                         // Check redundancy using local state vector
                         const item: PendingUpdate = {
@@ -688,8 +734,13 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
                         ctx.onCorruptedDocument?.(docId, err instanceof Error ? err : new Error(String(err)));
                     }
                 }
+            };
+            if (batch.length === 1) {
+                applyBatch();
+            } else {
+                ydoc.transact(applyBatch, FIREBASE_ORIGINS.HISTORY);
             }
-        });
+        }
     }, (error) => {
         console.error("History listener failed", error);
         if (onListenerError) onListenerError(error);
@@ -781,17 +832,15 @@ function processUpdateMetadata(data: any, serverSVMap: Map<number, number>): voi
             }
         });
     } else if (data.update) {
-        try {
-            const updateBlob = (data.update as Bytes).toUint8Array();
-            const metas = extractAllMetadata(updateBlob);
-            metas.forEach(meta => {
-                const current = serverSVMap.get(meta.clientID) || 0;
-                if (meta.clockEnd > current) {
-                    serverSVMap.set(meta.clientID, meta.clockEnd);
-                }
-            });
-        } catch (e) {
-            console.warn("Failed to parse fallback metadata", e);
+        // Lazy clock extraction — avoids materializing the struct tree of
+        // potentially large update blobs (extractClockEnds handles parse
+        // errors internally by returning an empty map).
+        const clockEnds = extractClockEnds((data.update as Bytes).toUint8Array());
+        for (const [clientID, clock] of clockEnds) {
+            const current = serverSVMap.get(clientID) || 0;
+            if (clock > current) {
+                serverSVMap.set(clientID, clock);
+            }
         }
     }
 }
@@ -813,17 +862,14 @@ function processHistoryMetadata(data: any, serverSVMap: Map<number, number>): vo
             }
         }
     } else if (data.segment) {
-        try {
-            const segmentBlob = (data.segment as Bytes).toUint8Array();
-            const metas = extractAllMetadata(segmentBlob);
-            metas.forEach(meta => {
-                const current = serverSVMap.get(meta.clientID) || 0;
-                if (meta.clockEnd > current) {
-                    serverSVMap.set(meta.clientID, meta.clockEnd);
-                }
-            });
-        } catch (e) {
-            console.warn("Failed to parse fallback history segment", e);
+        // Lazy clock extraction for history segments, which are large by
+        // construction (merged batches of updates).
+        const clockEnds = extractClockEnds((data.segment as Bytes).toUint8Array());
+        for (const [clientID, clock] of clockEnds) {
+            const current = serverSVMap.get(clientID) || 0;
+            if (clock > current) {
+                serverSVMap.set(clientID, clock);
+            }
         }
     }
 }

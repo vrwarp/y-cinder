@@ -17,17 +17,27 @@
  * @module merge-worker
  */
 
-import * as Y from 'yjs';
+import { mergeUpdatesCore, mergeUpdatesWithMeta } from './merge-core';
 
 // Type definitions for worker messages
 interface MergeRequest {
     id: string;
     updates: Uint8Array[];
+    /** When true, garbage-collect deleted content from the merged result */
+    gc?: boolean;
+    /**
+     * When true, also validate the result and return its state vector and
+     * delete-set fingerprint (compaction metadata). Keeps multi-hundred-ms
+     * lazy walks over large snapshots off the main thread.
+     */
+    meta?: boolean;
 }
 
 interface MergeResponse {
     id: string;
     result?: Uint8Array;
+    stateVector?: Uint8Array;
+    dsUpdate?: Uint8Array;
     error?: string;
 }
 
@@ -38,11 +48,18 @@ const ctx: Worker = self as any;
  * Handle incoming merge requests from the main thread.
  */
 ctx.onmessage = (event: MessageEvent<MergeRequest>) => {
-    const { id, updates } = event.data;
+    const { id, updates, gc, meta } = event.data;
 
     try {
+        if (meta) {
+            const { result, stateVector, dsUpdate } = mergeUpdatesWithMeta(updates, { gc });
+            const response: MergeResponse = { id, result, stateVector, dsUpdate };
+            ctx.postMessage(response, [result.buffer, stateVector.buffer, dsUpdate.buffer]);
+            return;
+        }
+
         // Perform the CPU-intensive merge operation
-        const result = Y.mergeUpdates(updates);
+        const result = mergeUpdatesCore(updates, { gc });
 
         // Send result back to main thread
         const response: MergeResponse = { id, result };

@@ -113,14 +113,63 @@ export function extractAllMetadata(update: Uint8Array): UpdateMetadata[] {
 }
 
 /**
+ * Extracts per-client end clocks from a Yjs update without materializing
+ * its struct tree.
+ *
+ * This is the hot-path replacement for `extractAllMetadata` + `clockEnd`:
+ * `Y.encodeStateVectorFromUpdate` walks the update with the lazy decoder
+ * (no Item/content objects are allocated), which matters when the update is
+ * a large merged blob — e.g. the debounced save after a long offline
+ * session, or a snapshot-sized diff. The resulting map is identical to the
+ * `clockEnd` values `extractAllMetadata` computes from the decoded structs.
+ *
+ * @param update - The Yjs update blob to parse
+ * @returns Map of clientID -> end clock. Empty map on parse error.
+ */
+export function extractClockEnds(update: Uint8Array): Map<number, number> {
+    try {
+        return Y.decodeStateVector(Y.encodeStateVectorFromUpdate(update));
+    } catch (e) {
+        console.warn("Failed to extract update clock metadata:", e);
+        return new Map();
+    }
+}
+
+/**
+ * Aggregates a clock-ends map into a Firestore document payload.
+ *
+ * Same output shape and MAX_METADATA_CLIENTS capping as
+ * `aggregateMetadata`, but consumes the map produced by `extractClockEnds`.
+ *
+ * @param clockEnds - Map of clientID -> end clock
+ * @returns Object with aggregated metadata fields, or empty object
+ */
+export function aggregateClockEnds(clockEnds: Map<number, number>): {
+    clientIDs?: number[];
+    clientClocks?: number[];
+} {
+    if (clockEnds.size === 0 || clockEnds.size > MAX_METADATA_CLIENTS) {
+        return {};
+    }
+
+    const clientIDs: number[] = [];
+    const clientClocks: number[] = [];
+    for (const [clientID, clock] of clockEnds) {
+        clientIDs.push(clientID);
+        clientClocks.push(clock);
+    }
+    return { clientIDs, clientClocks };
+}
+
+/**
  * Aggregates metadata from multiple clients into a document payload.
- * 
+ *
  * Creates a metadata object suitable for storing alongside an update
  * in Firestore, including backwards-compatible single-client fields.
- * 
+ *
  * @param metas - Array of metadata from extractAllMetadata
  * @returns Object with aggregated metadata fields, or empty object if no metadata
- * 
+ *
  * @example
  * ```typescript
  * const metas = extractAllMetadata(update);
@@ -224,18 +273,34 @@ export function diffCarriesNewData(diff: Uint8Array, getServerBlobs: () => Uint8
 
     // Structs are empty: the diff is push-worthy only if it contains
     // deletions the server doesn't already have.
-    const serverDeleteSets = [];
-    for (const blob of getServerBlobs()) {
+    //
+    // Blobs are checked smallest-first with an early exit once coverage is
+    // proven. On a long-lived document, the snapshot's inline delete-set
+    // fingerprint (a few KB) almost always proves coverage on its own, so a
+    // reconnecting client never decodes the multi-megabyte snapshot or
+    // history blobs just to conclude "nothing to push".
+    let serverDs = Y.mergeDeleteSets([]);
+    const covered = () =>
+        Y.equalDeleteSets(serverDs, Y.mergeDeleteSets([serverDs, localDs]));
+
+    // Handles the trivial case (empty local delete-set) without decoding
+    // any server blob at all.
+    if (covered()) {
+        return false;
+    }
+
+    const blobs = getServerBlobs().slice().sort((a, b) => a.byteLength - b.byteLength);
+    for (const blob of blobs) {
         try {
-            serverDeleteSets.push(Y.decodeUpdate(blob).ds);
+            serverDs = Y.mergeDeleteSets([serverDs, Y.decodeUpdate(blob).ds]);
         } catch (e) {
             // Corrupted server blob contributes nothing to coverage;
             // worst case we push a redundant (idempotent) diff.
+            continue;
+        }
+        if (covered()) {
+            return false;
         }
     }
-
-    const serverDs = Y.mergeDeleteSets(serverDeleteSets);
-    const unionDs = Y.mergeDeleteSets([serverDs, localDs]);
-    // If adding our delete-set changes nothing, the server already has it all
-    return !Y.equalDeleteSets(serverDs, unionDs);
+    return true;
 }

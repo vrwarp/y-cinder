@@ -74,7 +74,11 @@ describe('FireProvider History Compaction', () => {
             firebaseApp: app,
             ydoc,
             path,
-            maxUpdatesThreshold: 1 // Trigger compaction easily
+            maxUpdatesThreshold: 1, // Trigger compaction easily
+            // This test asserts the FOLD outcome (history + updates merged
+            // into the base). Delta mode would first turn the update into
+            // another segment; threshold 1 forces the legacy always-fold.
+            historyFoldThreshold: 1
         });
 
         // Wait for initial sync to complete before compacting

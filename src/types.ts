@@ -94,6 +94,19 @@ export interface FireProviderConfig {
      */
     compactionLimit?: number;
     /**
+     * Number of history segments allowed to accumulate before compaction
+     * folds everything (snapshot + history + updates) into a new base
+     * snapshot. Between folds, compaction runs in cheap DELTA mode: it
+     * merges only the pending update documents into one history segment —
+     * O(new data) CPU and bandwidth instead of downloading, re-merging and
+     * re-uploading the whole snapshot every maxUpdatesThreshold updates.
+     * On aged documents (multi-MB snapshots) this cuts steady-state
+     * compaction transfer by roughly this factor.
+     * Set to 1 to restore the old always-fold behavior.
+     * @default 8
+     */
+    historyFoldThreshold?: number;
+    /**
      * How subdocument providers are started.
      *
      * - `'eager'` (default): every subdocument that appears in the document
@@ -157,6 +170,8 @@ export const FIRESTORE_PATHS = {
 export const DEFAULTS = {
     MAX_UPDATES_THRESHOLD: 50,
     MAX_WAIT_TIME: 500,
+    /** History segments accumulated before compaction folds into the snapshot */
+    HISTORY_FOLD_THRESHOLD: 8,
     /** maxAggregationTime = maxWaitTime * this, unless configured explicitly */
     MAX_AGGREGATION_MULTIPLIER: 10,
     DEPTH: 0,

@@ -84,6 +84,20 @@ export interface CompactionContext {
      * Defaults to true; see FireProviderConfig.gcCompaction.
      */
     gc?: boolean;
+    /**
+     * History segments allowed before compaction folds everything into the
+     * base snapshot. Below the threshold, compaction runs in DELTA mode
+     * (updates -> one history segment, O(new data)); at the threshold it
+     * folds (snapshot + history + updates -> new snapshot, O(document)).
+     * Defaults to DEFAULTS.HISTORY_FOLD_THRESHOLD; 1 = always fold.
+     */
+    historyFoldThreshold?: number;
+    /**
+     * Test seam: inline cap for the delete-set fingerprint field.
+     * Defaults to DEFAULTS.MAX_DELETE_SET_FIELD_BYTES.
+     * @internal
+     */
+    maxDeleteSetFieldBytes?: number;
 }
 
 /**
@@ -135,6 +149,7 @@ export async function compact(
     attempt: number = 1
 ): Promise<CompactionResult> {
     const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, cachedClockOffset, storage } = ctx;
+    const historyFoldThreshold = ctx.historyFoldThreshold ?? DEFAULTS.HISTORY_FOLD_THRESHOLD;
 
     // 1. Distributed Gate: Try to become the Leader
     // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
@@ -174,33 +189,43 @@ export async function compact(
             await testHooks.beforeTransaction();
         }
 
-        // === STEP 2: Read current state outside transaction to prepare upload ===
-        // This avoids uploading files inside a potentially repeating transaction block
+        // === STEP 2: Read main-document metadata (base presence + version).
+        // The base blob itself is only downloaded on the fold path — delta
+        // compaction must not pay O(snapshot) transfer.
         const mainRef = doc(db, path);
         const mainSnap = await getDoc(mainRef);
 
-        let baseSnapshot: Uint8Array | null = null;
         let currentVersion = 0;
+        let currentEpoch = 0;
+        let hasBase = false;
+        let baseStoragePath: string | null = null;
+        let baseInline: Bytes | null = null;
 
         if (mainSnap.exists()) {
             const data = mainSnap.data();
-            // Fetch from Cloud Storage if configured
             if (data?.snapshotStoragePath) {
-                try {
-                    const storageRef = ref(storage, data.snapshotStoragePath);
-                    const buffer = await getBytes(storageRef);
-                    baseSnapshot = new Uint8Array(buffer);
-                } catch (e) {
-                    console.error("Compaction failed to download base snapshot from storage", e);
-                    throw e; // Cannot safely compact without base state
-                }
+                hasBase = true;
+                baseStoragePath = data.snapshotStoragePath;
             } else if (data?.content) {
-                baseSnapshot = (data.content as Bytes).toUint8Array();
+                hasBase = true;
+                baseInline = data.content as Bytes;
             }
             if (typeof data?.version === 'number') {
                 currentVersion = data.version;
             }
+            if (typeof data?.epoch === 'number') {
+                currentEpoch = data.epoch;
+            }
         }
+
+        // Epoch fence: documents written before a squash belong to an
+        // unrelated id space. Merging them would permanently poison the
+        // snapshot (their structs can never integrate — Yjs parks them as
+        // missing dependencies, which also disables GC compaction), so
+        // they are deleted without merging.
+        const staleRefs: DocumentReference[] = [];
+        const epochOf = (data: Record<string, any>) =>
+            typeof data?.epoch === 'number' ? data.epoch : 0;
 
         // Use the data already returned by the queries above. Update and
         // history documents are immutable (only ever created or deleted),
@@ -209,6 +234,10 @@ export async function compact(
         // read cost. Storage-backed payloads are downloaded in parallel.
         const updateResults = await Promise.all(updateDocs.map(async (uDoc) => {
             const data = uDoc.data() as Record<string, any>;
+            if (epochOf(data) !== currentEpoch) {
+                staleRefs.push(uDoc.ref);
+                return null;
+            }
             if (data?.updateStoragePath && !data?.update) {
                 try {
                     const storageRef = ref(storage, data.updateStoragePath);
@@ -236,6 +265,10 @@ export async function compact(
         const historyToMerge = historyDocs
             .map((hDoc) => {
                 const data = hDoc.data() as Record<string, any>;
+                if (epochOf(data) !== currentEpoch) {
+                    staleRefs.push(hDoc.ref);
+                    return null;
+                }
                 if (data?.segment) {
                     return {
                         ref: hDoc.ref,
@@ -247,10 +280,59 @@ export async function compact(
             .filter((h): h is { ref: DocumentReference; val: Uint8Array } => h !== null);
 
         if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
+            if (staleRefs.length > 0) {
+                await deleteStaleEpochDocs(db, path, uid, staleRefs);
+                return { success: true, type: 'none' as const, updatesCompacted: staleRefs.length, historySegmentsMerged: 0 };
+            }
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
         }
 
-        // === STEP 3: Merge and Upload (Outside Transaction) ===
+        // === STEP 3: Choose compaction mode ===
+        //
+        // DELTA (the steady-state cycle on aged documents): merge ONLY the
+        // pending update documents into one history segment. O(new data)
+        // CPU and bandwidth — the multi-MB base snapshot is neither
+        // downloaded nor re-uploaded.
+        //
+        // FOLD (amortized): everything (base + history + updates) merges
+        // into a fresh GC'd snapshot. Runs when history has accumulated to
+        // the fold threshold, when there is no base yet, or when a delta
+        // segment would not fit inline in a Firestore document.
+        const wantDelta =
+            hasBase &&
+            updatesToProcess.length > 0 &&
+            historyToMerge.length + 1 < historyFoldThreshold;
+
+        if (wantDelta) {
+            const deltaResult = await tryDeltaCompaction({
+                db,
+                path,
+                uid,
+                updatesToProcess,
+                staleRefs,
+                epoch: currentEpoch,
+            });
+            if (deltaResult !== null) {
+                return deltaResult;
+            }
+            // Segment would not fit inline — fall through to a full fold.
+        }
+
+        // === FOLD: download base, merge all, upload new snapshot ===
+        let baseSnapshot: Uint8Array | null = null;
+        if (baseStoragePath) {
+            try {
+                const storageRef = ref(storage, baseStoragePath);
+                const buffer = await getBytes(storageRef);
+                baseSnapshot = new Uint8Array(buffer);
+            } catch (e) {
+                console.error("Compaction failed to download base snapshot from storage", e);
+                throw e; // Cannot safely compact without base state
+            }
+        } else if (baseInline) {
+            baseSnapshot = baseInline.toUint8Array();
+        }
+
         // GC (default on) rewrites the merged result so deleted-item content
         // is dropped: without it the snapshot grows with total historical
         // churn instead of live content.
@@ -266,6 +348,7 @@ export async function compact(
         let candidate: Uint8Array;
         let stateVectorB64: string;
         let deleteSetUpdate: Uint8Array | null = null;
+        let oversizedDeleteSet: Uint8Array | null = null;
         try {
             const merged = await mergeUpdatesWithMetaAsync(allContent, { gc: ctx.gc !== false });
             candidate = merged.result;
@@ -275,8 +358,15 @@ export async function compact(
             // the main document: it lets clients that already cover the
             // snapshot's state vector skip downloading the blob while still
             // proving their deletions are on the server.
-            if (merged.dsUpdate.byteLength <= DEFAULTS.MAX_DELETE_SET_FIELD_BYTES) {
+            if (merged.dsUpdate.byteLength <= (ctx.maxDeleteSetFieldBytes ?? DEFAULTS.MAX_DELETE_SET_FIELD_BYTES)) {
                 deleteSetUpdate = merged.dsUpdate;
+            } else {
+                // Too large to inline (very old, deletion-heavy document).
+                // Offload to Cloud Storage instead of dropping it: without a
+                // fingerprint every reconnecting client fails the push-guard
+                // coverage proof and writes a spurious O(delete-set) update
+                // document on every boot, forever.
+                oversizedDeleteSet = merged.dsUpdate;
             }
         } catch (decodeErr) {
             throw new Error(
@@ -293,6 +383,12 @@ export async function compact(
         // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
         await uploadBytes(storageRef, candidate);
 
+        let deleteSetStoragePath: string | null = null;
+        if (oversizedDeleteSet) {
+            deleteSetStoragePath = `${path}/ds_v${nextVersion}.bin`;
+            await uploadBytes(ref(storage, deleteSetStoragePath), oversizedDeleteSet);
+        }
+
         // === STEP 4: Transaction ===
         const result = await performCompactionTransaction({
             db,
@@ -300,14 +396,16 @@ export async function compact(
             uid,
             verifiedUpdateRefs: updatesToProcess.map(u => u.ref),
             verifiedHistoryRefs: historyToMerge.map(h => h.ref),
+            staleRefs,
             storagePath,
             candidate,
             stateVectorB64,
             deleteSetUpdate,
+            deleteSetStoragePath,
             expectedVersion: currentVersion,
         });
 
-        // Garbage Collect Old Storage Snapshot
+        // Garbage Collect Old Storage Snapshot (and its delete-set blob)
         if (result.success && result.type === 'snapshot' && result.previousVersion !== undefined && result.previousVersion > 0) {
             try {
                 const oldSnapshotPath = `${path}/snapshot_v${result.previousVersion}.bin`;
@@ -316,6 +414,11 @@ export async function compact(
                 console.log(`Garbage collected old snapshot: ${oldSnapshotPath}`);
             } catch (err) {
                 console.warn(`Failed to garbage collect old snapshot for ${path}`, err);
+            }
+            try {
+                await deleteObject(ref(storage, `${path}/ds_v${result.previousVersion}.bin`));
+            } catch (err) {
+                // Normal case: no offloaded delete-set existed for that version
             }
         }
 
@@ -329,6 +432,76 @@ export async function compact(
 }
 
 /**
+ * DELTA compaction: merge the pending update documents into ONE history
+ * segment, leaving the base snapshot untouched.
+ *
+ * Returns null when the merged segment cannot be stored inline in a
+ * Firestore document (caller falls back to a full fold, whose snapshot
+ * lives in Cloud Storage and has no such limit).
+ */
+async function tryDeltaCompaction(params: {
+    db: Firestore;
+    path: string;
+    uid: string;
+    updatesToProcess: { ref: DocumentReference; data: Uint8Array }[];
+    staleRefs: DocumentReference[];
+    epoch: number;
+}): Promise<CompactionResult | null> {
+    const { db, path, uid, updatesToProcess, staleRefs, epoch } = params;
+
+    // Merge + validate + derive the segment's state vector (clock ends per
+    // client — what the sync layer's redundancy checks consume). gc is
+    // intentionally off: a partial merge references structs that live in
+    // the base snapshot, so a GC rebuild would find missing dependencies
+    // and fall back to the plain merge anyway — no point paying for the
+    // attempt.
+    const merged = await mergeUpdatesWithMetaAsync(updatesToProcess.map(u => u.data), { gc: false });
+
+    if (merged.result.byteLength > DEFAULTS.INLINE_UPDATE_LIMIT) {
+        return null;
+    }
+
+    const segmentB64Sv = toBase64(merged.stateVector);
+
+    return await runTransaction(db, async (transaction) => {
+        // Kill switch: bail if the lock was lost (another client may be
+        // mid-fold and about to delete the same update documents).
+        const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
+        const lockSnap = await transaction.get(lockRef);
+        if (!lockSnap.exists() || lockSnap.data().owner !== uid) {
+            throw new Error("Lock lost or expired during compaction phase - Aborting write.");
+        }
+
+        // Verify updates still exist before deleting (zombie protection)
+        const updateSnaps = await Promise.all(updatesToProcess.map(u => transaction.get(u.ref)));
+        const survivors = updateSnaps.filter(snap => snap.exists());
+        if (survivors.length === 0) {
+            return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
+        }
+
+        const segmentRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY));
+        transaction.set(segmentRef, {
+            segment: Bytes.fromUint8Array(merged.result),
+            stateVector: segmentB64Sv,
+            startTime: serverTimestamp(),
+            createdBy: uid,
+            ...(epoch > 0 ? { epoch } : {}),
+        });
+        survivors.forEach(snap => transaction.delete(snap.ref));
+        staleRefs.forEach(ref => transaction.delete(ref));
+
+        console.log(`Delta-compacted ${survivors.length} updates into history segment (${merged.result.byteLength} bytes)`);
+
+        return {
+            success: true,
+            type: 'history' as const,
+            updatesCompacted: survivors.length,
+            historySegmentsMerged: 0,
+        };
+    });
+}
+
+/**
  * Performs the actual compaction within a Firestore transaction.
  *
  * Verifies the version and deletes processed documents.
@@ -339,13 +512,15 @@ async function performCompactionTransaction(params: {
     uid: string;
     verifiedUpdateRefs: DocumentReference[];
     verifiedHistoryRefs: DocumentReference[];
+    staleRefs: DocumentReference[];
     storagePath: string;
     candidate: Uint8Array;
     stateVectorB64: string;
     deleteSetUpdate: Uint8Array | null;
+    deleteSetStoragePath: string | null;
     expectedVersion: number;
 }): Promise<CompactionResult> {
-    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, storagePath, candidate, stateVectorB64, deleteSetUpdate, expectedVersion } = params;
+    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, staleRefs, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, expectedVersion } = params;
 
     return await runTransaction(db, async (transaction) => {
         // === STEP A: THE KILL SWITCH ===
@@ -392,7 +567,7 @@ async function performCompactionTransaction(params: {
         }
 
         // === STEP C: Commit Pointers ===
-        return compactToSnapshot({
+        const result = compactToSnapshot({
             transaction,
             mainRef,
             uid,
@@ -400,10 +575,36 @@ async function performCompactionTransaction(params: {
             candidate,
             stateVectorB64,
             deleteSetUpdate,
+            deleteSetStoragePath,
             currentVersion,
             updatesToProcess,
             historyToMerge,
         });
+        // Old-epoch documents ride along in the same transaction: they are
+        // never merged, only removed.
+        staleRefs.forEach(ref => transaction.delete(ref));
+        return result;
+    });
+}
+
+/**
+ * Deletes stale-epoch update/history documents when there is nothing else
+ * to compact. Existence is re-verified inside the transaction.
+ */
+async function deleteStaleEpochDocs(
+    db: Firestore,
+    path: string,
+    uid: string,
+    staleRefs: DocumentReference[]
+): Promise<void> {
+    await runTransaction(db, async (transaction) => {
+        const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
+        const lockSnap = await transaction.get(lockRef);
+        if (!lockSnap.exists() || lockSnap.data().owner !== uid) {
+            throw new Error("Lock lost or expired during compaction phase - Aborting write.");
+        }
+        const snaps = await Promise.all(staleRefs.map(r => transaction.get(r)));
+        snaps.forEach(s => { if (s.exists()) transaction.delete(s.ref); });
     });
 }
 
@@ -418,11 +619,12 @@ function compactToSnapshot(params: {
     candidate: Uint8Array;
     stateVectorB64: string;
     deleteSetUpdate: Uint8Array | null;
+    deleteSetStoragePath: string | null;
     currentVersion: number;
     updatesToProcess: { ref: DocumentReference }[];
     historyToMerge: { ref: DocumentReference }[];
 }): CompactionResult {
-    const { transaction, mainRef, uid, storagePath, candidate, stateVectorB64, deleteSetUpdate, currentVersion, updatesToProcess, historyToMerge } = params;
+    const { transaction, mainRef, uid, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, currentVersion, updatesToProcess, historyToMerge } = params;
 
     console.log(`Compacted to Snapshot (Size: ${candidate.byteLength})`);
 
@@ -438,9 +640,13 @@ function compactToSnapshot(params: {
         // re-run on contention, and re-walking a large candidate each
         // attempt is wasted CPU.
         stateVector: stateVectorB64,
-        // A stale fingerprint would hide newer deletions, so when the
-        // delete-set is too large to store we remove the field entirely
+        // A stale fingerprint would hide newer deletions. Exactly one of
+        // the two fingerprint fields survives: inline for the normal case,
+        // a Cloud Storage pointer once the delete-set outgrows the inline
+        // cap (dropping it entirely would send every future reconnect down
+        // the spurious-push slow path).
         deleteSet: deleteSetUpdate ? Bytes.fromUint8Array(deleteSetUpdate) : deleteField(),
+        deleteSetStoragePath: deleteSetStoragePath ?? deleteField(),
         version: currentVersion + 1,
         updatedAt: serverTimestamp(),
         // Lets the compacting client's own snapshot listener skip this write

@@ -53,6 +53,8 @@ export interface SubdocContext {
     maxAggregationTime: number;
     /** Whether compaction garbage-collects deleted content (inherited) */
     gcCompaction: boolean;
+    /** History segments before compaction folds into the snapshot (inherited) */
+    historyFoldThreshold: number;
     /** Lock TTL (inherited) */
     lockTTL: number;
     /** Compaction limit (inherited) */
@@ -204,6 +206,7 @@ export function startSubdocProvider(
         maxWaitTime: ctx.maxWaitTime,
         maxAggregationTime: ctx.maxAggregationTime,
         gcCompaction: ctx.gcCompaction,
+        historyFoldThreshold: ctx.historyFoldThreshold,
         depth: ctx.depth + 1,
         lockTTL: ctx.lockTTL,
         compactionLimit: ctx.compactionLimit,

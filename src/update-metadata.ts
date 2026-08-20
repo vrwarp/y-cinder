@@ -117,18 +117,26 @@ export function extractAllMetadata(update: Uint8Array): UpdateMetadata[] {
  * its struct tree.
  *
  * This is the hot-path replacement for `extractAllMetadata` + `clockEnd`:
- * `Y.encodeStateVectorFromUpdate` walks the update with the lazy decoder
- * (no Item/content objects are allocated), which matters when the update is
- * a large merged blob — e.g. the debounced save after a long offline
+ * `Y.parseUpdateMeta` walks the update with the lazy decoder (no
+ * Item/content objects are allocated), which matters when the update is a
+ * large merged blob — e.g. the debounced save after a long offline
  * session, or a snapshot-sized diff. The resulting map is identical to the
  * `clockEnd` values `extractAllMetadata` computes from the decoded structs.
+ *
+ * IMPORTANT: this must NOT be implemented with
+ * `Y.encodeStateVectorFromUpdate`. That function answers "what document
+ * state does this update produce from scratch" — for any update whose
+ * structs do not start at clock 0 (i.e. every mid-life incremental save)
+ * the leading gap makes the answer EMPTY, which silently disabled the
+ * redundancy-skip metadata on all such updates. `parseUpdateMeta` reports
+ * the actual [from, to) clock ranges the blob contains.
  *
  * @param update - The Yjs update blob to parse
  * @returns Map of clientID -> end clock. Empty map on parse error.
  */
 export function extractClockEnds(update: Uint8Array): Map<number, number> {
     try {
-        return Y.decodeStateVector(Y.encodeStateVectorFromUpdate(update));
+        return Y.parseUpdateMeta(update).to;
     } catch (e) {
         console.warn("Failed to extract update clock metadata:", e);
         return new Map();
@@ -273,12 +281,32 @@ export function diffCarriesNewData(diff: Uint8Array, getServerBlobs: () => Uint8
 
     // Structs are empty: the diff is push-worthy only if it contains
     // deletions the server doesn't already have.
-    //
-    // Blobs are checked smallest-first with an early exit once coverage is
-    // proven. On a long-lived document, the snapshot's inline delete-set
-    // fingerprint (a few KB) almost always proves coverage on its own, so a
-    // reconnecting client never decodes the multi-megabyte snapshot or
-    // history blobs just to conclude "nothing to push".
+    return !deleteSetCoveredByBlobs(localDs, getServerBlobs);
+}
+
+/**
+ * Proves (or fails to prove) that the union of the server blobs' delete-sets
+ * covers `localDs`.
+ *
+ * Blobs are checked smallest-first with an early exit once coverage is
+ * proven. On a long-lived document, the snapshot's delete-set fingerprint
+ * (small by construction) almost always proves coverage on its own, so a
+ * reconnecting client never decodes the multi-megabyte snapshot or history
+ * blobs just to conclude "nothing to push".
+ *
+ * Used by the reconnect push guard both via {@link diffCarriesNewData}
+ * (when a diff was already encoded) and directly with a delete-set obtained
+ * from `Y.createDeleteSetFromStructStore` — the fast path that avoids
+ * encoding an O(document) diff on every clean reconnect.
+ *
+ * @param localDs - The local document's delete-set
+ * @param getServerBlobs - Lazily provides all update/segment/content blobs
+ * @returns true when every local deletion is provably on the server
+ */
+export function deleteSetCoveredByBlobs(
+    localDs: ReturnType<typeof Y.decodeUpdate>['ds'],
+    getServerBlobs: () => Uint8Array[]
+): boolean {
     let serverDs = Y.mergeDeleteSets([]);
     const covered = () =>
         Y.equalDeleteSets(serverDs, Y.mergeDeleteSets([serverDs, localDs]));
@@ -286,7 +314,7 @@ export function diffCarriesNewData(diff: Uint8Array, getServerBlobs: () => Uint8
     // Handles the trivial case (empty local delete-set) without decoding
     // any server blob at all.
     if (covered()) {
-        return false;
+        return true;
     }
 
     const blobs = getServerBlobs().slice().sort((a, b) => a.byteLength - b.byteLength);
@@ -299,8 +327,8 @@ export function diffCarriesNewData(diff: Uint8Array, getServerBlobs: () => Uint8
             continue;
         }
         if (covered()) {
-            return false;
+            return true;
         }
     }
-    return true;
+    return false;
 }

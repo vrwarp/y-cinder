@@ -39,6 +39,7 @@ import { generateSessionId, calculateBackoff } from "./utils";
 import { extractClockEnds, aggregateClockEnds } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext } from "./sync";
 import { compact as performTieredCompaction, CompactionContext } from "./compaction";
+import { squashDocument, readDocEpoch, SquashResult } from "./squash";
 import { measureClockSkew } from "./locking";
 import {
   handleSubdocs as handleSubdocsEvent,
@@ -109,6 +110,8 @@ export class FireProvider extends ObservableV2<any> {
   private readonly maxAggregationTime: number;
   /** Whether compaction garbage-collects deleted content */
   private readonly gcCompaction: boolean;
+  /** History segments accumulated before compaction folds into the snapshot */
+  private readonly historyFoldThreshold: number;
   /** Subdocument sync strategy: eager (all) or lazy (shouldLoad only) */
   private readonly subdocLoadingMode: 'eager' | 'lazy';
   private readonly compactionLimit: number;
@@ -151,6 +154,17 @@ export class FireProvider extends ObservableV2<any> {
   private _boundBeforeUnload: (() => void) | null = null;
   /** Per-session quarantine set for corrupted Firestore documents */
   private _corruptedDocIds = new Set<string>();
+  /**
+   * Epoch of the local document (see squash.ts). Initialized from the
+   * document's own epoch marker, refreshed from the server on sync.
+   */
+  private _epoch = 0;
+  /**
+   * Set once the server is discovered to be at a newer epoch. All saves
+   * and syncing stop; the application must rebuild from the new epoch
+   * (see the 'epoch-changed' event).
+   */
+  private _epochFenced = false;
 
   /**
    * Creates a new FireProvider instance.
@@ -170,6 +184,7 @@ export class FireProvider extends ObservableV2<any> {
       maxWaitTime = DEFAULTS.MAX_WAIT_TIME,
       maxAggregationTime = maxWaitTime * DEFAULTS.MAX_AGGREGATION_MULTIPLIER,
       gcCompaction = true,
+      historyFoldThreshold = DEFAULTS.HISTORY_FOLD_THRESHOLD,
       subdocLoadingMode = 'eager',
       depth = DEFAULTS.DEPTH,
       lockTTL = DEFAULTS.LOCK_TTL,
@@ -226,6 +241,7 @@ export class FireProvider extends ObservableV2<any> {
     this.maxWaitTime = maxWaitTime;
     this.maxAggregationTime = maxAggregationTime;
     this.gcCompaction = gcCompaction;
+    this.historyFoldThreshold = historyFoldThreshold;
     this.subdocLoadingMode = subdocLoadingMode;
     // Reuse a parent provider's measured clock offset (subdoc case): skew
     // is per-client, and measuring costs 3 Firestore ops per provider.
@@ -234,6 +250,10 @@ export class FireProvider extends ObservableV2<any> {
     this.compactionLimit = compactionLimit;
     this.persistence = config.persistence;
     this._testHooks = testHooks;
+
+    // The document knows which epoch it belongs to (stamped by squash);
+    // fresh documents are epoch 0 until initial sync reports otherwise.
+    this._epoch = readDocEpoch(this.doc);
 
     // Attach document event handlers
     this.doc.on('update', this.handleUpdate);
@@ -296,6 +316,7 @@ export class FireProvider extends ObservableV2<any> {
       cachedClockOffset: this._cachedClockOffset,
       storage: this.storage,
       gc: this.gcCompaction,
+      historyFoldThreshold: this.historyFoldThreshold,
     };
 
     // FIX: Pause history listener during compaction to avoid contention/deadlock in emulator
@@ -331,6 +352,8 @@ export class FireProvider extends ObservableV2<any> {
           onCorruptedDocument: (docId, error) => {
             this.emit('corrupted-document', [{ docId, error }]);
           },
+          getEpoch: () => this._epoch,
+          onEpochChanged: (serverEpoch) => this._handleEpochChanged(serverEpoch),
         };
 
         // We resume listening from the last known checkpoint.
@@ -342,8 +365,140 @@ export class FireProvider extends ObservableV2<any> {
   }
 
   /**
+   * The epoch this provider is currently syncing (0 until a squash has
+   * ever happened on the document).
+   */
+  get epoch(): number {
+    return this._epoch;
+  }
+
+  /**
+   * Rebuilds the document into a brand-new epoch on the server — the
+   * long-lived-document floor reset (see squash.ts for the full model).
+   *
+   * A garbage-collected snapshot still accretes tombstone structure,
+   * delete-set ranges, and one state-vector entry per client that ever
+   * wrote. Squashing clones the CONTENT into a fresh Yjs id space, so all
+   * three reset to the live-content floor. In exchange, edits made
+   * concurrently across the squash boundary cannot merge automatically:
+   * other clients receive an 'epoch-changed' event carrying their local
+   * state and must rebuild (see event docs). Use for single-user /
+   * few-device documents; do not use for high-concurrency collaboration.
+   *
+   * Preconditions enforced here: initial sync completed, no subdocument
+   * providers, provider not destroyed. The server-side backlog must fit
+   * one transaction — a normal compaction is run first to fold it.
+   *
+   * @returns The squash outcome; `skippedReason` distinguishes benign
+   *          skips (lock contention, backlog, stale local doc) from
+   *          errors.
+   */
+  async squash(): Promise<SquashResult> {
+    if (this._isDestroyed) {
+      return { success: false, error: new Error('Provider is destroyed') };
+    }
+    if (!this._synced) {
+      return { success: false, skippedReason: 'local-behind' };
+    }
+    if (this._epochFenced) {
+      return { success: false, skippedReason: 'local-behind' };
+    }
+    if (this.subProviders.size > 0 || this.depth > 0) {
+      return { success: false, error: new Error('squash() does not support subdocuments') };
+    }
+
+    // Fold the backlog first so the squash transaction stays within
+    // Firestore's write budget.
+    await this.compact();
+
+    // Flush our own pending updates so the clone reflects them.
+    if (this._inflightSave) {
+      try { await this._inflightSave; } catch { /* handled inside save */ }
+    }
+    if (this._pendingUpdates.length > 0) {
+      await this.saveToFirestore();
+    }
+
+    const result = await squashDocument({
+      db: this.db,
+      path: this.path,
+      uid: this.uid,
+      lockTTL: this.lockTTL,
+      cachedClockOffset: this._cachedClockOffset,
+      storage: this.storage,
+      isDestroyed: () => this._isDestroyed,
+      doc: this.doc,
+    });
+
+    if (result.success && result.epoch !== undefined) {
+      // The LIVE doc still carries the old epoch's structure, so this
+      // provider must stop syncing NOW: saves tagged with the new epoch
+      // would reference old-epoch struct ids no rebuilt client can
+      // integrate, and incoming new-epoch updates cannot apply onto the
+      // old doc. The application rebuilds the doc from the new snapshot
+      // (e.g. versicle's staged swap + reload) and recreates providers.
+      this._epoch = result.epoch;
+      this._stopSyncing();
+      this.emit('squashed', [{ epoch: result.epoch }]);
+    }
+    return result;
+  }
+
+  /**
+   * Handles discovery of a newer server epoch (someone squashed).
+   *
+   * Stops syncing and surfaces 'epoch-changed' with the full local state
+   * so the application can (a) rebuild its local doc from the new epoch's
+   * snapshot, and (b) decide whether anything from the old-epoch local
+   * state needs semantic re-application (data written strictly before the
+   * squash is already inside the new snapshot).
+   */
+  private _handleEpochChanged(serverEpoch: number): void {
+    if (this._epochFenced || this._isDestroyed) return;
+    this._stopSyncing();
+
+    let localState: Uint8Array | null = null;
+    try {
+      localState = Y.encodeStateAsUpdate(this.doc);
+    } catch (e) {
+      console.error('Failed to encode local state for epoch-changed event', e);
+    }
+
+    this.emit('epoch-changed', [{
+      previousEpoch: this._epoch,
+      epoch: serverEpoch,
+      localState,
+    }]);
+  }
+
+  /**
+   * Fences the provider after an epoch transition: stops all listeners,
+   * cancels timers, and blocks future saves. The provider stays alive so
+   * the application can read events/state, but no further data crosses
+   * the epoch boundary in either direction until it rebuilds.
+   */
+  private _stopSyncing(): void {
+    this._epochFenced = true;
+
+    if (this._debounceTimerId) {
+      clearTimeout(this._debounceTimerId);
+      this._debounceTimerId = null;
+    }
+    if (this._syncRetryTimerId) {
+      clearTimeout(this._syncRetryTimerId);
+      this._syncRetryTimerId = null;
+    }
+    this._unsubscribers.forEach(unsub => unsub());
+    this._unsubscribers = [];
+    if (this._unsubscribeHistory) {
+      this._unsubscribeHistory();
+      this._unsubscribeHistory = null;
+    }
+  }
+
+  /**
    * Destroys the provider and releases all resources.
-   * 
+   *
    * This method:
    * 1. Stops listening for remote updates
    * 2. Destroys all subdocument providers
@@ -449,12 +604,21 @@ export class FireProvider extends ObservableV2<any> {
       onCorruptedDocument: (docId, error) => {
         this.emit('corrupted-document', [{ docId, error }]);
       },
+      getEpoch: () => this._epoch,
+      onEpochChanged: (serverEpoch) => this._handleEpochChanged(serverEpoch),
     };
 
     try {
       // Perform initial sync
       const result = await performInitialSync(syncCtx);
       if (this._isDestroyed) return;
+
+      // The server was squashed past this document's history — do not
+      // retry (the state cannot converge); surface the event and stop.
+      if (result.epochConflict) {
+        this._handleEpochChanged(result.epochConflict.serverEpoch);
+        return;
+      }
 
       // performInitialSync reports failures via its result rather than
       // throwing — route them into the retry/backoff path below, otherwise
@@ -463,6 +627,11 @@ export class FireProvider extends ObservableV2<any> {
       if (!result.success) {
         throw result.error ?? new Error("Initial sync failed");
       }
+
+      // Adopt the server epoch (an empty local doc bootstraps straight
+      // into whatever epoch the server is at; the marker itself arrived
+      // inside the snapshot content).
+      this._epoch = result.epoch;
 
       // Reset retry count on successful sync
       this._syncRetryCount = 0;
@@ -477,9 +646,11 @@ export class FireProvider extends ObservableV2<any> {
       }
 
       // Setup real-time listeners (Updates, Snapshot, and History)
-      // Pass cursor to prevent sync gaps
+      // Pass cursor to prevent sync gaps; pass the processed snapshot
+      // version so the listener's attach-delivery is skipped instead of
+      // re-applying the delete-set fingerprint on every (re)connect.
       this._unsubscribers.push(createUpdateListener(syncCtx, result.lastSyncedDoc));
-      this._unsubscribers.push(createSnapshotListener(syncCtx));
+      this._unsubscribers.push(createSnapshotListener(syncCtx, result.snapshotVersion));
 
       // Store history listener separately so it can be paused during compaction
       this._lastHistoryDoc = result.lastHistoryDoc;
@@ -553,6 +724,7 @@ export class FireProvider extends ObservableV2<any> {
       maxWaitTime: this.maxWaitTime,
       maxAggregationTime: this.maxAggregationTime,
       gcCompaction: this.gcCompaction,
+      historyFoldThreshold: this.historyFoldThreshold,
       lockTTL: this.lockTTL,
       compactionLimit: this.compactionLimit,
       persistence: this.persistence,
@@ -656,6 +828,10 @@ export class FireProvider extends ObservableV2<any> {
   private saveToFirestore(): Promise<void> {
     if (this._inflightSave) return this._inflightSave;
     if (this._pendingUpdates.length === 0) return Promise.resolve();
+    // Epoch fence: after a squash elsewhere, old-epoch updates would be
+    // ignored by every other client anyway. The buffered updates stay in
+    // memory and are surfaced through the 'epoch-changed' event payload.
+    if (this._epochFenced) return Promise.resolve();
 
     this._inflightSave = this._executeSave().finally(() => {
       this._inflightSave = null;
@@ -677,6 +853,9 @@ export class FireProvider extends ObservableV2<any> {
     const baseData: Record<string, any> = {
       createdAt: serverTimestamp(),
       createdBy: this.uid,
+      // Squashed documents fence updates by epoch; omit for epoch 0 so
+      // never-squashed documents keep their historical schema.
+      ...(this._epoch > 0 ? { epoch: this._epoch } : {}),
       ...aggregateClockEnds(clockEnds),
     };
 

@@ -206,7 +206,36 @@ describe('mergeUpdatesWithMeta', () => {
         const meta = mergeUpdatesWithMeta(gapped, { gc: true });
         // Result must be the gap-preserving plain merge, with valid metadata
         expect(meta.result).toEqual(Y.mergeUpdates(gapped));
-        expect(meta.stateVector).toEqual(Y.encodeStateVectorFromUpdate(meta.result));
+        // The state vector must report the blob's REAL clock ends. (It must
+        // NOT be encodeStateVectorFromUpdate's answer: that is empty for a
+        // partial blob — the leading gap zeroes it — which made downstream
+        // redundancy checks treat such segments as vacuously covered.)
+        expect(meta.stateVector).toEqual(Y.encodeStateVector(Y.parseUpdateMeta(meta.result).to));
+        const decoded = Y.decodeStateVector(meta.stateVector);
+        expect(decoded.size).toBeGreaterThan(0);
+    });
+
+    it('reports true clock ends for partial merges (delta-compaction segments)', () => {
+        // A mid-life batch of updates: structs start well past clock 0
+        const doc = new Y.Doc();
+        doc.clientID = 4242;
+        const captured: Uint8Array[] = [];
+        doc.on('update', (u: Uint8Array) => captured.push(u));
+        const map = doc.getMap('m');
+        for (let i = 0; i < 10; i++) map.set('k' + i, i);
+        captured.length = 0; // discard the from-zero prefix
+        for (let i = 0; i < 10; i++) map.set('k' + i, 100 + i);
+        const segmentInputs = captured.slice();
+
+        const meta = mergeUpdatesWithMeta(segmentInputs, { gc: false });
+        const sv = Y.decodeStateVector(meta.stateVector);
+        expect(sv.get(4242)).toBe(20); // clock end, not zero
+
+        // And the fingerprint must be structs-empty (a delete-set-only
+        // update), not the whole segment
+        const decodedDs = Y.decodeUpdate(meta.dsUpdate);
+        expect(decodedDs.structs.length).toBe(0);
+        doc.destroy();
     });
 });
 

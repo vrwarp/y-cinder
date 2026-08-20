@@ -113,6 +113,7 @@ The `FireProvider` constructor accepts the following configuration options:
 | `maxWaitTime` | `number` | No | `500` | Debounce time (ms) for writing updates to Firestore. |
 | `maxAggregationTime` | `number` | No | `maxWaitTime * 10` | Hard cap (ms) on how long the sliding debounce may defer a save during continuous editing. |
 | `gcCompaction` | `boolean` | No | `true` | Garbage-collect deleted content when compacting snapshots. Keeps long-lived documents proportional to live content instead of total historical churn. See [docs/performance.md](docs/performance.md). |
+| `historyFoldThreshold` | `number` | No | `8` | History segments accumulated before compaction folds everything into the base snapshot. Between folds, compaction runs in cheap **delta mode** (pending updates → one history segment, `O(new data)`) instead of downloading/re-merging/re-uploading the whole snapshot every `maxUpdatesThreshold` updates. `1` restores the old always-fold behavior. |
 | `subdocLoadingMode` | `'eager' \| 'lazy'` | No | `'eager'` | `'lazy'` defers syncing remote subdocuments until `subdoc.load()` is called (Yjs convention), avoiding N initial syncs + 3N listeners at startup for documents with many subdocs. |
 
 ### API Methods
@@ -121,6 +122,10 @@ The `FireProvider` constructor accepts the following configuration options:
   Stops synchronization and cleans up resources. Call this when the provider is no longer needed (e.g., component unmount) to prevent memory leaks and duplicate connections. Waits for any in-flight save and flushes pending updates.
 - **`provider.compact()`**:
   Manually triggers the compaction process. Usually handled automatically.
+- **`provider.squash()`**:
+  Rebuilds the document into a brand-new **epoch**: content is cloned into a fresh Yjs id space, resetting the three things garbage-collected compaction cannot reclaim — tombstone structure, the delete-set, and the state vector (one entry per client that ever wrote). This is the floor reset for documents used for years; see [docs/performance.md](docs/performance.md) for the model, the safety fences, and the application contract (`epoch-changed` handling is required before any client calls this).
+- **`provider.epoch`** (property):
+  The epoch this provider is syncing (`0` for documents never squashed).
 - **`provider.synced`** (property):
   `true` once initial sync has completed and real-time listeners are active.
 
@@ -136,6 +141,8 @@ The provider extends `ObservableV2` and emits the following events:
 | `sync-failure` | `Error` | Emitted when initial sync fails after all retry attempts. |
 | `corrupted-document` | `{ docId: string, error: Error }` | Emitted when a corrupted Firestore document is quarantined. |
 | `save-rejected` | See below | Emitted when a local update **cannot** be persisted to Firestore. |
+| `squashed` | `{ epoch: number }` | Emitted on the client that successfully ran `squash()`. The provider has stopped syncing; rebuild the local document from the new epoch's snapshot and recreate providers. |
+| `epoch-changed` | `{ previousEpoch: number, epoch: number, localState: Uint8Array \| null }` | Emitted when the server was squashed past this client's epoch. The provider has stopped syncing (nothing was applied — applying would duplicate content). `localState` is the full old-epoch local state for the application to inspect/merge; rebuild the local doc from the new snapshot and recreate providers. |
 
 **`save-rejected` payload:**
 

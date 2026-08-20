@@ -17,6 +17,7 @@ import {
     connectFirestoreEmulator,
     collection,
     doc,
+    getDoc,
     getDocs,
     deleteDoc,
     addDoc,
@@ -148,6 +149,28 @@ describe('Zombie Update Reproduction (Index Misalignment)', () => {
         //    iv. Processing loop initiates.
 
         await provider.compact();
+
+        // CI resilience: on loaded runners the shared Firestore SDK can sit
+        // in its ~10s offline backoff window, and compact()'s bounded
+        // internal retries (a few seconds total) can all land inside it —
+        // compaction then gives up WITHOUT committing anything (no snapshot
+        // write, no deletions; observed as "Failed to get document because
+        // the client is offline"). Only that no-op outcome is retried here.
+        // The zombie bug this test pins produces a COMMITTED compaction
+        // (main document written, C deleted) with B left behind — that
+        // falls through to the assertions untouched on the first check.
+        for (let i = 0; i < 4; i++) {
+            let committed = false;
+            try {
+                committed = (await getDoc(doc(db, path))).exists();
+            } catch {
+                // getDoc itself failed (still offline) — treat as no commit
+            }
+            if (committed) break;
+            console.log('Compaction never committed (SDK offline window?) — waiting and retrying...');
+            await new Promise(r => setTimeout(r, 4000));
+            await provider.compact();
+        }
 
         // 4. Assertions
         // Bug Behavior:

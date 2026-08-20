@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from 'vitest';
 import * as Y from 'yjs';
-import { diffCarriesNewData } from '../../src/update-metadata';
+import { diffCarriesNewData, deleteSetCoveredByBlobs } from '../../src/update-metadata';
 
 describe('diffCarriesNewData', () => {
     it('returns true when the diff contains structs', () => {
@@ -82,5 +82,57 @@ describe('diffCarriesNewData', () => {
         // Valid blob alongside the corrupted one → covered
         const validBlob = Y.encodeStateAsUpdate(doc);
         expect(diffCarriesNewData(diff, () => [garbageBlob, validBlob])).toBe(false);
+    });
+});
+
+describe('deleteSetCoveredByBlobs (encode-free reconnect fast path)', () => {
+    it('agrees with the diff-based guard, using the store delete-set directly', () => {
+        const doc = new Y.Doc();
+        const map = doc.getMap('m');
+        for (let i = 0; i < 50; i++) {
+            map.set('k' + (i % 10), i); // overwrite churn → deletions
+        }
+        map.delete('k3');
+
+        const serverBlob = Y.encodeStateAsUpdate(doc);
+        const localDs = Y.createDeleteSetFromStructStore((doc as any).store);
+
+        // Server holds everything → covered (no push), no diff encode needed
+        expect(deleteSetCoveredByBlobs(localDs, () => [serverBlob])).toBe(true);
+
+        // Now delete something the server has not seen
+        map.delete('k7');
+        const newerDs = Y.createDeleteSetFromStructStore((doc as any).store);
+        expect(deleteSetCoveredByBlobs(newerDs, () => [serverBlob])).toBe(false);
+
+        // The legacy diff-based guard must agree in both directions
+        const diff = Y.encodeStateAsUpdate(doc, Y.encodeStateVector(doc));
+        expect(diffCarriesNewData(diff, () => [serverBlob])).toBe(true);
+        doc.destroy();
+    });
+
+    it('proves coverage from a structs-empty fingerprint alone', () => {
+        const doc = new Y.Doc();
+        const text = doc.getText('t');
+        text.insert(0, 'aging document with deletions');
+        text.delete(0, 6);
+        text.delete(5, 3);
+
+        // The fingerprint compaction stores: structs-empty, full DS
+        const fingerprint = Y.encodeStateAsUpdate(doc, Y.encodeStateVector(doc));
+        const localDs = Y.createDeleteSetFromStructStore((doc as any).store);
+
+        expect(deleteSetCoveredByBlobs(localDs, () => [fingerprint])).toBe(true);
+        doc.destroy();
+    });
+
+    it('empty local delete-set is covered without decoding any blob', () => {
+        const doc = new Y.Doc();
+        doc.getMap('m').set('k', 1); // no deletions
+        const localDs = Y.createDeleteSetFromStructStore((doc as any).store);
+        let called = false;
+        expect(deleteSetCoveredByBlobs(localDs, () => { called = true; return []; })).toBe(true);
+        expect(called).toBe(false);
+        doc.destroy();
     });
 });

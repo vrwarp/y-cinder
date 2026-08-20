@@ -316,3 +316,159 @@ new FireProvider({
   gcCompaction: true,       // default: true
 });
 ```
+
+---
+
+# Extended-use degradation (documents used for years)
+
+A second round of work targeted what happens AFTER all of the above: a
+document written daily for years through versicle-style workloads (one
+long-lived doc; ten `Y.Map` roots; page-turn/TTS same-key overwrites; a
+fresh random `clientID` per app launch). The suite
+`benchmarks/versicle-aging.bench.ts` ages one document through 240
+sessions / 14,400 events with the exact provider persistence shape and
+samples every age-sensitive hot path; `versicle-aging-fixed.bench.ts`
+replays the identical workload through the remediated pipeline.
+
+## What still grew without bound (baseline, seed 20260820)
+
+GC compaction removes deleted *content*, but three things grow with total
+historical churn forever, because CRDT convergence requires them: dead
+item *structure* (a map-key overwrite's tombstone can never merge away
+when writes interleave keys — ~7 bytes and one struct per overwrite,
+forever), the delete-set, and the state vector (one entry per client that
+ever wrote — and versicle mints a new client every page load).
+
+| metric | @1,440 events | @14,400 events | growth /1k events |
+| --- | ---: | ---: | ---: |
+| snapshot size | 394 KB | 3.31 MB | +230 KB |
+| live+dead structs | 16.5k (7.1k dead) | 148k (74k dead) | +10k |
+| fresh-client load (apply) | 21 ms | 372 ms | +25 ms |
+| compaction merge CPU (every ~50 updates) | 64 ms | 631 ms | +45 ms |
+| compaction transfer (every ~50 updates) | ~0.8 MB | ~6.6 MB | unbounded |
+| reconnect diff encode | 0.3 ms | 5.6 ms | +0.4 ms |
+| push guard, fingerprint dropped | 11 ms | 236 ms | +14 ms |
+| fingerprint re-apply per snapshot delivery | 0.4 ms | 12 ms | +1.0 ms |
+
+Every row is linear in age with no plateau. The same document measured
+through y-idb (its own `benchmarks/aging.mjs`, fake-indexeddb): hydration
+on every boot grew 37 ms → 1,004 ms, and the trim's full-document
+re-encode drove write amplification from 1.8× to 9.1× and climbing.
+
+## Fix 1: delta compaction (`historyFoldThreshold`)
+
+Compaction previously folded snapshot + updates into a NEW snapshot every
+`maxUpdatesThreshold` updates: download O(snapshot), merge O(snapshot),
+upload O(snapshot) — all costs above scale with document age and repeat
+every ~50 updates.
+
+Compaction now has two modes. DELTA (the steady-state cycle): merge only
+the pending update documents into ONE history segment — O(new data) CPU
+and bandwidth, the base snapshot is not touched. FOLD: the legacy
+everything-into-the-snapshot merge, run once history reaches
+`historyFoldThreshold` (default 8) segments. Initial sync and the history
+listener already consumed the history tier; segments carry a `stateVector`
+of true clock ends so every redundancy check works unchanged.
+
+Measured (240 sessions, identical workload): steady-state cycle cost
+631 ms → **0.6 ms**; per-cycle transfer ~6.6 MB → **~6 KB**; total
+compaction CPU 85.7 s → **8.7 s**; total compaction transfer ~990 MB →
+**110 MB**.
+
+## Fix 2: the delete-set fingerprint no longer dies of old age
+
+The reconnect fast paths depend on the snapshot's delete-set fingerprint.
+It was silently DROPPED once it outgrew its 700 KB inline cap — from that
+day on, every reconnect of every client failed the coverage proof and
+wrote a spurious O(delete-set) update document, forever. Oversized
+fingerprints are now offloaded to Cloud Storage
+(`deleteSetStoragePath`) and downloaded when needed — O(delete-set), once,
+instead of the spurious-push spiral.
+
+## Fix 3: clean reconnects no longer encode or decode anything big
+
+`performInitialSync` encoded `Y.encodeStateAsUpdate(ydoc, serverSV)` on
+every boot (Yjs embeds the FULL delete-set in every diff → O(churn)), then
+`diffCarriesNewData` decoded that diff again. The push decision is now
+made without either step when the server state vector covers every local
+struct: local deletions come straight from
+`Y.createDeleteSetFromStructStore` and are checked against the fingerprint
+(`deleteSetCoveredByBlobs`). Measured guard cost at 14.4k events: 4.5 ms
+(and growing) → **0.04 ms (flat)**. The O(document) encode only runs when
+there is actually something to push.
+
+The snapshot listener also re-applied the fingerprint on every delivery —
+including the attach-delivery of every reconnect, whose state initial sync
+had *just* processed. Deliveries now carry a version gate
+(`SyncResult.snapshotVersion` → `createSnapshotListener`), so the
+re-apply runs only when a remote compaction actually produced a new fold.
+
+## Fix 4 (latent correctness bug): partial-update metadata was empty
+
+`extractClockEnds` — the save-path metadata extractor introduced in the
+first optimization round — was built on `Y.encodeStateVectorFromUpdate`,
+which answers "what state does this update produce from scratch": for any
+update whose structs do not start at clock 0, i.e. **every incremental
+save after a client's first**, the leading gap makes the answer empty.
+Consequences: the clientIDs/clientClocks redundancy metadata was silently
+missing from every mid-life update document (every client re-applied
+every remote update), initial sync under-counted the server state vector
+(spurious re-pushes on reconnect against uncompacted updates), and
+delta-compaction segments would have carried empty state vectors (skipped
+as vacuously redundant — caught by the integration suite). All clock-ends
+extraction now uses `Y.parseUpdateMeta(update).to`, which reports the true
+per-client clock ranges with the same lazy walker. Pinned by regression
+tests in `tests/unit/clock-ends.test.ts` and `tests/unit/merge-core.test.ts`.
+
+## The remaining floor: epoch squash
+
+Everything above bounds the *per-cycle* costs, but the floor itself —
+dead structs, delete-set ranges, state-vector entries — still grows
+monotonically, and every fresh client load, y-idb hydration, and fold
+pays it. It cannot be compacted away within one CRDT history; the only
+reset is a new history.
+
+`provider.squash()` rebuilds the document CONTENT into a brand-new Yjs id
+space (`buildSquashedDoc`) and publishes it as epoch N+1: one client in
+the state vector, zero tombstones, empty delete-set. Epoch fencing makes
+the history break explicit and safe:
+
+- the main document carries `epoch`; update/history documents are tagged
+  with theirs; clients ignore foreign-epoch data, and compaction deletes
+  it without merging (a pre-squash update can never integrate into a
+  post-squash document — Yjs would park it in `pendingStructs` forever,
+  which also permanently disables GC compaction);
+- the squashed document carries its own epoch inside
+  (`__ycinder.epoch`), so any local copy — IndexedDB, backups,
+  checkpoints — knows which epoch it belongs to;
+- a client that discovers a newer server epoch STOPS syncing and emits
+  `epoch-changed` with its full local state; the application rebuilds its
+  local doc from the new snapshot (versicle: the staged-swap + reload
+  machinery) and decides whether any old-epoch local-only changes need
+  semantic re-application. The squashing client fences itself the same
+  way (`squashed` event) — its live doc still has the old structure.
+
+Squash trades CRDT concurrency across the boundary for the floor reset:
+edits made concurrently with the squash surface through events instead of
+merging automatically. Use it for single-user / few-device documents
+(exactly versicle's shape); do not use it for high-concurrency real-time
+collaboration. It is strictly opt-in — nothing squashes automatically.
+
+Measured in the fixed-pipeline benchmark (squash every 96 sessions): at
+each squash the state vector resets 96 → 1 clients, dead structs ~22k →
+0, delete-set ranges ~3.9k → 0, and fresh-client load drops ~40% — then
+the curves restart from the live-content floor instead of compounding.
+
+## y-idb: tiered trim (same document, local persistence)
+
+y-idb re-encoded the WHOLE document (`Y.encodeStateAsUpdate`) onto the
+main thread every `PREFERRED_TRIM_SIZE` (500) updates and wrote the
+O(document) result as a row — both costs linear in document age, paid
+every few minutes of active use. The trim is now tiered: the common trim
+folds the fresh tail into ONE delta row via `Y.mergeUpdates` (O(new
+updates)); the full re-encode runs only when delta rows exceed a
+row-count or byte budget (see y-idb's README). Measured on the identical
+workload: write amplification 9.1× (growing) → **2.6× (bounded ≤ ~3×)**,
+IndexedDB bytes written 50 MB → 14.7 MB, trim latency flat instead of
+growing ~13 ms per 1k events. Hydration remains floor-dominated — that is
+what squash resets.

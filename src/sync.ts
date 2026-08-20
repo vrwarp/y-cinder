@@ -59,7 +59,8 @@ import {
     DEFAULTS,
 } from "./types";
 import { writeStateVector } from "./utils";
-import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, diffCarriesNewData } from "./update-metadata";
+import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, diffCarriesNewData, deleteSetCoveredByBlobs } from "./update-metadata";
+import { readDocEpoch, docHasContent } from "./squash";
 
 /**
  * Context required for sync operations.
@@ -94,6 +95,21 @@ export interface SyncContext {
      * Allows the application layer to log, alert, or take action.
      */
     onCorruptedDocument?: (docId: string, error: Error) => void;
+    /**
+     * Current epoch of the local document (see squash.ts). Listeners drop
+     * update/history documents from foreign epochs — data written before a
+     * squash must never merge into a post-squash document (the id spaces
+     * are unrelated; Yjs would park it as missing dependencies forever).
+     * Absent callback = epoch 0 (documents that never squashed).
+     */
+    getEpoch?: () => number;
+    /**
+     * Fired when the server's main document is at a NEWER epoch than the
+     * local document: someone squashed. The local doc must not receive the
+     * new snapshot (its content would duplicate); the provider surfaces
+     * this so the application can rebuild from the new epoch.
+     */
+    onEpochChanged?: (serverEpoch: number) => void;
 }
 
 /**
@@ -112,6 +128,22 @@ export interface SyncResult {
     lastSyncedDoc: QueryDocumentSnapshot | null;
     /** The last history document observed during sync, used as a cursor for history listener */
     lastHistoryDoc: QueryDocumentSnapshot | null;
+    /**
+     * The main document's compaction version at sync time (null when the
+     * main document does not exist / predates versioning). Passed to the
+     * snapshot listener so its initial delivery — the state initial sync
+     * just processed — is skipped instead of re-applying the delete-set
+     * fingerprint (an O(delete-set) cost that grows with document age).
+     */
+    snapshotVersion: number | null;
+    /** Server epoch at sync time (0 for documents that never squashed) */
+    epoch: number;
+    /**
+     * Set when the server is at a newer epoch than the non-empty local
+     * document. Nothing was applied or pushed; the provider must surface
+     * an epoch-changed event instead of retrying.
+     */
+    epochConflict?: { serverEpoch: number; localEpoch: number };
 }
 
 /**
@@ -187,7 +219,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const updatesSnap = await getDocs(updatesQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
             if (updatesSnap.empty) {
                 hasMoreUpdates = false;
@@ -206,7 +238,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                                 continue; // Skip this update — cannot apply without data
                             }
                         }
-                        processUpdateMetadata(data, serverSVMap);
+                        // Metadata is folded into the server state vector
+                        // only after the epoch is known (main doc read) —
+                        // foreign-epoch documents must not contribute.
                         pendingUpdates.push({ type: 'update', data, priority: 3 });
                     }
                 }
@@ -246,7 +280,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const historySnap = await getDocs(historyQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
             if (historySnap.empty) {
                 hasMoreHistory = false;
@@ -254,7 +288,6 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 historySnap.forEach(snap => {
                     const data = snap.data();
                     if (data && data.segment) {
-                        processHistoryMetadata(data, serverSVMap);
                         pendingUpdates.push({ type: 'history', data, priority: 2 });
                     }
                 });
@@ -277,19 +310,65 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // 3. Fetch Base Snapshot (Tier 1) - single document, no pagination needed
         const mainRef = doc(db, path);
         const mainSnap = await getDoc(mainRef);
-        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null };
+        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
+        let snapshotVersion: number | null = null;
+        let serverEpoch = 0;
         if (mainSnap.exists()) {
             const data = mainSnap.data();
             if (data) {
+                if (typeof data.version === 'number') {
+                    snapshotVersion = data.version;
+                }
+                if (typeof data.epoch === 'number') {
+                    serverEpoch = data.epoch;
+                }
+
+                // Epoch fence: the server was squashed past this document's
+                // history. Applying the new snapshot here would DUPLICATE
+                // content (unrelated id spaces), so nothing is applied or
+                // pushed — the provider surfaces epoch-changed and the app
+                // rebuilds its local doc from the new epoch.
+                const localEpoch = readDocEpoch(ydoc);
+                if (serverEpoch > localEpoch && docHasContent(ydoc)) {
+                    return {
+                        success: false,
+                        updatesApplied: 0,
+                        localUpdatesPushed: false,
+                        lastSyncedDoc: null,
+                        lastHistoryDoc: null,
+                        snapshotVersion,
+                        epoch: serverEpoch,
+                        epochConflict: { serverEpoch, localEpoch },
+                    };
+                }
+
                 processSnapshotMetadata(data, serverSVMap);
 
-                // The delete-set fingerprint written by compaction is a tiny
+                // The delete-set fingerprint written by compaction is a
                 // structs-empty update. Treating it as a regular update both
                 // proves delete-set coverage to the push guard below and
                 // applies any deletions the local doc may have missed.
                 if (data.deleteSet) {
-                    pendingUpdates.push({ type: 'update', data: { update: data.deleteSet }, priority: 2 });
+                    pendingUpdates.push({ type: 'update', data: { update: data.deleteSet, epoch: serverEpoch }, priority: 2 });
+                } else if (data.deleteSetStoragePath) {
+                    // Fingerprint outgrew the inline cap and was offloaded to
+                    // Cloud Storage. Download it: it is O(delete-set) and its
+                    // absence would cost far more — the push guard could not
+                    // prove coverage, so EVERY reconnect would write a
+                    // spurious O(delete-set) update document.
+                    try {
+                        const buffer = await getBytes(ref(ctx.storage, data.deleteSetStoragePath));
+                        pendingUpdates.push({
+                            type: 'update',
+                            data: { update: Bytes.fromUint8Array(new Uint8Array(buffer)), epoch: serverEpoch },
+                            priority: 2,
+                        });
+                    } catch (dsErr) {
+                        // Coverage falls back to the other server blobs; worst
+                        // case is a redundant (idempotent) push.
+                        console.warn("Failed to download delete-set fingerprint", dsErr);
+                    }
                 }
 
                 // Fetch snapshot from Cloud Storage if available
@@ -315,6 +394,29 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     // Fallback for older documents that haven't been compacted into Cloud Storage yet
                     pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
                 }
+            }
+        }
+
+        // 3b. Epoch filter + server state vector. Update/history documents
+        // from foreign epochs are dropped: their structs belong to an
+        // unrelated id space (pre-squash) and would sit in pendingStructs
+        // forever, poisoning GC compaction. Metadata therefore only enters
+        // the server state vector for same-epoch items — and the fence
+        // must run BEFORE metadata processing so a stale update can never
+        // suppress the initial-sync push.
+        for (let i = pendingUpdates.length - 1; i >= 0; i--) {
+            const item = pendingUpdates[i];
+            if (item.type === 'snapshot') continue; // main doc = current epoch
+            const itemEpoch = typeof item.data.epoch === 'number' ? item.data.epoch : 0;
+            if (itemEpoch !== serverEpoch) {
+                pendingUpdates.splice(i, 1);
+            }
+        }
+        for (const item of pendingUpdates) {
+            if (item.type === 'history') {
+                processHistoryMetadata(item.data, serverSVMap);
+            } else if (item.type === 'update') {
+                processUpdateMetadata(item.data, serverSVMap);
             }
         }
 
@@ -352,20 +454,48 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         }, FIREBASE_ORIGINS.UPDATE);
 
         // 5. Push Missing Local Updates
+        //
+        // Fast path (aged-document fix): Y.encodeStateAsUpdate(ydoc, sv)
+        // embeds the document's FULL delete-set, so its cost grows with
+        // total historical churn — paying it on every reconnect of every
+        // client makes startup linearly slower with age. When the server
+        // state vector already covers every local struct, the diff would
+        // be structs-empty anyway, and pushability is decided purely by
+        // delete-set coverage — provable straight from the struct store
+        // and the snapshot's fingerprint without encoding anything.
         const serverSV = writeStateVector(serverSVMap);
-        const localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
         let localUpdatesPushed = false;
 
-        // Yjs embeds the full delete-set in every diff, so a fully-synced doc
-        // with deletion history still yields a non-empty diff. Only push when
-        // the diff carries structs or deletions the server is missing —
-        // otherwise every reconnect writes a spurious update document.
-        const shouldPush = localDiff.byteLength > 2 &&
-            diffCarriesNewData(localDiff, () => collectServerBlobs(pendingUpdates));
+        const exactLocalSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+        let serverCoversStructs = true;
+        for (const [client, clock] of exactLocalSV) {
+            if ((serverSVMap.get(client) || 0) < clock) {
+                serverCoversStructs = false;
+                break;
+            }
+        }
 
-        if (shouldPush) {
+        let shouldPush: boolean;
+        let localDiff: Uint8Array | null = null;
+        if (serverCoversStructs) {
+            const localDs = Y.createDeleteSetFromStructStore((ydoc as any).store);
+            shouldPush = !deleteSetCoveredByBlobs(localDs, () => collectServerBlobs(pendingUpdates));
+            if (shouldPush) {
+                // Rare: local deletion-only changes the server lacks.
+                localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
+            }
+        } else {
+            localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
+            // The diff has structs by construction (a local clock exceeds
+            // the server's), so it always carries new data.
+            shouldPush = localDiff.byteLength > 2 &&
+                diffCarriesNewData(localDiff, () => collectServerBlobs(pendingUpdates));
+        }
+
+        if (shouldPush && localDiff !== null) {
             console.log("Pushing missing local updates to Firestore.");
             const clockEnds = extractClockEnds(localDiff);
+            const epochTag = serverEpoch > 0 ? { epoch: serverEpoch } : {};
 
             if (localDiff.byteLength > DEFAULTS.INLINE_UPDATE_LIMIT) {
                 // Storage-backed update: upload binary to Cloud Storage
@@ -378,6 +508,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     updateStoragePath: storagePath,
                     createdAt: serverTimestamp(),
                     createdBy: uid,
+                    ...epochTag,
                     ...aggregateClockEnds(clockEnds)
                 };
                 await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
@@ -388,6 +519,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     update: Bytes.fromUint8Array(localDiff),
                     createdAt: serverTimestamp(),
                     createdBy: uid,
+                    ...epochTag,
                     ...aggregateClockEnds(clockEnds)
                 };
                 await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
@@ -400,7 +532,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             updatesApplied,
             localUpdatesPushed,
             lastSyncedDoc: lastUpdateDoc,
-            lastHistoryDoc
+            lastHistoryDoc,
+            snapshotVersion,
+            epoch: serverEpoch
         };
     } catch (err) {
         console.error("Sync failed", err);
@@ -410,7 +544,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             updatesApplied: 0,
             localUpdatesPushed: false,
             lastSyncedDoc: null,
-            lastHistoryDoc: null
+            lastHistoryDoc: null,
+            snapshotVersion: null,
+            epoch: 0
         };
     }
 }
@@ -478,6 +614,14 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
+
+                // Epoch fence: an update written before a squash belongs to
+                // an unrelated id space — applying it would park garbage in
+                // pendingStructs forever. Compaction deletes such documents.
+                const docEpoch = typeof data.epoch === 'number' ? data.epoch : 0;
+                if (docEpoch !== (ctx.getEpoch?.() ?? 0)) {
+                    return;
+                }
 
                 // Skip our own updates
                 if (data.createdBy === uid) {
@@ -574,13 +718,20 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
  * Snapshots produced by compacting data we already hold are skipped,
  * avoiding a full-document download per compaction per client (and a
  * duplicate download right after initial sync).
+ *
+ * @param initialVersion - The main document's compaction version already
+ * processed by initial sync. Deliveries carrying the same version are
+ * skipped wholesale — in particular the immediate delivery on listener
+ * attach, which used to re-apply the delete-set fingerprint (O(delete-set),
+ * a cost that grows with document age) on every reconnect.
  */
-export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
+export function createSnapshotListener(ctx: SyncContext, initialVersion: number | null = null): Unsubscribe {
     const { db, path, doc: ydoc, isDestroyed, onListenerError, storage } = ctx;
 
     // Track the last quarantined snapshot path so we can clear quarantine
     // when compaction produces a new snapshot at a different path.
     let lastQuarantinedPath: string | null = null;
+    let lastProcessedVersion: number | null = initialVersion;
 
     return onSnapshot(doc(db, path), async (snapshot) => {
         if (!snapshot.exists()) return;
@@ -589,20 +740,59 @@ export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
         if (!data) return;
 
         // Skip snapshots produced by our own compaction
-        if (data.origin === ctx.uid) return;
+        if (data.origin === ctx.uid) {
+            if (typeof data.version === 'number') {
+                lastProcessedVersion = data.version;
+            }
+            return;
+        }
+
+        // Epoch fence: someone squashed the document into a new epoch.
+        // The new snapshot must NOT be applied onto the old-epoch local
+        // doc (content would duplicate — the id spaces are unrelated);
+        // surface it so the application rebuilds instead.
+        const snapEpoch = typeof data.epoch === 'number' ? data.epoch : 0;
+        const curEpoch = ctx.getEpoch?.() ?? 0;
+        if (snapEpoch > curEpoch) {
+            ctx.onEpochChanged?.(snapEpoch);
+            return;
+        }
+        if (snapEpoch < curEpoch) {
+            // Stale delivery from before our epoch — ignore
+            return;
+        }
+
+        // Version gate: a delivery carrying a version we already processed
+        // (typically the immediate delivery on listener attach) has nothing
+        // new — skip before touching the fingerprint or the blob.
+        if (typeof data.version === 'number' && data.version === lastProcessedVersion) {
+            return;
+        }
 
         // Redundancy check: if the local doc already covers the snapshot's
         // state vector, downloading it would be a no-op. The delete-set
-        // fingerprint (tiny, inline) is still applied first to pick up any
-        // deletions that travelled in structs we already cover.
+        // fingerprint is still applied first to pick up any deletions that
+        // travelled in structs we already cover.
         if (data.deleteSet) {
             try {
                 Y.applyUpdate(ydoc, (data.deleteSet as Bytes).toUint8Array(), FIREBASE_ORIGINS.SNAPSHOT);
             } catch (e) {
                 console.warn("Failed to apply snapshot delete-set fingerprint", e);
             }
+        } else if (data.deleteSetStoragePath) {
+            // Oversized fingerprint offloaded to Cloud Storage
+            try {
+                const buffer = await getBytes(ref(storage, data.deleteSetStoragePath));
+                if (isDestroyed()) return;
+                Y.applyUpdate(ydoc, new Uint8Array(buffer), FIREBASE_ORIGINS.SNAPSHOT);
+            } catch (e) {
+                console.warn("Failed to apply storage-backed delete-set fingerprint", e);
+            }
         }
         if (localCoversSnapshot(data, ydoc)) {
+            if (typeof data.version === 'number') {
+                lastProcessedVersion = data.version;
+            }
             return;
         }
 
@@ -628,6 +818,9 @@ export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
                 if (isDestroyed()) return;
                 const content = new Uint8Array(buffer);
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
+                if (typeof data.version === 'number') {
+                    lastProcessedVersion = data.version;
+                }
             } catch (storageErr) {
                 console.error(`Failed to apply snapshot ${snapshotKey} (quarantined)`, storageErr);
                 ctx.corruptedDocIds?.add(snapshotKey);
@@ -646,6 +839,9 @@ export function createSnapshotListener(ctx: SyncContext): Unsubscribe {
             try {
                 const content = (data.content as Bytes).toUint8Array();
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
+                if (typeof data.version === 'number') {
+                    lastProcessedVersion = data.version;
+                }
             } catch (err) {
                 console.error(`Failed to apply inline snapshot (quarantined)`, err);
                 ctx.corruptedDocIds?.add(snapshotKey);
@@ -699,6 +895,12 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
             if (change.type === 'added') {
                 const data = change.doc.data();
                 const docId = change.doc.id;
+
+                // Epoch fence (see createUpdateListener)
+                const docEpoch = typeof data?.epoch === 'number' ? data.epoch : 0;
+                if (docEpoch !== (ctx.getEpoch?.() ?? 0)) {
+                    return;
+                }
 
                 // Skip quarantined poison pills
                 if (ctx.corruptedDocIds?.has(docId)) {

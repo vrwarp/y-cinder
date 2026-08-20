@@ -20,3 +20,11 @@
 export { FireProvider } from "./provider";
 export type { FireProviderConfig } from "./provider";
 export { mergeUpdatesAsync } from "./merge-utils";
+export {
+    readDocEpoch,
+    docHasContent,
+    buildSquashedDoc,
+    PROVIDER_META_KEY,
+    EPOCH_KEY,
+} from "./squash";
+export type { SquashResult } from "./squash";

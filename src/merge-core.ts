@@ -111,10 +111,18 @@ export function mergeUpdatesWithMeta(updates: Uint8Array[], options?: MergeOptio
     }
 
     // Plain merge (or GC fallback): validate + derive via lazy walks.
-    // encodeStateVectorFromUpdate walks every struct and diffUpdate
-    // additionally parses the delete-set, so together they reject the same
-    // corruption Y.decodeUpdate would.
-    const stateVector = Y.encodeStateVectorFromUpdate(merged);
+    // parseUpdateMeta walks every struct and diffUpdate additionally
+    // parses the delete-set, so together they reject the same corruption
+    // Y.decodeUpdate would.
+    //
+    // parseUpdateMeta (not encodeStateVectorFromUpdate) is load-bearing:
+    // the latter returns an EMPTY vector for updates whose structs do not
+    // start at clock 0 — true of every PARTIAL merge (delta-compaction
+    // segments, gap-preserving fallbacks). An empty state vector both
+    // breaks the sync layer's redundancy checks (empty = "covers nothing"
+    // = segment skipped as vacuously redundant) and makes the dsUpdate
+    // diff below degenerate to the whole update.
+    const stateVector = Y.encodeStateVector(Y.parseUpdateMeta(merged).to);
     const dsUpdate = Y.diffUpdate(merged, stateVector);
     return { result: merged, stateVector, dsUpdate };
 }

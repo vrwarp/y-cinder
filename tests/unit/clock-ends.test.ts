@@ -38,6 +38,33 @@ describe('extractClockEnds', () => {
             .toEqual([...viaDecode.entries()].sort((a, b) => a[0] - b[0]));
     });
 
+    it('REGRESSION: reports clock ends for mid-life updates (structs not starting at clock 0)', () => {
+        // Every real-world incremental save looks like this: the client
+        // already has history, so the update's structs start at clock > 0.
+        // The previous implementation (encodeStateVectorFromUpdate) returned
+        // an EMPTY map here — the leading gap zeroes that function's answer —
+        // which silently stripped the redundancy-skip metadata from every
+        // update document after a client's very first save.
+        const doc = new Y.Doc();
+        doc.clientID = 777;
+        const captured: Uint8Array[] = [];
+        doc.on('update', (u: Uint8Array) => captured.push(u));
+        doc.getMap('m').set('first', 1); // clock 0
+        captured.length = 0;
+        doc.getMap('m').set('second', 2); // clock 1 — a mid-life save
+        doc.getMap('m').set('third', 3); // clock 2
+
+        const midLife = Y.mergeUpdates(captured);
+        const viaLazy = extractClockEnds(midLife);
+        const viaDecode = new Map(
+            extractAllMetadata(midLife).map(m => [m.clientID, m.clockEnd])
+        );
+        expect(viaLazy.size).toBe(1);
+        expect(viaLazy.get(777)).toBe(3);
+        expect([...viaLazy.entries()]).toEqual([...viaDecode.entries()]);
+        doc.destroy();
+    });
+
     it('returns an empty map on garbage input (parity with extractAllMetadata)', () => {
         expect(extractClockEnds(new Uint8Array([7, 7, 7, 7]))).toEqual(new Map());
         expect(extractClockEnds(new Uint8Array(0))).toEqual(new Map());

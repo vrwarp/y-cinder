@@ -110,7 +110,10 @@ export function writeStateVector(sv: Map<number, number>): Uint8Array {
  * ```
  */
 export function calculateStateVector(update: Uint8Array): string {
-    return toBase64(Y.encodeStateVectorFromUpdate(update));
+    // parseUpdateMeta reports true clock ends even for partial updates
+    // (encodeStateVectorFromUpdate returns an empty vector when the blob's
+    // structs do not start at clock 0 — see extractClockEnds).
+    return toBase64(Y.encodeStateVector(Y.parseUpdateMeta(update).to));
 }
 
 /**

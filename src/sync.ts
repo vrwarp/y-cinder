@@ -71,6 +71,13 @@ import {
     isItemRedundant,
     applyItem,
 } from "./sync-helpers";
+import {
+    hasMorePages,
+    pickPaginationCursorIndex,
+    planIncomingUpdate,
+    shouldTriggerCompaction,
+    survivesEpochFence,
+} from "./sync-policy";
 import { readDocEpoch, docHasContent } from "./squash";
 
 /**
@@ -252,18 +259,13 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 }
 
                 // FIX: Verify cursor is committed to avoid "Invalid query" with pending serverTimestamp
-                let candidateDoc: QueryDocumentSnapshot | null = updatesSnap.docs[updatesSnap.docs.length - 1];
-                while (candidateDoc && candidateDoc.metadata.hasPendingWrites) {
-                    const idx = updatesSnap.docs.indexOf(candidateDoc);
-                    candidateDoc = idx > 0 ? updatesSnap.docs[idx - 1] : null;
+                const cursorIndex = pickPaginationCursorIndex(updatesSnap.docs);
+
+                if (cursorIndex >= 0) {
+                    lastUpdateDoc = updatesSnap.docs[cursorIndex];
                 }
 
-                // Only update lastUpdateDoc if we found a later committed doc, or if we haven't set one yet
-                if (candidateDoc) {
-                    lastUpdateDoc = candidateDoc;
-                }
-
-                hasMoreUpdates = updatesSnap.docs.length === BATCH_SIZE;
+                hasMoreUpdates = hasMorePages(updatesSnap.docs.length, BATCH_SIZE);
             }
         }
 
@@ -412,9 +414,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // suppress the initial-sync push.
         for (let i = pendingUpdates.length - 1; i >= 0; i--) {
             const item = pendingUpdates[i];
-            if (item.type === 'snapshot') continue; // main doc = current epoch
-            const itemEpoch = typeof item.data.epoch === 'number' ? item.data.epoch : 0;
-            if (itemEpoch !== serverEpoch) {
+            if (!survivesEpochFence(item, serverEpoch)) {
                 pendingUpdates.splice(i, 1);
             }
         }
@@ -601,10 +601,17 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
     let lastCompactionTrigger = 0;
 
     return onSnapshot(liveUpdatesQ, (snapshot) => {
-        if (onCompactionNeeded && snapshot.size > maxUpdatesThreshold) {
+        if (onCompactionNeeded) {
             const now = Date.now();
-            const atHardCap = snapshot.size >= DEFAULTS.REALTIME_LIMIT;
-            if (atHardCap || now - lastCompactionTrigger >= DEFAULTS.COMPACTION_TRIGGER_COOLDOWN_MS) {
+
+            if (shouldTriggerCompaction({
+                size: snapshot.size,
+                maxUpdatesThreshold,
+                now,
+                lastTriggerAt: lastCompactionTrigger,
+                cooldownMs: DEFAULTS.COMPACTION_TRIGGER_COOLDOWN_MS,
+                hardCap: DEFAULTS.REALTIME_LIMIT,
+            })) {
                 lastCompactionTrigger = now;
                 onCompactionNeeded();
             }
@@ -620,38 +627,26 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
+                const docId = change.doc.id;
+                const plan = planIncomingUpdate(data, {
+                    uid,
+                    currentEpoch: ctx.getEpoch?.() ?? 0,
+                    docId,
+                    corruptedDocIds: ctx.corruptedDocIds,
+                    localSVMap,
+                });
 
-                // Epoch fence: an update written before a squash belongs to
-                // an unrelated id space — applying it would park garbage in
-                // pendingStructs forever. Compaction deletes such documents.
-                const docEpoch = typeof data.epoch === 'number' ? data.epoch : 0;
-                if (docEpoch !== (ctx.getEpoch?.() ?? 0)) {
-                    return;
-                }
-
-                // Skip our own updates
-                if (data.createdBy === uid) {
-                    // Update our cache even for our own updates so subsequent checks are accurate
+                if (plan.kind === 'skip-own') {
+                    // Fold our own metadata in anyway so later checks stay accurate.
                     processUpdateMetadata(data, localSVMap);
                     return;
                 }
-
-                // Check if we already have this update
-                if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
-                    if (isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks)) {
-                        return; // Skip - we have all the data
-                    }
-                }
-
-                const docId = change.doc.id;
-
-                // Skip quarantined poison pills
-                if (ctx.corruptedDocIds?.has(docId)) {
+                if (plan.kind !== 'download' && plan.kind !== 'apply-inline') {
                     return;
                 }
 
                 // Handle storage-backed update (oversized diff offloaded to Cloud Storage)
-                if (data.updateStoragePath && !data.update) {
+                if (plan.kind === 'download') {
                     (async () => {
                         try {
                             const storageRef = ref(ctx.storage, data.updateStoragePath);

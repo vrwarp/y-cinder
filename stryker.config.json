@@ -1,11 +1,19 @@
 {
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
-  "_comment": "Mutation testing over the emulator-free unit suite (see vitest.mutation.config.ts for why the integration suite is excluded). Mutants in emulator-only modules report as 'no coverage', not 'survived'.",
+  "_comment": "Mutation testing over the emulator-free unit suite (see vitest.mutation.config.ts for why the integration suite is excluded). Two numbers matter here and they are far apart: the score over COVERED code is 82.6%, while the TOTAL is 31.6% because ~1,560 mutants sit in code only the Firestore emulator can reach (sync.ts, provider.ts, compaction.ts, squash.ts). break=30 is a ratchet on the total: raise it as pure logic is extracted into policy modules, never lower it.",
   "packageManager": "npm",
   "testRunner": "vitest",
-  "vitest": { "configFile": "vitest.mutation.config.ts" },
-  "reporters": ["html", "clear-text", "progress"],
-  "htmlReporter": { "fileName": "reports/mutation/index.html" },
+  "vitest": {
+    "configFile": "vitest.mutation.config.ts"
+  },
+  "reporters": [
+    "html",
+    "clear-text",
+    "progress"
+  ],
+  "htmlReporter": {
+    "fileName": "reports/mutation/index.html"
+  },
   "coverageAnalysis": "perTest",
   "concurrency": 3,
   "timeoutMS": 30000,
@@ -15,7 +23,11 @@
     "!src/types.ts",
     "!src/index.ts"
   ],
-  "thresholds": { "high": 90, "low": 70, "break": 0 },
+  "thresholds": {
+    "high": 90,
+    "low": 70,
+    "break": 30
+  },
   "tempDirName": ".stryker-tmp",
   "cleanTempDir": true
 }

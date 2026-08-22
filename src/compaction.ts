@@ -52,6 +52,14 @@ import {
 } from "@firebase/firestore";
 import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import { toBase64 } from "lib0/buffer";
+import {
+    epochOf,
+    planHistoryDoc,
+    planUpdateDoc,
+    readMainDocState,
+    shouldRetryCompaction,
+    shouldUseDelta,
+} from './compaction-policy';
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
 import { wait, calculateBackoff } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
@@ -195,28 +203,9 @@ export async function compact(
         const mainRef = doc(db, path);
         const mainSnap = await getDoc(mainRef);
 
-        let currentVersion = 0;
-        let currentEpoch = 0;
-        let hasBase = false;
-        let baseStoragePath: string | null = null;
-        let baseInline: Bytes | null = null;
-
-        if (mainSnap.exists()) {
-            const data = mainSnap.data();
-            if (data?.snapshotStoragePath) {
-                hasBase = true;
-                baseStoragePath = data.snapshotStoragePath;
-            } else if (data?.content) {
-                hasBase = true;
-                baseInline = data.content as Bytes;
-            }
-            if (typeof data?.version === 'number') {
-                currentVersion = data.version;
-            }
-            if (typeof data?.epoch === 'number') {
-                currentEpoch = data.epoch;
-            }
-        }
+        const mainState = readMainDocState(mainSnap.exists() ? mainSnap.data() : null);
+        const { hasBase, baseStoragePath, currentVersion, currentEpoch } = mainState;
+        const baseInline = mainState.baseInline as Bytes | null;
 
         // Epoch fence: documents written before a squash belong to an
         // unrelated id space. Merging them would permanently poison the
@@ -224,8 +213,6 @@ export async function compact(
         // missing dependencies, which also disables GC compaction), so
         // they are deleted without merging.
         const staleRefs: DocumentReference[] = [];
-        const epochOf = (data: Record<string, any>) =>
-            typeof data?.epoch === 'number' ? data.epoch : 0;
 
         // Use the data already returned by the queries above. Update and
         // history documents are immutable (only ever created or deleted),
@@ -234,13 +221,15 @@ export async function compact(
         // read cost. Storage-backed payloads are downloaded in parallel.
         const updateResults = await Promise.all(updateDocs.map(async (uDoc) => {
             const data = uDoc.data() as Record<string, any>;
-            if (epochOf(data) !== currentEpoch) {
+            const plan = planUpdateDoc(data, currentEpoch);
+
+            if (plan.kind === 'stale') {
                 staleRefs.push(uDoc.ref);
                 return null;
             }
-            if (data?.updateStoragePath && !data?.update) {
+            if (plan.kind === 'storage') {
                 try {
-                    const storageRef = ref(storage, data.updateStoragePath);
+                    const storageRef = ref(storage, plan.storagePath);
                     const buffer = await getBytes(storageRef);
                     return {
                         ref: uDoc.ref,
@@ -251,7 +240,8 @@ export async function compact(
                     console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
                     return null;
                 }
-            } else if (data?.update) {
+            }
+            if (plan.kind === 'inline') {
                 return {
                     ref: uDoc.ref,
                     data: (data.update as Bytes).toUint8Array(),
@@ -265,11 +255,13 @@ export async function compact(
         const historyToMerge = historyDocs
             .map((hDoc) => {
                 const data = hDoc.data() as Record<string, any>;
-                if (epochOf(data) !== currentEpoch) {
+                const plan = planHistoryDoc(data, currentEpoch);
+
+                if (plan.kind === 'stale') {
                     staleRefs.push(hDoc.ref);
                     return null;
                 }
-                if (data?.segment) {
+                if (plan.kind === 'merge') {
                     return {
                         ref: hDoc.ref,
                         val: (data.segment as Bytes).toUint8Array(),
@@ -298,10 +290,12 @@ export async function compact(
         // into a fresh GC'd snapshot. Runs when history has accumulated to
         // the fold threshold, when there is no base yet, or when a delta
         // segment would not fit inline in a Firestore document.
-        const wantDelta =
-            hasBase &&
-            updatesToProcess.length > 0 &&
-            historyToMerge.length + 1 < historyFoldThreshold;
+        const wantDelta = shouldUseDelta({
+            hasBase,
+            updateCount: updatesToProcess.length,
+            historyCount: historyToMerge.length,
+            historyFoldThreshold,
+        });
 
         if (wantDelta) {
             const deltaResult = await tryDeltaCompaction({
@@ -675,10 +669,7 @@ async function handleCompactionError(
 ): Promise<CompactionResult> {
     const { isDestroyed } = ctx;
 
-    const isRetryable = error.code === 'aborted' || error.code === 'unavailable' || error.code === 'deadline-exceeded';
-    const isLockLostError = error.message?.includes('Lock lost');
-
-    if (attempt < DEFAULTS.MAX_RETRIES && isRetryable && !isLockLostError && !isDestroyed()) {
+    if (shouldRetryCompaction({ error, attempt, isDestroyed: isDestroyed() })) {
         const backoff = calculateBackoff(attempt);
         console.warn(`Compaction failed (attempt ${attempt}). Retrying in ${Math.floor(backoff)}ms...`, error);
 

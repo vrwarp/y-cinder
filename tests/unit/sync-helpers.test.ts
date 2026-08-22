@@ -418,3 +418,111 @@ describe('applyItem', () => {
         )).toBe(false);
     });
 });
+
+/*
+ * Conjunct independence.
+ *
+ * Several guards read `clientIDs?.length > 0 && clientClocks?.length > 0`.
+ * Every existing test supplies both arrays or neither, so mutating either
+ * half changed nothing observable. A half-written document (one array
+ * present, the other empty) is exactly what a partial write or an older
+ * client produces, and it must fall through to the blob rather than be
+ * read as authoritative metadata.
+ */
+describe('clock-metadata guards require BOTH arrays', () => {
+    const doc = makeDoc(7, 4);
+    const blob = () => bytes(Y.encodeStateAsUpdate(doc));
+
+    it('processUpdateMetadata ignores clientIDs without clientClocks', () => {
+        const map = new Map<number, number>();
+
+        processUpdateMetadata({ clientIDs: [7], clientClocks: [], update: blob() }, map);
+
+        // Fell through to the blob, which reports clock 4 — not the empty metadata.
+        expect(map.get(7)).toBe(4);
+    });
+
+    it('processUpdateMetadata ignores clientClocks without clientIDs', () => {
+        const map = new Map<number, number>();
+
+        processUpdateMetadata({ clientIDs: [], clientClocks: [99], update: blob() }, map);
+
+        expect(map.get(7)).toBe(4);
+    });
+
+    it('processUpdateMetadata with neither array and no blob does nothing', () => {
+        const map = new Map<number, number>();
+
+        processUpdateMetadata({ clientIDs: [], clientClocks: [] }, map);
+
+        expect(map.size).toBe(0);
+    });
+
+    it('isItemRedundant ignores half-written update metadata', () => {
+        const local = new Map<number, number>([[1, 10]]);
+
+        // Clocks alone must not be read as "covered".
+        expect(isItemRedundant(
+            { type: 'update', priority: 3, data: { clientIDs: [], clientClocks: [5] } },
+            local,
+        )).toBe(false);
+        expect(isItemRedundant(
+            { type: 'update', priority: 3, data: { clientIDs: [1], clientClocks: [] } },
+            local,
+        )).toBe(false);
+    });
+});
+
+describe('state-vector folding treats absent and zero clocks alike', () => {
+    it('starts from 0 for a client the map has never seen', () => {
+        const map = new Map<number, number>();
+
+        processUpdateMetadata({ clientIDs: [5], clientClocks: [1] }, map);
+
+        expect(map.get(5)).toBe(1);
+    });
+
+    it('advances from an explicit 0 rather than treating it as missing', () => {
+        const map = new Map<number, number>([[5, 0]]);
+
+        processUpdateMetadata({ clientIDs: [5], clientClocks: [1] }, map);
+
+        expect(map.get(5)).toBe(1);
+    });
+
+    it('does not regress a client to 0 when a lower clock arrives', () => {
+        const map = new Map<number, number>([[5, 8]]);
+
+        processUpdateMetadata({ clientIDs: [5], clientClocks: [0] }, map);
+
+        expect(map.get(5)).toBe(8);
+    });
+
+    it('applies the same rule when folding from a blob', () => {
+        const map = new Map<number, number>([[7, 99]]);
+
+        processUpdateMetadata({ update: bytes(Y.encodeStateAsUpdate(makeDoc(7, 2))) }, map);
+
+        expect(map.get(7)).toBe(99);
+    });
+});
+
+describe('applyItem requires the field to match the declared type', () => {
+    it('does not apply an update item whose update field is missing', () => {
+        const target = new Y.Doc();
+
+        expect(applyItem(
+            { type: 'update', priority: 3, data: { segment: bytes(new Uint8Array([1])) } },
+            target,
+        )).toBe(false);
+    });
+
+    it('does not apply a history item carrying only content', () => {
+        const target = new Y.Doc();
+
+        expect(applyItem(
+            { type: 'history', priority: 2, data: { content: bytes(new Uint8Array([1])) } },
+            target,
+        )).toBe(false);
+    });
+});

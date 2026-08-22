@@ -331,3 +331,40 @@ describe('largeUpdatePath', () => {
         expect(largeUpdatePath('docs/a', 'c1', 5)).not.toBe(largeUpdatePath('docs/a', 'c1', 6));
     });
 });
+
+/*
+ * planIncomingUpdate's redundancy guard reads both clock arrays. A
+ * half-written document must not be treated as covered — it would be
+ * dropped, and the data it carries never applied.
+ */
+describe('planIncomingUpdate requires BOTH clock arrays to skip as redundant', () => {
+    const covered = new Map<number, number>([[1, 10]]);
+
+    it('applies an update whose clientClocks are missing', () => {
+        expect(planIncomingUpdate(
+            { createdBy: 'other', clientIDs: [1], clientClocks: [], update: 'b' },
+            ctx({ localSVMap: covered }),
+        )).toEqual({ kind: 'apply-inline' });
+    });
+
+    it('applies an update whose clientIDs are missing', () => {
+        expect(planIncomingUpdate(
+            { createdBy: 'other', clientIDs: [], clientClocks: [5], update: 'b' },
+            ctx({ localSVMap: covered }),
+        )).toEqual({ kind: 'apply-inline' });
+    });
+
+    it('skips only when both arrays are present and covered', () => {
+        expect(planIncomingUpdate(
+            { createdBy: 'other', clientIDs: [1], clientClocks: [5], update: 'b' },
+            ctx({ localSVMap: covered }),
+        )).toEqual({ kind: 'skip-redundant' });
+    });
+
+    it('still downloads a Storage-backed update whose metadata is half written', () => {
+        expect(planIncomingUpdate(
+            { createdBy: 'other', clientIDs: [1], clientClocks: [], updateStoragePath: 'gs://u' },
+            ctx({ localSVMap: covered }),
+        )).toEqual({ kind: 'download', storagePath: 'gs://u' });
+    });
+});

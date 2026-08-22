@@ -47,6 +47,12 @@ import {
   SubdocContext,
   SubProviderMap,
 } from "./subdocs";
+import {
+  computeSaveDelay,
+  isRemoteOrigin,
+  squashBlockedBy,
+  validateProviderConfig,
+} from './provider-policy';
 
 // Re-export types for external consumers
 export type { FireProviderConfig } from "./types";
@@ -195,21 +201,7 @@ export class FireProvider extends ObservableV2<any> {
     // P1.8 / P2.20 FIX: Validate path and config BEFORE any Firebase SDK calls
     // This ensures validation errors are thrown with clear messages before
     // getFirestore() which could fail with cryptic errors on invalid app.
-    if (!path || path.includes('//') || path.startsWith('/') || path.endsWith('/')) {
-      throw new Error(`Invalid Firestore path: '${path}'. Path must not be empty, start/end with '/', or contain '//'`);
-    }
-
-    if (maxUpdatesThreshold <= 0) {
-      throw new Error(`Invalid maxUpdatesThreshold: ${maxUpdatesThreshold}. Must be positive.`);
-    }
-
-    if (maxAggregationTime <= 0) {
-      throw new Error(`Invalid maxAggregationTime: ${maxAggregationTime}. Must be positive.`);
-    }
-
-    if (depth < 0 || depth > 100) {
-      throw new Error(`Invalid depth: ${depth}. Must be between 0 and 100.`);
-    }
+    validateProviderConfig({ path, maxUpdatesThreshold, maxAggregationTime, depth });
 
     this.firebaseApp = firebaseApp;
     this.storage = getStorage(firebaseApp);
@@ -394,16 +386,21 @@ export class FireProvider extends ObservableV2<any> {
    *          errors.
    */
   async squash(): Promise<SquashResult> {
-    if (this._isDestroyed) {
+    const blocked = squashBlockedBy({
+      isDestroyed: this._isDestroyed,
+      synced: this._synced,
+      epochFenced: this._epochFenced,
+      subProviderCount: this.subProviders.size,
+      depth: this.depth,
+    });
+
+    if (blocked?.kind === 'destroyed') {
       return { success: false, error: new Error('Provider is destroyed') };
     }
-    if (!this._synced) {
+    if (blocked?.kind === 'local-behind') {
       return { success: false, skippedReason: 'local-behind' };
     }
-    if (this._epochFenced) {
-      return { success: false, skippedReason: 'local-behind' };
-    }
-    if (this.subProviders.size > 0 || this.depth > 0) {
+    if (blocked?.kind === 'subdocs-unsupported') {
       return { success: false, error: new Error('squash() does not support subdocuments') };
     }
 
@@ -696,9 +693,7 @@ export class FireProvider extends ObservableV2<any> {
    */
   private handleUpdate = (update: Uint8Array, origin: unknown): void => {
     // Prevent echo loops from remote updates
-    if (origin === FIREBASE_ORIGINS.SNAPSHOT ||
-      origin === FIREBASE_ORIGINS.HISTORY ||
-      origin === FIREBASE_ORIGINS.UPDATE) {
+    if (isRemoteOrigin(origin)) {
       return;
     }
 
@@ -794,11 +789,13 @@ export class FireProvider extends ObservableV2<any> {
   private _scheduleSave(delayMs?: number): void {
     if (this._isDestroyed) return;
 
-    let delay = delayMs ?? this.maxWaitTime;
-    if (delayMs === undefined && this._pendingSince !== null) {
-      const deadline = this._pendingSince + this.maxAggregationTime;
-      delay = Math.max(0, Math.min(delay, deadline - Date.now()));
-    }
+    const delay = computeSaveDelay({
+      explicitDelayMs: delayMs,
+      maxWaitTime: this.maxWaitTime,
+      maxAggregationTime: this.maxAggregationTime,
+      pendingSince: this._pendingSince,
+      now: Date.now(),
+    });
 
     if (this._debounceTimerId) {
       clearTimeout(this._debounceTimerId);

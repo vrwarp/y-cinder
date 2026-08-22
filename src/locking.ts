@@ -34,6 +34,14 @@ import {
     serverTimestamp,
 } from "@firebase/firestore";
 import { FIRESTORE_PATHS } from "./types";
+import {
+    estimateServerNow,
+    isLockBusy,
+    isLockExpired,
+    offsetFromProbe,
+    readLockCreatedAt,
+    readProbeServerTime,
+} from './locking-policy';
 
 /**
  * Measures the difference between client clock and server clock.
@@ -76,13 +84,8 @@ export async function measureClockSkew(
         const snap = await getDoc(ref);
         const data = snap.data();
 
-        if (data && data.t && typeof data.t.toMillis === 'function') {
-            const serverTime = data.t.toMillis();
-            // P1.6 FIX: Cleanup in finally ensures doc removed even on errors
-            return serverTime - Date.now();
-        }
-
-        return 0;
+        // P1.6 FIX: Cleanup in finally ensures doc removed even on errors
+        return offsetFromProbe(readProbeServerTime(data), Date.now());
     } catch (e) {
         // If we can't write/read, assume 0 skew (best effort)
         console.warn("Failed to measure clock skew:", e);
@@ -154,7 +157,7 @@ export async function acquireLock(config: LockConfig): Promise<boolean> {
     }
 
     // Estimated Server Time
-    const serverNow = Date.now() + serverOffset;
+    const serverNow = estimateServerNow(Date.now(), serverOffset);
     const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
 
     try {
@@ -167,13 +170,13 @@ export async function acquireLock(config: LockConfig): Promise<boolean> {
                 // Use estimated server time for check
                 // If createdAt is valid timestamp (millis), use it.
                 // Fallback: If createdAt is missing/invalid, treat as 0 (expired).
-                const createdAt = (data.createdAt && typeof data.createdAt.toMillis === 'function')
-                    ? data.createdAt.toMillis()
-                    : (typeof data.createdAt === 'number' ? data.createdAt : 0);
-
-                const lockAge = serverNow - createdAt;
-
-                if (lockAge < lockTTL && data.owner !== uid) {
+                if (isLockBusy({
+                    createdAt: data.createdAt,
+                    owner: data.owner,
+                    uid,
+                    serverNow,
+                    lockTTL,
+                })) {
                     return false; // Lock is busy
                 }
             }
@@ -250,9 +253,7 @@ export async function checkLockStatus(config: LockConfig): Promise<{
         }
 
         const data = lockSnap.data();
-        const createdAt = (data.createdAt && typeof data.createdAt.toMillis === 'function')
-            ? data.createdAt.toMillis()
-            : 0;
+        const createdAt = readLockCreatedAt(data.createdAt);
 
         // P1.1 FIX: Use cached clock offset for accurate age calculation
         let serverOffset = cachedClockOffset ?? 0;
@@ -264,13 +265,12 @@ export async function checkLockStatus(config: LockConfig): Promise<{
             }
         }
 
-        const serverNow = Date.now() + serverOffset;
-        const ageMs = serverNow - createdAt;
+        const ageMs = estimateServerNow(Date.now(), serverOffset) - createdAt;
 
         return {
             exists: true,
             owner: data.owner,
-            isExpired: ageMs >= lockTTL,
+            isExpired: isLockExpired(ageMs, lockTTL),
             ageMs,
         };
     } catch (e) {

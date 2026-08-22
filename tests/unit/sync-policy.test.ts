@@ -8,7 +8,13 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+    diffHasPayload,
+    diffNeedsStorage,
+    epochTag,
     hasMorePages,
+    largeUpdatePath,
+    orderByApplyPriority,
+    serverCoversLocalStructs,
     pickPaginationCursorIndex,
     planIncomingUpdate,
     shouldTriggerCompaction,
@@ -208,5 +214,120 @@ describe('hasMorePages', () => {
     it('stops after a short page', () => {
         expect(hasMorePages(99, 100)).toBe(false);
         expect(hasMorePages(0, 100)).toBe(false);
+    });
+});
+
+describe('serverCoversLocalStructs', () => {
+    it('covers when the server is level on every client', () => {
+        expect(serverCoversLocalStructs(new Map([[1, 5]]), new Map([[1, 5]]))).toBe(true);
+    });
+
+    it('covers when the server is ahead', () => {
+        expect(serverCoversLocalStructs(new Map([[1, 5]]), new Map([[1, 9]]))).toBe(true);
+    });
+
+    it('does not cover when the server is behind on any client', () => {
+        expect(serverCoversLocalStructs(new Map([[1, 5], [2, 3]]), new Map([[1, 9], [2, 1]]))).toBe(false);
+    });
+
+    it('does not cover a client the server has never seen', () => {
+        expect(serverCoversLocalStructs(new Map([[7, 1]]), new Map([[1, 9]]))).toBe(false);
+    });
+
+    it('covers trivially when the local document is empty', () => {
+        expect(serverCoversLocalStructs(new Map(), new Map())).toBe(true);
+    });
+
+    it('checks every client, not only the first', () => {
+        expect(serverCoversLocalStructs(new Map([[1, 1], [2, 1], [3, 99]]), new Map([[1, 1], [2, 1], [3, 1]])))
+            .toBe(false);
+    });
+});
+
+describe('diffHasPayload', () => {
+    /* A structs-empty, deletions-empty update is a two-byte header. */
+    it('rejects an empty two-byte diff', () => {
+        expect(diffHasPayload(2)).toBe(false);
+        expect(diffHasPayload(0)).toBe(false);
+    });
+
+    it('accepts anything larger', () => {
+        expect(diffHasPayload(3)).toBe(true);
+    });
+});
+
+describe('diffNeedsStorage', () => {
+    it('stays inline at or below the limit', () => {
+        expect(diffNeedsStorage(1_000, 1_000)).toBe(false);
+        expect(diffNeedsStorage(999, 1_000)).toBe(false);
+    });
+
+    it('needs storage one byte over', () => {
+        expect(diffNeedsStorage(1_001, 1_000)).toBe(true);
+    });
+});
+
+describe('epochTag', () => {
+    it('omits the field entirely at epoch 0', () => {
+        expect(epochTag(0)).toEqual({});
+        expect('epoch' in epochTag(0)).toBe(false);
+    });
+
+    it('writes the epoch once past 0', () => {
+        expect(epochTag(4)).toEqual({ epoch: 4 });
+    });
+});
+
+describe('orderByApplyPriority', () => {
+    /*
+     * Applying an update before the snapshot it depends on parks it in
+     * pendingStructs, which also disables GC on the document.
+     */
+    it('puts the snapshot first, then history, then updates', () => {
+        const items = [
+            { priority: 3, name: 'update' },
+            { priority: 1, name: 'snapshot' },
+            { priority: 2, name: 'history' },
+        ];
+
+        expect(orderByApplyPriority(items).map((i) => i.name))
+            .toEqual(['snapshot', 'history', 'update']);
+    });
+
+    it('does not mutate the input array', () => {
+        const items = [{ priority: 3 }, { priority: 1 }];
+        const ordered = orderByApplyPriority(items);
+
+        expect(items[0].priority).toBe(3);
+        expect(ordered).not.toBe(items);
+    });
+
+    it('keeps equal priorities together', () => {
+        const items = [
+            { priority: 2, name: 'a' },
+            { priority: 2, name: 'b' },
+            { priority: 1, name: 'snap' },
+        ];
+
+        expect(orderByApplyPriority(items).map((i) => i.name)).toEqual(['snap', 'a', 'b']);
+    });
+
+    it('handles an empty list', () => {
+        expect(orderByApplyPriority([])).toEqual([]);
+    });
+});
+
+describe('largeUpdatePath', () => {
+    it('namespaces by document, client and time', () => {
+        expect(largeUpdatePath('docs/a', 'client7', 1_700_000))
+            .toBe('docs/a/large_updates/client7_1700000.bin');
+    });
+
+    it('keeps concurrent pushes from different clients distinct', () => {
+        expect(largeUpdatePath('docs/a', 'c1', 5)).not.toBe(largeUpdatePath('docs/a', 'c2', 5));
+    });
+
+    it('keeps successive pushes from one client distinct', () => {
+        expect(largeUpdatePath('docs/a', 'c1', 5)).not.toBe(largeUpdatePath('docs/a', 'c1', 6));
     });
 });

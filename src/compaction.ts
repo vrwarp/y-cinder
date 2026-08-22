@@ -53,7 +53,11 @@ import {
 import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import { toBase64 } from "lib0/buffer";
 import {
+    buildDeltaSegmentDoc,
+    buildSnapshotResult,
+    deltaSegmentFitsInline,
     epochOf,
+    nextSnapshotVersion,
     planHistoryDoc,
     planUpdateDoc,
     readMainDocState,
@@ -451,7 +455,7 @@ async function tryDeltaCompaction(params: {
     // attempt.
     const merged = await mergeUpdatesWithMetaAsync(updatesToProcess.map(u => u.data), { gc: false });
 
-    if (merged.result.byteLength > DEFAULTS.INLINE_UPDATE_LIMIT) {
+    if (!deltaSegmentFitsInline(merged.result.byteLength, DEFAULTS.INLINE_UPDATE_LIMIT)) {
         return null;
     }
 
@@ -475,11 +479,9 @@ async function tryDeltaCompaction(params: {
 
         const segmentRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY));
         transaction.set(segmentRef, {
+            ...buildDeltaSegmentDoc({ stateVectorB64: segmentB64Sv, uid, epoch }),
             segment: Bytes.fromUint8Array(merged.result),
-            stateVector: segmentB64Sv,
             startTime: serverTimestamp(),
-            createdBy: uid,
-            ...(epoch > 0 ? { epoch } : {}),
         });
         survivors.forEach(snap => transaction.delete(snap.ref));
         staleRefs.forEach(ref => transaction.delete(ref));
@@ -641,7 +643,7 @@ function compactToSnapshot(params: {
         // the spurious-push slow path).
         deleteSet: deleteSetUpdate ? Bytes.fromUint8Array(deleteSetUpdate) : deleteField(),
         deleteSetStoragePath: deleteSetStoragePath ?? deleteField(),
-        version: currentVersion + 1,
+        version: nextSnapshotVersion(currentVersion),
         updatedAt: serverTimestamp(),
         // Lets the compacting client's own snapshot listener skip this write
         origin: uid,
@@ -650,13 +652,11 @@ function compactToSnapshot(params: {
     updatesToProcess.forEach(u => transaction.delete(u.ref));
     historyToMerge.forEach(h => transaction.delete(h.ref));
 
-    return {
-        success: true,
-        type: 'snapshot',
+    return buildSnapshotResult({
         updatesCompacted: updatesToProcess.length,
         historySegmentsMerged: historyToMerge.length,
-        previousVersion: currentVersion > 0 ? currentVersion : undefined,
-    };
+        currentVersion,
+    });
 }
 
 /**

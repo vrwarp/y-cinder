@@ -72,7 +72,13 @@ import {
     applyItem,
 } from "./sync-helpers";
 import {
+    diffHasPayload,
+    diffNeedsStorage,
+    epochTag as buildEpochTag,
     hasMorePages,
+    largeUpdatePath,
+    orderByApplyPriority,
+    serverCoversLocalStructs,
     pickPaginationCursorIndex,
     planIncomingUpdate,
     shouldTriggerCompaction,
@@ -430,7 +436,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
 
         // Sort by priority (Snapshot first, then History, then Updates)
-        pendingUpdates.sort((a, b) => a.priority - b.priority);
+        const orderedUpdates = orderByApplyPriority(pendingUpdates);
 
         // Apply everything inside a single Yjs transaction. Each top-level
         // applyItem call would otherwise commit its own transaction, firing
@@ -438,7 +444,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // long-lived document with hundreds of pending items that means
         // hundreds of editor re-renders during initial load instead of one.
         ydoc.transact(() => {
-            for (const item of pendingUpdates) {
+            for (const item of orderedUpdates) {
                 if (isDestroyed()) break;
 
                 if (!isItemRedundant(item, localSVMap)) {
@@ -473,13 +479,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         let localUpdatesPushed = false;
 
         const exactLocalSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
-        let serverCoversStructs = true;
-        for (const [client, clock] of exactLocalSV) {
-            if ((serverSVMap.get(client) || 0) < clock) {
-                serverCoversStructs = false;
-                break;
-            }
-        }
+        const serverCoversStructs = serverCoversLocalStructs(exactLocalSV, serverSVMap);
 
         let shouldPush: boolean;
         let localDiff: Uint8Array | null = null;
@@ -494,18 +494,18 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
             // The diff has structs by construction (a local clock exceeds
             // the server's), so it always carries new data.
-            shouldPush = localDiff.byteLength > 2 &&
+            shouldPush = diffHasPayload(localDiff.byteLength) &&
                 diffCarriesNewData(localDiff, () => collectServerBlobs(pendingUpdates));
         }
 
         if (shouldPush && localDiff !== null) {
             console.log("Pushing missing local updates to Firestore.");
             const clockEnds = extractClockEnds(localDiff);
-            const epochTag = serverEpoch > 0 ? { epoch: serverEpoch } : {};
+            const epochTag = buildEpochTag(serverEpoch);
 
-            if (localDiff.byteLength > DEFAULTS.INLINE_UPDATE_LIMIT) {
+            if (diffNeedsStorage(localDiff.byteLength, DEFAULTS.INLINE_UPDATE_LIMIT)) {
                 // Storage-backed update: upload binary to Cloud Storage
-                const storagePath = `${path}/large_updates/${uid}_${Date.now()}.bin`;
+                const storagePath = largeUpdatePath(path, uid, Date.now());
                 const storageRef = ref(ctx.storage, storagePath);
                 await uploadBytes(storageRef, localDiff);
 

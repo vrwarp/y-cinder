@@ -213,3 +213,107 @@ export function planHistoryDoc(data: Record<string, any> | null | undefined, cur
 
     return data?.segment ? { kind: 'merge' } : { kind: 'skip' };
 }
+
+/**
+ * Whether a merged delta segment is small enough to store inline on a
+ * Firestore document.
+ *
+ * Over the limit, delta mode is abandoned for this cycle and compaction
+ * folds instead — the segment would not fit, and splitting it would defeat
+ * the point of a delta.
+ *
+ * @param byteLength - Size of the merged segment.
+ * @param inlineLimit - The inline payload ceiling.
+ * @returns true when the segment fits inline.
+ */
+export function deltaSegmentFitsInline(byteLength: number, inlineLimit: number): boolean {
+    return byteLength <= inlineLimit;
+}
+
+/**
+ * Builds the history-segment document a delta compaction writes.
+ *
+ * `epoch` is omitted entirely at epoch 0 rather than written as 0, so
+ * documents from a never-squashed database stay byte-identical to what
+ * older clients produced.
+ *
+ * @param params - Segment bytes, its state vector, author and epoch.
+ * @returns The document fields, minus server-generated timestamps.
+ */
+export function buildDeltaSegmentDoc(params: {
+    stateVectorB64: string;
+    uid: string;
+    epoch: number;
+}): Record<string, unknown> {
+    const { stateVectorB64, uid, epoch } = params;
+
+    return {
+        stateVector: stateVectorB64,
+        createdBy: uid,
+        ...(epoch > 0 ? { epoch } : {}),
+    };
+}
+
+/**
+ * Which of the two delete-set fingerprint fields a snapshot write should
+ * carry.
+ *
+ * Exactly one survives: inline for the normal case, a Cloud Storage
+ * pointer once the fingerprint outgrows the inline cap. Dropping it
+ * entirely is not an option — every future reconnect would then take the
+ * spurious-push slow path — and keeping a stale one would hide newer
+ * deletions, so the other field is always explicitly cleared.
+ *
+ * @param params - Whichever fingerprint form was produced.
+ * @returns Which field to write and which to delete.
+ */
+export function chooseDeleteSetField(params: {
+    deleteSetUpdate: Uint8Array | null;
+    deleteSetStoragePath: string | null;
+}): { writeInline: boolean; writeStoragePath: boolean } {
+    return {
+        writeInline: params.deleteSetUpdate !== null,
+        writeStoragePath: params.deleteSetStoragePath !== null,
+    };
+}
+
+/**
+ * The result a compaction cycle reports.
+ *
+ * previousVersion is reported only when there actually was one, so a
+ * first-ever compaction is distinguishable from one that replaced version 0.
+ *
+ * @param params - What the cycle processed.
+ * @returns The result record.
+ */
+export function buildSnapshotResult(params: {
+    updatesCompacted: number;
+    historySegmentsMerged: number;
+    currentVersion: number;
+}): {
+    success: true;
+    type: 'snapshot';
+    updatesCompacted: number;
+    historySegmentsMerged: number;
+    previousVersion?: number;
+} {
+    const { updatesCompacted, historySegmentsMerged, currentVersion } = params;
+
+    return {
+        success: true,
+        type: 'snapshot',
+        updatesCompacted,
+        historySegmentsMerged,
+        previousVersion: currentVersion > 0 ? currentVersion : undefined,
+    };
+}
+
+/**
+ * The next snapshot version.
+ *
+ * @param currentVersion - The version read before the transaction.
+ * @returns The version to write.
+ */
+export function nextSnapshotVersion(currentVersion: number): number {
+    return currentVersion + 1;
+}

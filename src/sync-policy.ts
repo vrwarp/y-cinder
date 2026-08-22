@@ -169,3 +169,95 @@ export function pickPaginationCursorIndex(
 export function hasMorePages(pageSize: number, batchSize: number): boolean {
     return pageSize === batchSize;
 }
+
+/**
+ * Whether the server's state vector already covers every local struct.
+ *
+ * This is the aged-document fast path. `Y.encodeStateAsUpdate(doc, sv)`
+ * embeds the document's FULL delete-set, so its cost grows with total
+ * historical churn — paying it on every reconnect of every client makes
+ * startup linearly slower as the document ages. When the server is level
+ * on structs, the diff would be structs-empty anyway and pushability
+ * reduces to delete-set coverage, which is provable without encoding
+ * anything.
+ *
+ * @param localSV - The local document's exact state vector.
+ * @param serverSVMap - Clock ends the server is known to hold.
+ * @returns true when no local struct is missing server-side.
+ */
+export function serverCoversLocalStructs(
+    localSV: Map<number, number>,
+    serverSVMap: Map<number, number>,
+): boolean {
+    for (const [client, clock] of localSV) {
+        if ((serverSVMap.get(client) || 0) < clock) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Whether an encoded diff is large enough to be worth pushing.
+ *
+ * A structs-empty, deletions-empty update encodes to a two-byte header, so
+ * anything at or below that carries nothing.
+ *
+ * @param byteLength - Size of the encoded diff.
+ * @returns true when the diff has content.
+ */
+export function diffHasPayload(byteLength: number): boolean {
+    return byteLength > 2;
+}
+
+/**
+ * Whether a local diff must be offloaded to Cloud Storage rather than
+ * written inline on the update document.
+ *
+ * @param byteLength - Size of the encoded diff.
+ * @param inlineLimit - The inline payload ceiling.
+ * @returns true when the diff needs Storage.
+ */
+export function diffNeedsStorage(byteLength: number, inlineLimit: number): boolean {
+    return byteLength > inlineLimit;
+}
+
+/**
+ * The epoch tag to spread onto a written document.
+ *
+ * Omitted entirely at epoch 0 so a never-squashed database keeps producing
+ * documents identical to what older clients wrote.
+ *
+ * @param epoch - The current epoch.
+ * @returns An object to spread, empty at epoch 0.
+ */
+export function epochTag(epoch: number): { epoch?: number } {
+    return epoch > 0 ? { epoch } : {};
+}
+
+/**
+ * Orders fetched items so they apply in dependency order: the base
+ * snapshot first, then history segments, then individual updates.
+ *
+ * Applying an update before the snapshot it depends on leaves it parked in
+ * pendingStructs, which also disables GC on the document.
+ *
+ * @param items - Items with a priority field.
+ * @returns A new array in application order.
+ */
+export function orderByApplyPriority<T extends { priority: number }>(items: T[]): T[] {
+    return [...items].sort((a, b) => a.priority - b.priority);
+}
+
+/**
+ * The Cloud Storage path for an oversized local diff.
+ *
+ * @param basePath - The document's base path.
+ * @param uid - This client's id.
+ * @param timestamp - Millis, to keep concurrent pushes distinct.
+ * @returns The storage object path.
+ */
+export function largeUpdatePath(basePath: string, uid: string, timestamp: number): string {
+    return `${basePath}/large_updates/${uid}_${timestamp}.bin`;
+}

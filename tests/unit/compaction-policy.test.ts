@@ -10,7 +10,12 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+    buildDeltaSegmentDoc,
+    buildSnapshotResult,
+    chooseDeleteSetField,
+    deltaSegmentFitsInline,
     epochOf,
+    nextSnapshotVersion,
     isLockLostError,
     isRetryableCompactionError,
     planHistoryDoc,
@@ -265,5 +270,93 @@ describe('planHistoryDoc', () => {
     it('skips a current-epoch segment with no payload', () => {
         expect(planHistoryDoc({ epoch: 1 }, 1)).toEqual({ kind: 'skip' });
         expect(planHistoryDoc(null, 0)).toEqual({ kind: 'skip' });
+    });
+});
+
+describe('deltaSegmentFitsInline', () => {
+    it('fits below and at the limit', () => {
+        expect(deltaSegmentFitsInline(999, 1_000)).toBe(true);
+        expect(deltaSegmentFitsInline(1_000, 1_000)).toBe(true);
+    });
+
+    it('does not fit one byte over', () => {
+        expect(deltaSegmentFitsInline(1_001, 1_000)).toBe(false);
+    });
+
+    it('fits an empty segment', () => {
+        expect(deltaSegmentFitsInline(0, 1_000)).toBe(true);
+    });
+});
+
+describe('buildDeltaSegmentDoc', () => {
+    it('carries the state vector and author', () => {
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', uid: 'me', epoch: 0 }))
+            .toEqual({ stateVector: 'sv', createdBy: 'me' });
+    });
+
+    /*
+     * Omitted rather than written as 0, so a never-squashed database keeps
+     * producing documents identical to what older clients wrote.
+     */
+    it('omits the epoch field entirely at epoch 0', () => {
+        expect('epoch' in buildDeltaSegmentDoc({ stateVectorB64: 'sv', uid: 'me', epoch: 0 })).toBe(false);
+    });
+
+    it('writes the epoch once past 0', () => {
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', uid: 'me', epoch: 3 }))
+            .toEqual({ stateVector: 'sv', createdBy: 'me', epoch: 3 });
+    });
+});
+
+describe('chooseDeleteSetField', () => {
+    it('writes inline when a fingerprint was produced', () => {
+        expect(chooseDeleteSetField({ deleteSetUpdate: new Uint8Array([1]), deleteSetStoragePath: null }))
+            .toEqual({ writeInline: true, writeStoragePath: false });
+    });
+
+    it('writes a storage pointer when the fingerprint was offloaded', () => {
+        expect(chooseDeleteSetField({ deleteSetUpdate: null, deleteSetStoragePath: 'gs://ds' }))
+            .toEqual({ writeInline: false, writeStoragePath: true });
+    });
+
+    it('writes neither when there is no fingerprint at all', () => {
+        expect(chooseDeleteSetField({ deleteSetUpdate: null, deleteSetStoragePath: null }))
+            .toEqual({ writeInline: false, writeStoragePath: false });
+    });
+
+    it('treats an empty fingerprint as present, not absent', () => {
+        expect(chooseDeleteSetField({ deleteSetUpdate: new Uint8Array(0), deleteSetStoragePath: null }).writeInline)
+            .toBe(true);
+    });
+});
+
+describe('buildSnapshotResult', () => {
+    it('reports what the cycle processed', () => {
+        expect(buildSnapshotResult({ updatesCompacted: 5, historySegmentsMerged: 2, currentVersion: 7 }))
+            .toEqual({
+                success: true,
+                type: 'snapshot',
+                updatesCompacted: 5,
+                historySegmentsMerged: 2,
+                previousVersion: 7,
+            });
+    });
+
+    /* A first-ever compaction must be distinguishable from replacing v0. */
+    it('omits previousVersion when there was no previous snapshot', () => {
+        expect(buildSnapshotResult({ updatesCompacted: 1, historySegmentsMerged: 0, currentVersion: 0 }).previousVersion)
+            .toBeUndefined();
+    });
+
+    it('reports version 1 as a real previous version', () => {
+        expect(buildSnapshotResult({ updatesCompacted: 1, historySegmentsMerged: 0, currentVersion: 1 }).previousVersion)
+            .toBe(1);
+    });
+});
+
+describe('nextSnapshotVersion', () => {
+    it('increments by one', () => {
+        expect(nextSnapshotVersion(0)).toBe(1);
+        expect(nextSnapshotVersion(41)).toBe(42);
     });
 });

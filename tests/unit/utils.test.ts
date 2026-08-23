@@ -12,7 +12,7 @@
  * @file utils.test.ts
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     debounce,
     wait,
@@ -198,5 +198,119 @@ describe('utils', () => {
             expect(min).toBeGreaterThanOrEqual(200);
             expect(max).toBeLessThan(400);
         });
+    });
+});
+
+/*
+ * The crypto fallbacks in generateSessionId never run in Node 22, where
+ * crypto.randomUUID exists — but they are exactly what an older browser or
+ * a locked-down runtime would take, and a broken fallback there means
+ * colliding session ids, which is a correctness problem across clients
+ * rather than a cosmetic one.
+ */
+describe('generateSessionId environment fallbacks', () => {
+    const g = globalThis as any;
+    let originalCrypto: unknown;
+
+    beforeEach(() => {
+        originalCrypto = Object.getOwnPropertyDescriptor(g, 'crypto');
+    });
+
+    afterEach(() => {
+        if (originalCrypto) {
+            Object.defineProperty(g, 'crypto', originalCrypto as PropertyDescriptor);
+        } else {
+            delete g.crypto;
+        }
+    });
+
+    const setCrypto = (value: unknown) => {
+        Object.defineProperty(g, 'crypto', { value, configurable: true, writable: true });
+    };
+
+    it('prefers randomUUID when available', () => {
+        setCrypto({ randomUUID: () => 'uuid-from-crypto' });
+
+        expect(generateSessionId()).toBe('uuid-from-crypto');
+    });
+
+    it('falls back to getRandomValues and returns hex plus a timestamp suffix', () => {
+        setCrypto({
+            getRandomValues: (array: Uint8Array) => {
+                array.fill(0xab);
+                return array;
+            },
+        });
+
+        const id = generateSessionId();
+
+        // 16 bytes -> 32 hex chars, then a base36 timestamp.
+        expect(id.startsWith('ab'.repeat(16))).toBe(true);
+        expect(id.length).toBeGreaterThan(32);
+        expect(id.slice(0, 32)).toMatch(/^[0-9a-f]{32}$/);
+        // Suffix is a base36 timestamp, not hex.
+        expect(id.slice(32)).toMatch(/^[0-9a-z]+$/);
+    });
+
+    it('zero-pads single-digit bytes in the getRandomValues fallback', () => {
+        setCrypto({
+            getRandomValues: (array: Uint8Array) => {
+                array.fill(0x05);
+                return array;
+            },
+        });
+
+        // Without padding this would be "5" repeated and the id would be short.
+        expect(generateSessionId().startsWith('05'.repeat(16))).toBe(true);
+    });
+
+    it('falls back to Math.random when there is no crypto at all', () => {
+        delete g.crypto;
+
+        const first = generateSessionId();
+        const second = generateSessionId();
+
+        expect(first.length).toBeGreaterThan(0);
+        expect(first).not.toBe(second);
+    });
+
+    it('falls back to Math.random when crypto exists but offers neither API', () => {
+        setCrypto({});
+
+        expect(generateSessionId().length).toBeGreaterThan(0);
+    });
+});
+
+describe('calculateBackoff', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('doubles the base delay with each attempt', () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+
+        expect(calculateBackoff(1, 100, 100)).toBe(200);
+        expect(calculateBackoff(2, 100, 100)).toBe(400);
+        expect(calculateBackoff(3, 100, 100)).toBe(800);
+    });
+
+    it('adds jitter scaled by the jitter ceiling', () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+        expect(calculateBackoff(1, 100, 100)).toBe(250);
+        expect(calculateBackoff(1, 100, 0)).toBe(200);
+    });
+
+    it('honours a custom base', () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+
+        expect(calculateBackoff(1, 50, 0)).toBe(100);
+        expect(calculateBackoff(4, 10, 0)).toBe(160);
+    });
+
+    it('uses the documented defaults', () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+
+        expect(calculateBackoff(1)).toBe(200);
     });
 });

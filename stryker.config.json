@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation testing over the emulator-free unit suite (see vitest.mutation.config.ts). Two numbers, far apart on purpose: 87.5% over COVERED code, 41.0% TOTAL. The gap is ~1,380 mutants in Firestore call sequences in sync.ts, provider.ts and compaction.ts \u2014 every DECISION in those files has been lifted into the *-policy modules, so what is left is SDK invocation, covered by the 521-test emulator integration suite instead. break=40 ratchets the total; raise it, never lower it.",
+  "packageManager": "npm",
+  "testRunner": "vitest",
+  "vitest": {
+    "configFile": "vitest.mutation.config.ts"
+  },
+  "reporters": [
+    "html",
+    "clear-text",
+    "progress"
+  ],
+  "htmlReporter": {
+    "fileName": "reports/mutation/index.html"
+  },
+  "coverageAnalysis": "perTest",
+  "concurrency": 3,
+  "timeoutMS": 30000,
+  "mutate": [
+    "src/**/*.ts",
+    "!src/generated/**",
+    "!src/types.ts",
+    "!src/index.ts"
+  ],
+  "thresholds": {
+    "high": 90,
+    "low": 70,
+    "break": 40
+  },
+  "tempDirName": ".stryker-tmp",
+  "cleanTempDir": true
+}

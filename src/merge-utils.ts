@@ -154,10 +154,16 @@ export async function mergeUpdatesAsync(updates: Uint8Array[], options?: MergeOp
     if (updates.length === 0) {
         return new Uint8Array(0);
     }
-    // NOTE: We intentionally do NOT short-circuit for length === 1.
-    // Passing a single update through Y.mergeUpdates validates its
-    // internal structure. Without this, a corrupted or zero-byte
-    // payload bypasses Yjs validation and can overwrite canonical state.
+    // NOTE: We intentionally do NOT short-circuit for length === 1, so the
+    // single-update case still takes the same code path as any other.
+    //
+    // Be aware of what that does and does not buy: Y.mergeUpdates itself
+    // short-circuits on a one-element array and returns the blob unparsed,
+    // so a corrupt single update is NOT rejected here (two or more updates
+    // are parsed, and a corrupt one throws). Callers that must not commit an
+    // invalid blob use mergeUpdatesWithMetaAsync, which derives the state
+    // vector from the result and therefore does parse it — that is the path
+    // compaction takes before writing a snapshot.
 
     // Try to use worker
     if (initWorker() && mergeWorker) {

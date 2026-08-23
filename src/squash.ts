@@ -58,6 +58,15 @@ import { toBase64, fromBase64 } from "lib0/buffer";
 import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";
+import {
+    isNotQuiescent,
+    isSquashPreempted,
+    localCoversPendingDoc,
+    readVersionEpoch,
+    squashSnapshotPath,
+    stateVectorCovers,
+    stillHoldsLock,
+} from './squash-policy';
 
 /** Name of the shared map that carries provider metadata inside the doc. */
 export const PROVIDER_META_KEY = "__ycinder";
@@ -234,53 +243,29 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         ));
         if (isDestroyed()) return { success: false, error: new Error('destroyed') };
 
-        if (
-            updatesSnap.docs.length > DEFAULTS.MAX_COMPACTION_UPDATES ||
-            historySnap.docs.length > DEFAULTS.MAX_COMPACTION_HISTORY
-        ) {
+        if (isNotQuiescent({
+            updateCount: updatesSnap.docs.length,
+            historyCount: historySnap.docs.length,
+            maxUpdates: DEFAULTS.MAX_COMPACTION_UPDATES,
+            maxHistory: DEFAULTS.MAX_COMPACTION_HISTORY,
+        })) {
             return { success: false, skippedReason: 'not-quiescent' };
         }
 
         const mainRef = doc(db, path);
         const mainSnap = await getDoc(mainRef);
         const mainData = mainSnap.exists() ? mainSnap.data() : undefined;
-        const currentVersion = typeof mainData?.version === 'number' ? mainData.version : 0;
-        const currentEpoch = typeof mainData?.epoch === 'number' ? mainData.epoch : 0;
+        const { version: currentVersion, epoch: currentEpoch } = readVersionEpoch(mainData);
 
         // The squasher must hold everything the server holds — otherwise
         // the squashed doc would silently drop other clients' data.
         const localSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
-        const coveredBy = (svB64: string | undefined): boolean => {
-            if (!svB64) return true;
-            try {
-                const remote = Y.decodeStateVector(fromBase64(svB64));
-                for (const [client, clock] of remote) {
-                    if ((localSV.get(client) || 0) < clock) return false;
-                }
-                return true;
-            } catch {
-                return false;
-            }
-        };
-        if (!coveredBy(mainData?.stateVector)) {
+
+        if (!stateVectorCovers(localSV, mainData?.stateVector)) {
             return { success: false, skippedReason: 'local-behind' };
         }
         for (const snap of [...updatesSnap.docs, ...historySnap.docs]) {
-            const data = snap.data();
-            const ids: number[] = data.clientIDs || [];
-            const clocks: number[] = data.clientClocks || [];
-            if (ids.length === clocks.length && ids.length > 0) {
-                for (let i = 0; i < ids.length; i++) {
-                    if ((localSV.get(ids[i]) || 0) < clocks[i]) {
-                        return { success: false, skippedReason: 'local-behind' };
-                    }
-                }
-            } else if (data.stateVector) {
-                if (!coveredBy(data.stateVector)) {
-                    return { success: false, skippedReason: 'local-behind' };
-                }
-            } else if (data.update || data.segment || data.updateStoragePath) {
-                // No metadata to verify against — be conservative
+            if (!localCoversPendingDoc(localSV, snap.data())) {
                 return { success: false, skippedReason: 'local-behind' };
             }
         }
@@ -301,21 +286,19 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         }
 
         const nextVersion = currentVersion + 1;
-        const storagePath = `${path}/snapshot_e${newEpoch}_v${nextVersion}.bin`;
+        const storagePath = squashSnapshotPath(path, newEpoch, nextVersion);
         await uploadBytes(ref(storage, storagePath), candidate);
 
         const result = await runTransaction(db, async (transaction) => {
             const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
             const lockSnap = await transaction.get(lockRef);
-            if (!lockSnap.exists() || lockSnap.data().owner !== uid) {
+            if (!stillHoldsLock(lockSnap.exists() ? lockSnap.data() : undefined, uid)) {
                 throw new Error("Lock lost or expired during squash - aborting.");
             }
 
             const mainCheck = await transaction.get(mainRef);
             const checkData = mainCheck.exists() ? mainCheck.data() : undefined;
-            const versionNow = typeof checkData?.version === 'number' ? checkData.version : 0;
-            const epochNow = typeof checkData?.epoch === 'number' ? checkData.epoch : 0;
-            if (versionNow !== currentVersion || epochNow !== currentEpoch) {
+            if (isSquashPreempted(readVersionEpoch(checkData), { version: currentVersion, epoch: currentEpoch })) {
                 throw new Error("Document changed during squash upload. Aborting.");
             }
 

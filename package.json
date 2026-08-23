@@ -16,7 +16,8 @@
     "emulators:stop": "lsof -t -i:5001 -i:5002 -i:8080 -i:9000 -i:9099 -i:9199 -i:9090 | xargs kill -9",
     "debugger": "cd debugger && npm run dev",
     "test:ui": "cd debugger && npx playwright test",
-    "prepare": "node scripts/bundle-worker.js && tsc"
+    "prepare": "node scripts/bundle-worker.js && tsc",
+    "test:mutation": "stryker run"
   },
   "repository": {
     "type": "git",
@@ -38,6 +39,8 @@
   },
   "homepage": "https://github.com/vrwarp/y-cinder#readme",
   "devDependencies": {
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
     "firebase-tools": "^15.4.0",
     "jsdom": "^29.0.1",
     "typescript": "^5.3.3",

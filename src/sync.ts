@@ -60,6 +60,30 @@ import {
 } from "./types";
 import { writeStateVector } from "./utils";
 import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, diffCarriesNewData, deleteSetCoveredByBlobs } from "./update-metadata";
+import {
+    PendingUpdate,
+    collectServerBlobs,
+    ensureDecodedSV,
+    localCoversSnapshot,
+    processUpdateMetadata,
+    processHistoryMetadata,
+    processSnapshotMetadata,
+    isItemRedundant,
+    applyItem,
+} from "./sync-helpers";
+import {
+    diffHasPayload,
+    diffNeedsStorage,
+    epochTag as buildEpochTag,
+    hasMorePages,
+    largeUpdatePath,
+    orderByApplyPriority,
+    serverCoversLocalStructs,
+    pickPaginationCursorIndex,
+    planIncomingUpdate,
+    shouldTriggerCompaction,
+    survivesEpochFence,
+} from "./sync-policy";
 import { readDocEpoch, docHasContent } from "./squash";
 
 /**
@@ -149,11 +173,6 @@ export interface SyncResult {
 /**
  * Pending update item during sync.
  */
-interface PendingUpdate {
-    type: 'snapshot' | 'history' | 'update';
-    data: any;
-    priority: number;
-}
 
 /**
  * Performs the initial sync operation.
@@ -246,18 +265,13 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 }
 
                 // FIX: Verify cursor is committed to avoid "Invalid query" with pending serverTimestamp
-                let candidateDoc: QueryDocumentSnapshot | null = updatesSnap.docs[updatesSnap.docs.length - 1];
-                while (candidateDoc && candidateDoc.metadata.hasPendingWrites) {
-                    const idx = updatesSnap.docs.indexOf(candidateDoc);
-                    candidateDoc = idx > 0 ? updatesSnap.docs[idx - 1] : null;
+                const cursorIndex = pickPaginationCursorIndex(updatesSnap.docs);
+
+                if (cursorIndex >= 0) {
+                    lastUpdateDoc = updatesSnap.docs[cursorIndex];
                 }
 
-                // Only update lastUpdateDoc if we found a later committed doc, or if we haven't set one yet
-                if (candidateDoc) {
-                    lastUpdateDoc = candidateDoc;
-                }
-
-                hasMoreUpdates = updatesSnap.docs.length === BATCH_SIZE;
+                hasMoreUpdates = hasMorePages(updatesSnap.docs.length, BATCH_SIZE);
             }
         }
 
@@ -406,9 +420,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // suppress the initial-sync push.
         for (let i = pendingUpdates.length - 1; i >= 0; i--) {
             const item = pendingUpdates[i];
-            if (item.type === 'snapshot') continue; // main doc = current epoch
-            const itemEpoch = typeof item.data.epoch === 'number' ? item.data.epoch : 0;
-            if (itemEpoch !== serverEpoch) {
+            if (!survivesEpochFence(item, serverEpoch)) {
                 pendingUpdates.splice(i, 1);
             }
         }
@@ -424,7 +436,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
 
         // Sort by priority (Snapshot first, then History, then Updates)
-        pendingUpdates.sort((a, b) => a.priority - b.priority);
+        const orderedUpdates = orderByApplyPriority(pendingUpdates);
 
         // Apply everything inside a single Yjs transaction. Each top-level
         // applyItem call would otherwise commit its own transaction, firing
@@ -432,7 +444,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // long-lived document with hundreds of pending items that means
         // hundreds of editor re-renders during initial load instead of one.
         ydoc.transact(() => {
-            for (const item of pendingUpdates) {
+            for (const item of orderedUpdates) {
                 if (isDestroyed()) break;
 
                 if (!isItemRedundant(item, localSVMap)) {
@@ -467,13 +479,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         let localUpdatesPushed = false;
 
         const exactLocalSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
-        let serverCoversStructs = true;
-        for (const [client, clock] of exactLocalSV) {
-            if ((serverSVMap.get(client) || 0) < clock) {
-                serverCoversStructs = false;
-                break;
-            }
-        }
+        const serverCoversStructs = serverCoversLocalStructs(exactLocalSV, serverSVMap);
 
         let shouldPush: boolean;
         let localDiff: Uint8Array | null = null;
@@ -488,18 +494,18 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
             // The diff has structs by construction (a local clock exceeds
             // the server's), so it always carries new data.
-            shouldPush = localDiff.byteLength > 2 &&
+            shouldPush = diffHasPayload(localDiff.byteLength) &&
                 diffCarriesNewData(localDiff, () => collectServerBlobs(pendingUpdates));
         }
 
         if (shouldPush && localDiff !== null) {
             console.log("Pushing missing local updates to Firestore.");
             const clockEnds = extractClockEnds(localDiff);
-            const epochTag = serverEpoch > 0 ? { epoch: serverEpoch } : {};
+            const epochTag = buildEpochTag(serverEpoch);
 
-            if (localDiff.byteLength > DEFAULTS.INLINE_UPDATE_LIMIT) {
+            if (diffNeedsStorage(localDiff.byteLength, DEFAULTS.INLINE_UPDATE_LIMIT)) {
                 // Storage-backed update: upload binary to Cloud Storage
-                const storagePath = `${path}/large_updates/${uid}_${Date.now()}.bin`;
+                const storagePath = largeUpdatePath(path, uid, Date.now());
                 const storageRef = ref(ctx.storage, storagePath);
                 await uploadBytes(storageRef, localDiff);
 
@@ -595,10 +601,17 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
     let lastCompactionTrigger = 0;
 
     return onSnapshot(liveUpdatesQ, (snapshot) => {
-        if (onCompactionNeeded && snapshot.size > maxUpdatesThreshold) {
+        if (onCompactionNeeded) {
             const now = Date.now();
-            const atHardCap = snapshot.size >= DEFAULTS.REALTIME_LIMIT;
-            if (atHardCap || now - lastCompactionTrigger >= DEFAULTS.COMPACTION_TRIGGER_COOLDOWN_MS) {
+
+            if (shouldTriggerCompaction({
+                size: snapshot.size,
+                maxUpdatesThreshold,
+                now,
+                lastTriggerAt: lastCompactionTrigger,
+                cooldownMs: DEFAULTS.COMPACTION_TRIGGER_COOLDOWN_MS,
+                hardCap: DEFAULTS.REALTIME_LIMIT,
+            })) {
                 lastCompactionTrigger = now;
                 onCompactionNeeded();
             }
@@ -614,38 +627,26 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
+                const docId = change.doc.id;
+                const plan = planIncomingUpdate(data, {
+                    uid,
+                    currentEpoch: ctx.getEpoch?.() ?? 0,
+                    docId,
+                    corruptedDocIds: ctx.corruptedDocIds,
+                    localSVMap,
+                });
 
-                // Epoch fence: an update written before a squash belongs to
-                // an unrelated id space — applying it would park garbage in
-                // pendingStructs forever. Compaction deletes such documents.
-                const docEpoch = typeof data.epoch === 'number' ? data.epoch : 0;
-                if (docEpoch !== (ctx.getEpoch?.() ?? 0)) {
-                    return;
-                }
-
-                // Skip our own updates
-                if (data.createdBy === uid) {
-                    // Update our cache even for our own updates so subsequent checks are accurate
+                if (plan.kind === 'skip-own') {
+                    // Fold our own metadata in anyway so later checks stay accurate.
                     processUpdateMetadata(data, localSVMap);
                     return;
                 }
-
-                // Check if we already have this update
-                if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
-                    if (isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks)) {
-                        return; // Skip - we have all the data
-                    }
-                }
-
-                const docId = change.doc.id;
-
-                // Skip quarantined poison pills
-                if (ctx.corruptedDocIds?.has(docId)) {
+                if (plan.kind !== 'download' && plan.kind !== 'apply-inline') {
                     return;
                 }
 
                 // Handle storage-backed update (oversized diff offloaded to Cloud Storage)
-                if (data.updateStoragePath && !data.update) {
+                if (plan.kind === 'download') {
                     (async () => {
                         try {
                             const storageRef = ref(ctx.storage, data.updateStoragePath);
@@ -951,217 +952,3 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
 
 // --- Helper Functions ---
 
-/**
- * Extracts the raw binary blobs from all fetched server items.
- * Used for delete-set coverage checks before pushing a local diff.
- *
- * Items without an inline blob (e.g., a legacy main document carrying only
- * a stateVector) are skipped — missing coverage can only cause a redundant
- * (idempotent) push, never data loss.
- *
- * @param items - Pending updates collected during initial sync
- * @returns Array of update/segment/content blobs
- */
-function collectServerBlobs(items: PendingUpdate[]): Uint8Array[] {
-    const blobs: Uint8Array[] = [];
-    for (const item of items) {
-        const raw = item.type === 'snapshot' ? item.data.content
-            : item.type === 'history' ? item.data.segment
-                : item.data.update;
-        if (raw) {
-            blobs.push((raw as Bytes).toUint8Array());
-        }
-    }
-    return blobs;
-}
-
-/**
- * Ensures that the document data has a decoded state vector map cached.
- * P3.1 OPTIMIZATION: Cache decoded state vector to avoid repeated parsing.
- *
- * @param data - Firestore document data containing stateVector
- * @returns The decoded state vector map
- */
-function ensureDecodedSV(data: any): Map<number, number> {
-    if (!data._decodedSV) {
-        const vector = fromBase64(data.stateVector);
-        data._decodedSV = Y.decodeStateVector(vector);
-    }
-    return data._decodedSV;
-}
-
-/**
- * Checks whether the local document already covers a snapshot's state
- * vector, i.e. downloading/applying the snapshot blob would be a no-op.
- *
- * Returns false when the stateVector is missing or malformed, so callers
- * fall back to fetching and applying the content (the safe direction).
- *
- * @param data - Main document data containing a stateVector field
- * @param ydoc - Local Yjs document
- */
-function localCoversSnapshot(data: any, ydoc: Y.Doc): boolean {
-    if (!data.stateVector) return false;
-    try {
-        const remoteSV = ensureDecodedSV(data);
-        const localSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
-        for (const [client, clock] of remoteSV) {
-            if ((localSV.get(client) || 0) < clock) {
-                return false;
-            }
-        }
-        return true;
-    } catch (e) {
-        console.warn("Failed to decode snapshot stateVector", e);
-        return false;
-    }
-}
-
-/**
- * Extracts and aggregates clock values from an update document into the server state vector.
- * Tries stored metadata first, falls back to parsing the update blob.
- * 
- * @param data - Firestore document data containing update and/or metadata
- * @param serverSVMap - Map to populate with client -> clock mappings
- */
-function processUpdateMetadata(data: any, serverSVMap: Map<number, number>): void {
-    if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
-        data.clientIDs.forEach((cid: number, i: number) => {
-            const clock = data.clientClocks[i];
-            const current = serverSVMap.get(cid) || 0;
-            if (clock > current) {
-                serverSVMap.set(cid, clock);
-            }
-        });
-    } else if (data.update) {
-        // Lazy clock extraction — avoids materializing the struct tree of
-        // potentially large update blobs (extractClockEnds handles parse
-        // errors internally by returning an empty map).
-        const clockEnds = extractClockEnds((data.update as Bytes).toUint8Array());
-        for (const [clientID, clock] of clockEnds) {
-            const current = serverSVMap.get(clientID) || 0;
-            if (clock > current) {
-                serverSVMap.set(clientID, clock);
-            }
-        }
-    }
-}
-
-/**
- * Extracts clock values from a history segment into the server state vector.
- * Uses stateVector field if present, otherwise parses the segment blob.
- * 
- * @param data - Firestore document data containing history segment
- * @param serverSVMap - Map to populate with client -> clock mappings
- */
-function processHistoryMetadata(data: any, serverSVMap: Map<number, number>): void {
-    if (data.stateVector) {
-        const map = ensureDecodedSV(data);
-        for (const [client, clock] of map.entries()) {
-            const current = serverSVMap.get(client) || 0;
-            if (clock > current) {
-                serverSVMap.set(client, clock);
-            }
-        }
-    } else if (data.segment) {
-        // Lazy clock extraction for history segments, which are large by
-        // construction (merged batches of updates).
-        const clockEnds = extractClockEnds((data.segment as Bytes).toUint8Array());
-        for (const [clientID, clock] of clockEnds) {
-            const current = serverSVMap.get(clientID) || 0;
-            if (clock > current) {
-                serverSVMap.set(clientID, clock);
-            }
-        }
-    }
-}
-
-/**
- * Extracts clock values from the base snapshot into the server state vector.
- * Only uses the stateVector field (snapshots always have this).
- * 
- * @param data - Firestore document data from the main document
- * @param serverSVMap - Map to populate with client -> clock mappings
- */
-function processSnapshotMetadata(data: any, serverSVMap: Map<number, number>): void {
-    if (data.stateVector) {
-        const map = ensureDecodedSV(data);
-        for (const [client, clock] of map.entries()) {
-            const current = serverSVMap.get(client) || 0;
-            if (clock > current) {
-                serverSVMap.set(client, clock);
-            }
-        }
-    }
-}
-
-/**
- * Determines if a pending update is already contained in the local document.
- * Uses clock comparison to avoid re-applying known data.
- * 
- * P1.3 FIX: Now handles history segments with stateVector field.
- * 
- * @param item - The pending update to check
- * @param localSVMap - Local document's state vector
- * @returns true if local document already has all data from this item
- */
-function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, number>): boolean {
-    if (item.type === 'snapshot' && item.data.stateVector) {
-        const map = ensureDecodedSV(item.data);
-        for (const [client, clock] of map) {
-            const localClock = localSVMap.get(client) || 0;
-            if (clock > localClock) return false;
-        }
-        return true;
-    }
-
-    // P1.3 FIX: Handle history segments with stateVector
-    if (item.type === 'history' && item.data.stateVector) {
-        try {
-            const map = ensureDecodedSV(item.data);
-            for (const [client, clock] of map) {
-                const localClock = localSVMap.get(client) || 0;
-                if (clock > localClock) return false;
-            }
-            return true;
-        } catch (e) {
-            // If stateVector parsing fails, treat as not redundant
-            return false;
-        }
-    }
-
-    if (item.type === 'update') {
-        const data = item.data;
-        if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
-            return isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks);
-        }
-    }
-
-    return false;
-}
-
-/**
- * Applies a pending update to the Yjs document.
- * Handles different update types (snapshot, history, update) appropriately.
- * 
- * @param item - The pending update to apply
- * @param ydoc - Target Yjs document
- * @returns true if update was successfully applied
- */
-function applyItem(item: PendingUpdate, ydoc: Y.Doc): boolean {
-    try {
-        if (item.type === 'snapshot' && item.data.content) {
-            Y.applyUpdate(ydoc, (item.data.content as Bytes).toUint8Array(), FIREBASE_ORIGINS.SNAPSHOT);
-            return true;
-        } else if (item.type === 'history' && item.data.segment) {
-            Y.applyUpdate(ydoc, (item.data.segment as Bytes).toUint8Array(), FIREBASE_ORIGINS.HISTORY);
-            return true;
-        } else if (item.type === 'update' && item.data.update) {
-            Y.applyUpdate(ydoc, (item.data.update as Bytes).toUint8Array(), FIREBASE_ORIGINS.UPDATE);
-            return true;
-        }
-    } catch (e) {
-        console.error(`Failed to apply ${item.type}`, e);
-    }
-    return false;
-}

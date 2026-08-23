@@ -1,0 +1,36 @@
+name: Mutation testing
+
+# Mutation testing runs the test suite once per mutant, so it is far too slow
+# for every push. It runs weekly and on demand instead; `npm run test:mutation`
+# is the local equivalent.
+#
+# Scope: the emulator-free unit suite only (see vitest.mutation.config.ts).
+# Source reachable only through the Firestore emulator reports as "no
+# coverage" rather than "survived".
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+jobs:
+  stryker:
+    name: Stryker
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci
+
+      - run: npm run test:mutation
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: mutation-report
+          path: reports/mutation

@@ -251,6 +251,16 @@ export class FireProvider extends ObservableV2<any> {
     this.doc.on('update', this.handleUpdate);
     this.doc.on('subdocs', this.handleSubdocs);
 
+    // 'subdocs' fires only when a subdoc is integrated, so subdocs already
+    // in the document (local-first content, or a provider recreated on the
+    // same doc) would never get a provider. Treat them as just added; lazy
+    // mode still skips those with shouldLoad === false.
+    this.handleSubdocs({
+      added: new Set(this.doc.getSubdocs()),
+      removed: new Set(),
+      loaded: new Set(),
+    });
+
     // CRITICAL FIX: Register beforeunload handler to prevent data loss on tab close
     // This attempts a best-effort save when the user closes/refreshes the tab
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {

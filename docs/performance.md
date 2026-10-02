@@ -434,6 +434,29 @@ struct: local deletions come straight from
 (and growing) → **0.04 ms (flat)**. The O(document) encode only runs when
 there is actually something to push.
 
+That 0.04 ms was measured right after a compaction, with no pending update
+documents. Between compactions the guard also sees every update document
+written since (up to `maxUpdatesThreshold` − 1). Each is far smaller than
+the fingerprint, so all of them sorted first, and each one paid a full
+clone + merge + compare of the delete-set that could not succeed yet:
+O(pending × delete-set) on every start
+(`benchmarks/push-guard-coverage.bench.ts`). Coverage is monotone in the
+union of the server sets, so the guard now checks only when the next blob
+would more than double the bytes decoded at the last check (always before
+the snapshot) and once at the end. Each check is an allocation-free
+binary-search subset test against the merged server set. With 49 pending
+docs:
+
+| sessions (DS ranges) | before | after | local DS passes |
+| --- | ---: | ---: | ---: |
+| 60 (3.1k) | 16.1 ms | 2.7 ms | 57 → 1.4 |
+| 120 (6.2k) | 20.8 ms | 0.85 ms | 51 → 1 |
+| 240 (12.4k) | 42.3 ms | 1.7 ms | 53 → 1 |
+
+The cost no longer depends on the pending count (240 sessions, 0 → 49
+pending: 5.9 → 45.1 ms before, 1.4 → 1.9 ms after). What remains at 60
+sessions is `Y.decodeUpdate` of six history segments.
+
 The server state vector the guard compares against is, per client, the
 clock up to which the server holds *every* struct: the snapshot's state
 vector extended by the `[from, to)` ranges of the update and history

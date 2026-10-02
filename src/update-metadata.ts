@@ -308,11 +308,20 @@ export function diffCarriesNewData(diff: Uint8Array, getServerBlobs: () => Uint8
  * Proves (or fails to prove) that the union of the server blobs' delete-sets
  * covers `localDs`.
  *
- * Blobs are checked smallest-first with an early exit once coverage is
+ * Blobs are decoded smallest-first with an early exit once coverage is
  * proven. On a long-lived document, the snapshot's delete-set fingerprint
  * (small by construction) almost always proves coverage on its own, so a
  * reconnecting client never decodes the multi-megabyte snapshot or history
  * blobs just to conclude "nothing to push".
+ *
+ * Coverage is monotone in the union of the server sets, so it is only
+ * checked when the next blob would more than double the bytes decoded at
+ * the previous check, and once at the end. That always checks before a
+ * blob larger than everything decoded so far (the early exit still skips
+ * the snapshot), decodes less than twice what checking after every blob
+ * would, and bounds the O(|DS|) checks to a logarithmic number: the dozens
+ * of tiny pending update documents that sort ahead of the fingerprint no
+ * longer cost one full check each.
  *
  * Used by the reconnect push guard both via {@link diffCarriesNewData}
  * (when a diff was already encoded) and directly with a delete-set obtained
@@ -328,11 +337,23 @@ export function deleteSetCoveredByBlobs(
     getServerBlobs: () => Uint8Array[]
 ): boolean {
     let serverDs = Y.mergeDeleteSets([]);
-    // Merge copies, not the sets themselves: Y.mergeDeleteSets reuses the
-    // input DeleteItems and widens them in place, which would stretch
-    // serverDs over adjacent local deletions and "prove" its own coverage.
-    const covered = () =>
-        Y.equalDeleteSets(serverDs, Y.mergeDeleteSets([cloneDeleteSet(serverDs), cloneDeleteSet(localDs)]));
+    let unmerged: ReturnType<typeof Y.decodeUpdate>['ds'][] = [];
+    let decodedBytes = 0;
+    let checkedBytes = 0;
+    // Only the private accumulator and freshly decoded sets are merged:
+    // Y.mergeDeleteSets reuses the input DeleteItems and widens them in
+    // place, so localDs must never go in (the caller's set would change,
+    // and serverDs stretched over adjacent local deletions would "prove"
+    // its own coverage). The merged result is canonical, as
+    // deleteSetContains requires.
+    const covered = () => {
+        if (unmerged.length > 0) {
+            serverDs = Y.mergeDeleteSets([serverDs, ...unmerged]);
+            unmerged = [];
+        }
+        checkedBytes = decodedBytes;
+        return deleteSetContains(serverDs, localDs);
+    };
 
     // Handles the trivial case (empty local delete-set) without decoding
     // any server blob at all.
@@ -342,30 +363,54 @@ export function deleteSetCoveredByBlobs(
 
     const blobs = getServerBlobs().slice().sort((a, b) => a.byteLength - b.byteLength);
     for (const blob of blobs) {
+        if (unmerged.length > 0 && decodedBytes + blob.byteLength > 2 * checkedBytes && covered()) {
+            return true;
+        }
         try {
-            serverDs = Y.mergeDeleteSets([serverDs, Y.decodeUpdate(blob).ds]);
+            unmerged.push(Y.decodeUpdate(blob).ds);
         } catch (e) {
             // Corrupted server blob contributes nothing to coverage;
             // worst case we push a redundant (idempotent) diff.
             continue;
         }
-        if (covered()) {
-            return true;
-        }
+        decodedBytes += blob.byteLength;
     }
-    return false;
+    return covered();
 }
 
 /**
- * Copies a delete-set down to its DeleteItems, so that merging the copy
- * cannot alter the original.
+ * Whether every deletion in `ds` lies within one range of `canonicalDs`,
+ * which must be sorted and merged the way Y.mergeDeleteSets leaves it
+ * (overlapping AND adjacent ranges joined). Equivalent to
+ * `Y.equalDeleteSets(canonicalDs, Y.mergeDeleteSets([canonicalDs, ds]))`,
+ * without copying, sorting or mutating either set.
  */
-function cloneDeleteSet(
+function deleteSetContains(
+    canonicalDs: ReturnType<typeof Y.decodeUpdate>['ds'],
     ds: ReturnType<typeof Y.decodeUpdate>['ds']
-): ReturnType<typeof Y.decodeUpdate>['ds'] {
-    const clone = Y.createDeleteSet();
-    ds.clients.forEach((items, client) => {
-        clone.clients.set(client, items.map(({ clock, len }) => ({ clock, len })));
-    });
-    return clone;
+): boolean {
+    for (const [client, items] of ds.clients) {
+        const ranges = canonicalDs.clients.get(client);
+        if (ranges === undefined) {
+            return false;
+        }
+        for (let i = 0; i < items.length; i++) {
+            const { clock, len } = items[i];
+            // Only the last range starting at or before `clock` can contain it
+            let lo = 0;
+            let hi = ranges.length - 1;
+            while (lo <= hi) {
+                const mid = (lo + hi) >>> 1;
+                if (ranges[mid].clock <= clock) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            if (hi < 0 || ranges[hi].clock + ranges[hi].len < clock + len) {
+                return false;
+            }
+        }
+    }
+    return true;
 }

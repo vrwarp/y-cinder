@@ -156,6 +156,24 @@ describe('main-thread fallback (no Worker in the environment)', () => {
             .rejects.toBeDefined();
     });
 
+    it('diffs an update against a state vector on the main thread', async () => {
+        const mod = await loadModule();
+        const local = new Y.Doc();
+        Y.applyUpdate(local, makeUpdate(1, 2));
+        const diff = await mod.diffUpdateAsync(makeUpdate(1, 4), Y.encodeStateVector(local));
+
+        expect(Y.decodeUpdate(diff).structs.map((s) => s.id.clock)).toEqual([2, 3]);
+        Y.applyUpdate(local, diff);
+        expect(local.getMap('m').toJSON()).toEqual({ k0: 0, k1: 1, k2: 2, k3: 3 });
+    });
+
+    it('rejects a corrupt update when diffing', async () => {
+        const mod = await loadModule();
+
+        await expect(mod.diffUpdateAsync(new Uint8Array([255, 255, 255, 255]), new Uint8Array([0])))
+            .rejects.toBeDefined();
+    });
+
     it('derives merge metadata on the main thread', async () => {
         const mod = await loadModule();
         const meta = await mod.mergeUpdatesWithMetaAsync([makeUpdate(1, 2)]);
@@ -271,6 +289,49 @@ describe('worker path', () => {
         await vi.advanceTimersByTimeAsync(30_000);
 
         expect(applied(await promise)).toEqual({ k0: 0, k1: 1 });
+    });
+
+    it('routes a diff through the worker with the state vector to diff against', async () => {
+        const mod = await loadModule();
+        const update = makeUpdate(1, 2);
+        const sv = new Uint8Array([1, 1, 1]);
+        const expected = new Uint8Array([0, 0]);
+        const promise = mod.diffUpdateAsync(update, sv);
+
+        await vi.waitFor(() => { expect(FakeWorker.latest().posted).toHaveLength(1); });
+        expect(FakeWorker.latest().posted[0]).toMatchObject({ updates: [update], diffAgainst: sv });
+        FakeWorker.latest().respond({ result: expected });
+
+        expect(await promise).toBe(expected);
+    });
+
+    it('rejects a diff the worker reports as failed', async () => {
+        const mod = await loadModule();
+        const promise = mod.diffUpdateAsync(makeUpdate(1, 1), new Uint8Array([0]));
+
+        await vi.waitFor(() => { expect(FakeWorker.latest().posted).toHaveLength(1); });
+        FakeWorker.latest().respond({ error: 'Unexpected end of array' });
+
+        await expect(promise).rejects.toThrow('Unexpected end of array');
+    });
+
+    it('diffs on the main thread after 5 s, not the 30 s merge budget, when the worker never answers', async () => {
+        vi.useFakeTimers();
+
+        const mod = await loadModule();
+        const local = new Y.Doc();
+        Y.applyUpdate(local, makeUpdate(1, 1));
+        let settled = false;
+        const promise = mod.diffUpdateAsync(makeUpdate(1, 2), Y.encodeStateVector(local));
+        promise.then(() => { settled = true; }, () => { settled = true; });
+
+        expect(FakeWorker.latest().posted).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+
+        Y.applyUpdate(local, await promise);
+        expect(local.getMap('m').toJSON()).toEqual({ k0: 0, k1: 1 });
     });
 
     it('rejects when the worker refuses the message', async () => {

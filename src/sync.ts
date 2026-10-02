@@ -72,6 +72,7 @@ import {
     rebaseIfPending,
     isItemRedundant,
     applyItem,
+    diffSnapshotForLocal,
 } from "./sync-helpers";
 import {
     diffHasPayload,
@@ -440,10 +441,14 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         try {
                             const storageRef = ref(ctx.storage, data.snapshotStoragePath);
                             const buffer = await getBytes(storageRef);
-                            // Inject the bytes into data.content as a Uint8Array, not
-                            // Bytes: the readers take either (blobOf), and wrapping
-                            // an O(document) blob costs a string concat per byte.
-                            data.content = new Uint8Array(buffer);
+                            // A local doc behind the snapshot gets only what
+                            // it lacks (diffed off the main thread when
+                            // possible); a fresh one gets the whole blob.
+                            // Injected into data.content as a Uint8Array, not
+                            // Bytes: the readers take either (blobOf), and
+                            // wrapping an O(document) blob costs a string
+                            // concat per byte.
+                            data.content = await diffSnapshotForLocal(new Uint8Array(buffer), data, ydoc);
                             pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
                         } catch (storageErr) {
                             console.error("Failed to download snapshot from Cloud Storage", storageErr);
@@ -815,7 +820,11 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
     let lastQuarantinedPath: string | null = null;
     let lastProcessedVersion: number | null = initialVersion;
 
-    return onSnapshot(doc(db, path), async (snapshot) => {
+    // A delivery that awaited its snapshot diff must not apply once the
+    // provider unsubscribed the listener (e.g. at an epoch fence).
+    let stopped = false;
+
+    const unsubscribe = onSnapshot(doc(db, path), async (snapshot) => {
         if (!snapshot.exists()) return;
 
         const data = snapshot.data();
@@ -873,8 +882,9 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
         // A client that missed only this fold (e.g. offline across it)
         // lacks just its tail; the check below decides whether that sufficed.
         if (!localCoversSnapshot(data, ydoc) && foldTailMayCatchUp(data, ydoc)) {
-            await applyFoldTail(storage, data, ydoc, isDestroyed);
-            if (isDestroyed()) return;
+            const tailStopped = () => stopped || isDestroyed() || (ctx.getEpoch?.() ?? 0) !== snapEpoch;
+            await applyFoldTail(storage, data, ydoc, tailStopped);
+            if (tailStopped()) return;
         }
         if (localCoversSnapshot(data, ydoc)) {
             if (typeof data.version === 'number') {
@@ -903,7 +913,9 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
                 const buffer = await getBytes(storageRef);
                 // Provider may have been destroyed while downloading
                 if (isDestroyed()) return;
-                const content = new Uint8Array(buffer);
+                // Only what the local doc lacks (see diffSnapshotForLocal)
+                const content = await diffSnapshotForLocal(new Uint8Array(buffer), data, ydoc);
+                if (stopped || isDestroyed() || (ctx.getEpoch?.() ?? 0) !== snapEpoch) return;
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
                 if (typeof data.version === 'number') {
                     lastProcessedVersion = data.version;
@@ -940,6 +952,11 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
         console.error("Snapshot listener failed", error);
         if (onListenerError) onListenerError(error);
     });
+
+    return () => {
+        stopped = true;
+        unsubscribe();
+    };
 }
 
 /**

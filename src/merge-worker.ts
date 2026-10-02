@@ -11,12 +11,13 @@
  * 
  * ## Message Format
  * 
- * Request: { id: string, updates: Uint8Array[] }
+ * Request: { id: string, updates: Uint8Array[], diffAgainst?: Uint8Array }
  * Response: { id: string, result?: Uint8Array, error?: string }
  * 
  * @module merge-worker
  */
 
+import * as Y from 'yjs';
 import { mergeUpdatesCore, mergeUpdatesWithMeta } from './merge-core';
 
 // Type definitions for worker messages
@@ -31,6 +32,13 @@ interface MergeRequest {
      * lazy walks over large snapshots off the main thread.
      */
     meta?: boolean;
+    /**
+     * When set, return `Y.diffUpdate(updates[0], diffAgainst)` instead of
+     * merging: the part of the update a document at this state vector
+     * lacks. Lets a client that is behind a multi-MB snapshot integrate
+     * only what it is missing on the main thread.
+     */
+    diffAgainst?: Uint8Array;
 }
 
 interface MergeResponse {
@@ -48,9 +56,16 @@ const ctx: Worker = self as any;
  * Handle incoming merge requests from the main thread.
  */
 ctx.onmessage = (event: MessageEvent<MergeRequest>) => {
-    const { id, updates, gc, meta } = event.data;
+    const { id, updates, gc, meta, diffAgainst } = event.data;
 
     try {
+        if (diffAgainst) {
+            const result = Y.diffUpdate(updates[0], diffAgainst);
+            const response: MergeResponse = { id, result };
+            ctx.postMessage(response, [result.buffer]);
+            return;
+        }
+
         if (meta) {
             const { result, stateVector, dsUpdate } = mergeUpdatesWithMeta(updates, { gc });
             const response: MergeResponse = { id, result, stateVector, dsUpdate };

@@ -13,6 +13,7 @@ import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import { FIREBASE_ORIGINS } from "./types";
 import { extractClockEnds, isUpdateRedundant } from "./update-metadata";
+import { diffUpdateAsync, isWorkerMergeAvailable } from "./merge-utils";
 
 /**
  * A server item fetched during sync, before it is applied to the local doc.
@@ -166,6 +167,86 @@ export function foldTailMayCatchUp(data: any, ydoc: Y.Doc): boolean {
     } catch (e) {
         console.warn("Failed to decode fold tail base clocks", e);
         return false;
+    }
+}
+
+/**
+ * Share of a snapshot the local document already holds, estimated from the
+ * two state vectors in O(clients): the sum over the snapshot's clients of
+ * min(local clock, snapshot clock), divided by the sum of the snapshot's
+ * clocks. On versicle-shaped documents it tracks the share of structs
+ * within a percentage point.
+ *
+ * @param snapshotSV - The snapshot's state vector
+ * @param localSV - The local document's state vector
+ * @returns A fraction in [0, 1]; 1 for a snapshot without structs
+ */
+export function snapshotOverlap(snapshotSV: Map<number, number>, localSV: Map<number, number>): number {
+    let total = 0;
+    let held = 0;
+    for (const [client, clock] of snapshotSV) {
+        total += clock;
+        held += Math.min(localSV.get(client) || 0, clock);
+    }
+    return total === 0 ? 1 : held / total;
+}
+
+/**
+ * Below this share of the snapshot held locally, a diff costs more than it
+ * saves: computing it walks the whole snapshot, and the structs it leaves
+ * are most of the snapshot anyway (e.g. a fresh device that wrote app
+ * defaults before its first sync). With the merge worker the main thread
+ * only applies the diff, so this only bounds the worker's added latency.
+ */
+export const SNAPSHOT_DIFF_MIN_OVERLAP = 0.5;
+
+/**
+ * The same bound when the diff has to run on the main thread (no Worker,
+ * e.g. a CSP that blocks blob workers). The main thread then pays the walk
+ * too, and diff + apply only beats applying the whole snapshot from about
+ * 60% overlap (measured at 3.3 MB: break-even at 61%, 24% faster at 71%).
+ */
+export const SNAPSHOT_DIFF_MIN_OVERLAP_MAIN_THREAD = 0.75;
+
+/**
+ * Strips from a downloaded snapshot what the local document already holds.
+ *
+ * A local doc that is behind the snapshot (another device ran a fold since
+ * it last synced) typically holds 90%+ of it. `Y.applyUpdate` of the whole
+ * blob decodes every struct and resolves its origins against the store
+ * before skipping the ones already held — O(snapshot) main-thread work that
+ * grows with document age (~300 ms at 3.3 MB). `Y.diffUpdate` against the
+ * local state vector, computed in the merge worker when available, leaves
+ * only the missing structs plus the FULL delete set, so applying it reaches
+ * the same state: structs the doc parks in pendingStructs lie beyond its
+ * state vector and stay in the diff, and local edits made while the diff is
+ * computed only add local structs (the diff is then a superset, and
+ * applying it is idempotent). The delete set also keeps the result valid
+ * as delete-set proof for the push guard (collectServerBlobs).
+ *
+ * The snapshot's metadata (stateVector, version) is unaffected: coverage
+ * and redundancy keep treating the snapshot as [0, stateVector).
+ *
+ * @param content - The snapshot blob
+ * @param data - Main document data carrying the snapshot's stateVector
+ * @param ydoc - Local Yjs document the snapshot will be applied to
+ * @returns The diff, or `content` itself when the local doc holds too
+ *          little of the snapshot for a diff to pay off, or when diffing
+ *          fails — the caller then applies the full blob exactly as before,
+ *          so corruption still fails (and quarantines) in the apply
+ */
+export async function diffSnapshotForLocal(content: Uint8Array, data: any, ydoc: Y.Doc): Promise<Uint8Array> {
+    if (!data.stateVector) return content;
+    try {
+        const localSV = Y.encodeStateVector(ydoc);
+        const overlap = snapshotOverlap(ensureDecodedSV(data), Y.decodeStateVector(localSV));
+        // At 1 the local doc covers the snapshot: it is skipped as redundant
+        if (overlap < SNAPSHOT_DIFF_MIN_OVERLAP || overlap === 1) return content;
+        if (overlap < SNAPSHOT_DIFF_MIN_OVERLAP_MAIN_THREAD && !isWorkerMergeAvailable()) return content;
+        return await diffUpdateAsync(content, localSV);
+    } catch (e) {
+        console.warn("Failed to diff snapshot against the local document; applying it whole", e);
+        return content;
     }
 }
 

@@ -563,6 +563,49 @@ the 1.83 MB snapshot, and its CPU from connect to synced drops from
 of the tail (4-15% of the snapshot) and one Storage delete. A device
 several folds behind still needs the snapshot.
 
+## Fix 8: a device behind the snapshot integrates only what it lacks
+
+A device returning after another device ran a fold (versicle: hydrated
+from y-idb, a few sessions behind) fails `localCoversSnapshot`, so initial
+sync — and, for a resumed tab, the snapshot listener — handed the WHOLE
+snapshot to `Y.applyUpdate` on the live doc. Yjs decodes every struct and
+resolves its origins against the store before skipping the ones already
+held, so the main thread paid about as much as a fresh hydrate although
+the doc typically holds 87–99% of the snapshot.
+
+Both paths now apply `Y.diffUpdate(snapshot, localStateVector)` instead
+(`diffSnapshotForLocal`), computed in the merge worker (5 s worker
+timeout, main-thread fallback). The diff carries exactly the missing
+structs plus the FULL delete set, so the end state is identical, and the
+snapshot's metadata is untouched: coverage and redundancy checks still
+treat it as `[0, stateVector)`. It is gated on the share of the snapshot
+the local doc holds, estimated from the two state vectors in O(clients):
+at least 50% with the worker, and 75% when the diff itself runs on the
+main thread (break-even there is ~60%). Below that — e.g. a fresh device
+that wrote defaults before syncing — or if the diff fails (corrupt blob,
+crashed worker), the whole blob is applied exactly as before, so
+corruption still fails and quarantines the same way.
+
+Measured with `benchmarks/behind-client-snapshot.bench.ts` (same seed
+as the aging suites) plus an A/B of `performInitialSync` before/after the
+change with a `worker_threads`-backed Worker (medians of 7, interleaved):
+
+| age / behind | snapshot | structs applied on the live doc | main thread, worker | main thread, no worker |
+| --- | ---: | ---: | ---: | ---: |
+| 60 / 8 | 0.9 MB | 41.5k → 5.6k | 112 → 22 ms | 64 → 41 ms |
+| 120 / 8 | 1.7 MB | 81.1k → 5.4k | 175 → 30 ms | 122 → 69 ms |
+| 240 / 1 | 3.3 MB | 158.4k → 0.7k | 374 → 61 ms | 250 → 167 ms |
+| 240 / 8 | 3.3 MB | 158.4k → 5.5k | 327 → 50 ms | 252 → 161 ms |
+| 240 / 32 | 3.3 MB | 158.4k → 21.5k | 411 → 121 ms | 311 → 237 ms |
+
+The snapshot listener path improves the same way (240 / 8: 279 → 33 ms
+with the worker). The longest single main-thread block falls with the
+total (240 / 8: 327 → 48 ms), and time to synced drops too (327 →
+115 ms) because the worker's diff is cheaper than the full decode. What
+remains on the main thread is O(missing structs + delete set) instead of
+O(snapshot). y-idb hydration of the same document (~375 ms at 240
+sessions) is unaffected — that floor is what squash resets.
+
 ## The remaining floor: epoch squash
 
 Everything above bounds the *per-cycle* costs, but the floor itself —

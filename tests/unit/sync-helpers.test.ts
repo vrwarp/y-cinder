@@ -8,12 +8,20 @@
  * through emulator integration tests, so mutation testing could not see them
  * at all.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import * as Y from 'yjs';
 import { toBase64 } from 'lib0/buffer';
 import { FIREBASE_ORIGINS } from '../../src/types';
 import { foldTailBaseClocks } from '../../src/compaction-policy';
 import { writeStateVector } from '../../src/utils';
+import { isWorkerMergeAvailable } from '../../src/merge-utils';
+
+// Node has no Worker; tests opt into the worker-available gate explicitly.
+// The diff itself always runs (on the main thread) through the real module.
+vi.mock('../../src/merge-utils', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('../../src/merge-utils')>()),
+    isWorkerMergeAvailable: vi.fn(() => false),
+}));
 import {
     applyItem,
     buildServerCoverage,
@@ -27,6 +35,10 @@ import {
     processUpdateMetadata,
     refreshLocalClocks,
     rebaseIfPending,
+    snapshotOverlap,
+    diffSnapshotForLocal,
+    SNAPSHOT_DIFF_MIN_OVERLAP,
+    SNAPSHOT_DIFF_MIN_OVERLAP_MAIN_THREAD,
     type PendingUpdate,
 } from '../../src/sync-helpers';
 
@@ -281,6 +293,139 @@ describe('foldTailMayCatchUp', () => {
         const { base, data } = foldedDocument();
 
         expect(foldTailMayCatchUp({ ...data, foldTailBaseClocks: 'not-base64-!!' }, holderOf(base))).toBe(false);
+    });
+});
+
+describe('snapshotOverlap', () => {
+    it('is the share of the snapshot clocks the local doc holds', () => {
+        expect(snapshotOverlap(new Map([[1, 6], [2, 4]]), new Map([[1, 3], [2, 4]]))).toBe(0.7);
+    });
+
+    it('counts a local client ahead of the snapshot only up to the snapshot clock', () => {
+        expect(snapshotOverlap(new Map([[1, 4], [2, 4]]), new Map([[1, 100]]))).toBe(0.5);
+    });
+
+    it('ignores local clients the snapshot does not have', () => {
+        expect(snapshotOverlap(new Map([[1, 4]]), new Map([[9, 50]]))).toBe(0);
+    });
+
+    it('is 1 for a snapshot without structs', () => {
+        expect(snapshotOverlap(new Map(), new Map([[1, 3]]))).toBe(1);
+    });
+});
+
+describe('diffSnapshotForLocal', () => {
+    const workerAvailable = (available: boolean) => vi.mocked(isWorkerMergeAvailable).mockReturnValue(available);
+
+    beforeEach(() => {
+        workerAvailable(false);
+    });
+
+    /**
+     * A server doc whose first `held` edits (client 1) the local doc has,
+     * followed by `missing` overwrites from client 2 (which delete).
+     */
+    const behind = (held: number, missing: number) => {
+        const server = makeDoc(1, held);
+        const local = new Y.Doc();
+        Y.applyUpdate(local, Y.encodeStateAsUpdate(server));
+        server.clientID = 2;
+        const map = server.getMap('m');
+        for (let i = 0; i < missing; i += 1) {
+            server.transact(() => map.set(`k${i % held}`, -i));
+        }
+        return { server, local, snapshot: Y.encodeStateAsUpdate(server), data: { stateVector: svBase64(server) } };
+    };
+
+    const structsOf = (update: Uint8Array) =>
+        Y.decodeUpdate(update).structs.filter((s) => !(s instanceof Y.Skip));
+
+    it('returns only what the local doc lacks, reaching the same state as the whole snapshot', async () => {
+        const { server, local, snapshot, data } = behind(10, 2);
+        const viaFull = new Y.Doc();
+        Y.applyUpdate(viaFull, Y.encodeStateAsUpdate(local));
+        Y.applyUpdate(viaFull, snapshot);
+
+        const diff = await diffSnapshotForLocal(snapshot, data, local);
+
+        expect(structsOf(diff).map((s) => s.id.client)).toEqual([2, 2]);
+        expect(diff.byteLength).toBeLessThan(snapshot.byteLength);
+        Y.applyUpdate(local, diff);
+        expect(local.getMap('m').toJSON()).toEqual(server.getMap('m').toJSON());
+        expect(Y.encodeStateVector(local)).toEqual(Y.encodeStateVector(viaFull));
+        expect(Y.encodeStateAsUpdate(local, Y.encodeStateVector(local)))
+            .toEqual(Y.encodeStateAsUpdate(viaFull, Y.encodeStateVector(viaFull)));
+    });
+
+    it('keeps the full delete set (delete-set proof for the push guard)', async () => {
+        const { snapshot, local, data } = behind(10, 2);
+
+        const diff = await diffSnapshotForLocal(snapshot, data, local);
+
+        expect(Y.equalDeleteSets(Y.decodeUpdate(diff).ds, Y.decodeUpdate(snapshot).ds)).toBe(true);
+    });
+
+    it('with the merge worker, diffs when the local doc holds half the snapshot', async () => {
+        workerAvailable(true);
+        // 10 of 20 clock units held
+        const { snapshot, local, data } = behind(10, 10);
+        expect(SNAPSHOT_DIFF_MIN_OVERLAP).toBe(0.5);
+
+        expect(await diffSnapshotForLocal(snapshot, data, local)).not.toBe(snapshot);
+    });
+
+    it('with the merge worker, returns the snapshot itself when the local doc holds less than half', async () => {
+        workerAvailable(true);
+        // 10 of 21 clock units held: the diff would carry most of the snapshot
+        const { snapshot, local, data } = behind(10, 11);
+
+        expect(await diffSnapshotForLocal(snapshot, data, local)).toBe(snapshot);
+    });
+
+    it('on the main thread, diffs when the local doc holds three quarters of the snapshot', async () => {
+        // 30 of 40 clock units held
+        const { snapshot, local, data } = behind(30, 10);
+        expect(SNAPSHOT_DIFF_MIN_OVERLAP_MAIN_THREAD).toBe(0.75);
+
+        expect(await diffSnapshotForLocal(snapshot, data, local)).not.toBe(snapshot);
+    });
+
+    it('on the main thread, returns the snapshot itself below three quarters, where the diff would not pay off', async () => {
+        // 30 of 41, then 10 of 20 clock units held
+        const less = behind(30, 11);
+        const half = behind(10, 10);
+
+        expect(await diffSnapshotForLocal(less.snapshot, less.data, less.local)).toBe(less.snapshot);
+        expect(await diffSnapshotForLocal(half.snapshot, half.data, half.local)).toBe(half.snapshot);
+    });
+
+    it('returns the snapshot itself for an empty local doc', async () => {
+        const { snapshot, data } = behind(10, 2);
+
+        expect(await diffSnapshotForLocal(snapshot, data, new Y.Doc())).toBe(snapshot);
+    });
+
+    it('returns the snapshot itself when the local doc already covers it', async () => {
+        const { server, snapshot, data } = behind(10, 2);
+        const local = new Y.Doc();
+        Y.applyUpdate(local, Y.encodeStateAsUpdate(server));
+
+        expect(await diffSnapshotForLocal(snapshot, data, local)).toBe(snapshot);
+    });
+
+    it('returns the snapshot itself without a stateVector to estimate the overlap from', async () => {
+        const { snapshot, local } = behind(10, 2);
+
+        expect(await diffSnapshotForLocal(snapshot, {}, local)).toBe(snapshot);
+    });
+
+    it('returns the snapshot itself when diffing fails, so the apply fails exactly as before', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const { local, data } = behind(10, 2);
+        const corrupt = new Uint8Array([255, 255, 255, 255]);
+
+        expect(await diffSnapshotForLocal(corrupt, data, local)).toBe(corrupt);
+        expect(warn).toHaveBeenCalled();
     });
 });
 

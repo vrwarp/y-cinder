@@ -24,6 +24,7 @@
  * @module merge-utils
  */
 
+import * as Y from 'yjs';
 import { mergeUpdatesCore, mergeUpdatesWithMeta, MergeOptions, MergeWithMetaResult } from './merge-core';
 import { MERGE_WORKER_CODE } from './generated/merge-worker-blob';
 
@@ -51,6 +52,17 @@ const pendingRequests = new Map<string, {
 
 // Request ID counter
 let requestIdCounter = 0;
+
+/** How long a merge waits for the worker before running on the main thread */
+const MERGE_TIMEOUT_MS = 30_000;
+
+/**
+ * How long a diff waits for the worker before running on the main thread.
+ * Far shorter than the merge budget: a sync is waiting on the result, and
+ * the diff of even a multi-MB snapshot takes the worker well under a
+ * second (~130 ms at 3.3 MB on desktop).
+ */
+const DIFF_TIMEOUT_MS = 5_000;
 
 /**
  * Generate a unique request ID.
@@ -216,15 +228,44 @@ export async function mergeUpdatesWithMetaAsync(
 }
 
 /**
- * Posts a request to the merge worker with a 30s main-thread fallback.
+ * Computes `Y.diffUpdate(update, stateVector)` — the part of the update a
+ * document at that state vector lacks — in the Web Worker when available.
+ *
+ * Used for a local document that is BEHIND a large snapshot: applying the
+ * whole snapshot makes Yjs decode every struct and resolve its origins
+ * against the store, including the 90%+ the document already holds
+ * (~300 ms of main thread at 3.3 MB), whereas applying the diff only
+ * integrates what is missing. Rejects if the update is corrupt.
+ *
+ * @param update - V1-encoded update (a snapshot blob)
+ * @param stateVector - Encoded state vector of the receiving document
+ * @returns Promise resolving to the V1-encoded diff
+ */
+export async function diffUpdateAsync(update: Uint8Array, stateVector: Uint8Array): Promise<Uint8Array> {
+    if (initWorker() && mergeWorker) {
+        const response = await postToWorker(
+            { updates: [update], gc: false, meta: false, diffAgainst: stateVector },
+            () => ({ result: Y.diffUpdate(update, stateVector) }),
+            DIFF_TIMEOUT_MS
+        );
+        return response.result;
+    }
+
+    return Promise.resolve(Y.diffUpdate(update, stateVector));
+}
+
+/**
+ * Posts a request to the merge worker with a main-thread fallback.
  *
  * @param message - Request fields (id is added here)
  * @param fallback - Synchronous main-thread computation used if the worker
  *                   does not respond in time
+ * @param timeoutMs - How long to wait for the worker (default 30 s)
  */
 function postToWorker(
-    message: { updates: Uint8Array[]; gc: boolean; meta: boolean },
-    fallback: () => WorkerResponse
+    message: { updates: Uint8Array[]; gc: boolean; meta: boolean; diffAgainst?: Uint8Array },
+    fallback: () => WorkerResponse,
+    timeoutMs: number = MERGE_TIMEOUT_MS
 ): Promise<WorkerResponse> {
     return new Promise((resolve, reject) => {
         const id = generateRequestId();
@@ -240,7 +281,7 @@ function postToWorker(
                     reject(err instanceof Error ? err : new Error(String(err)));
                 }
             }
-        }, 30000); // 30 second timeout
+        }, timeoutMs);
         // Don't keep Node.js processes alive just for this fallback timer
         (timer as any).unref?.();
 

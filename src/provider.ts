@@ -99,8 +99,15 @@ export class FireProvider extends ObservableV2<any> {
   /** Map of subdocument providers */
   private subProviders: SubProviderMap = new Map();
 
-  /** Whether compaction is currently in progress */
-  private _isCompacting: boolean = false;
+  /**
+   * The in-flight compaction, if any. The compaction lock is re-entrant
+   * for this provider's uid, so compaction and squash must never overlap:
+   * the second would share the first's lock, and its release would strip
+   * the first of its exclusivity mid-run.
+   */
+  private _inflightCompaction: Promise<void> | null = null;
+  /** The in-flight squash, if any (see _inflightCompaction) */
+  private _inflightSquash: Promise<SquashResult> | null = null;
 
   /**
    * Buffered local updates awaiting the debounced save.
@@ -282,7 +289,7 @@ export class FireProvider extends ObservableV2<any> {
    * Whether compaction is currently in progress.
    */
   get isCompacting(): boolean {
-    return this._isCompacting;
+    return this._inflightCompaction !== null;
   }
 
   /**
@@ -300,12 +307,20 @@ export class FireProvider extends ObservableV2<any> {
    * @param attempt - Internal retry counter (do not set manually)
    * @throws {Error} If locking fails or Firestore operations error
    */
-  async compact(attempt: number = 1): Promise<void> {
-    // Prevent concurrent compaction from same instance
-    if (this._isCompacting && attempt === 1) return;
+  compact(attempt: number = 1): Promise<void> {
+    // Prevent concurrent compaction from same instance, and never start
+    // while a squash holds the lock (see _inflightCompaction)
+    if ((this._inflightCompaction || this._inflightSquash) && attempt === 1) {
+      return Promise.resolve();
+    }
 
-    this._isCompacting = true;
+    this._inflightCompaction = this._executeCompaction(attempt).finally(() => {
+      this._inflightCompaction = null;
+    });
+    return this._inflightCompaction;
+  }
 
+  private async _executeCompaction(attempt: number): Promise<void> {
     const ctx: CompactionContext = {
       db: this.db,
       path: this.path,
@@ -330,8 +345,6 @@ export class FireProvider extends ObservableV2<any> {
     try {
       await performTieredCompaction(ctx, attempt);
     } finally {
-      this._isCompacting = false;
-
       // FIX: Resume history listener
       if (!this._isDestroyed && !this._unsubscribeHistory) {
         // Use SyncContext to recreate listener
@@ -426,7 +439,14 @@ export class FireProvider extends ObservableV2<any> {
       await this.saveToFirestore();
     }
 
-    const result = await squashDocument({
+    // compact() returns at once while a compaction (or another squash) is
+    // already running. Wait it out: squashDocument would re-enter its lock
+    // and then release it while that operation still relies on it.
+    while (this._inflightCompaction || this._inflightSquash) {
+      try { await (this._inflightCompaction ?? this._inflightSquash); } catch { /* handled by its caller */ }
+    }
+
+    this._inflightSquash = squashDocument({
       db: this.db,
       path: this.path,
       uid: this.uid,
@@ -435,7 +455,10 @@ export class FireProvider extends ObservableV2<any> {
       storage: this.storage,
       isDestroyed: () => this._isDestroyed,
       doc: this.doc,
+    }).finally(() => {
+      this._inflightSquash = null;
     });
+    const result = await this._inflightSquash;
 
     if (result.success && result.epoch !== undefined) {
       // The LIVE doc still carries the old epoch's structure, so this

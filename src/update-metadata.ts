@@ -308,8 +308,11 @@ export function deleteSetCoveredByBlobs(
     getServerBlobs: () => Uint8Array[]
 ): boolean {
     let serverDs = Y.mergeDeleteSets([]);
+    // Merge copies, not the sets themselves: Y.mergeDeleteSets reuses the
+    // input DeleteItems and widens them in place, which would stretch
+    // serverDs over adjacent local deletions and "prove" its own coverage.
     const covered = () =>
-        Y.equalDeleteSets(serverDs, Y.mergeDeleteSets([serverDs, localDs]));
+        Y.equalDeleteSets(serverDs, Y.mergeDeleteSets([cloneDeleteSet(serverDs), cloneDeleteSet(localDs)]));
 
     // Handles the trivial case (empty local delete-set) without decoding
     // any server blob at all.
@@ -331,4 +334,18 @@ export function deleteSetCoveredByBlobs(
         }
     }
     return false;
+}
+
+/**
+ * Copies a delete-set down to its DeleteItems, so that merging the copy
+ * cannot alter the original.
+ */
+function cloneDeleteSet(
+    ds: ReturnType<typeof Y.decodeUpdate>['ds']
+): ReturnType<typeof Y.decodeUpdate>['ds'] {
+    const clone = Y.createDeleteSet();
+    ds.clients.forEach((items, client) => {
+        clone.clients.set(client, items.map(({ clock, len }) => ({ clock, len })));
+    });
+    return clone;
 }

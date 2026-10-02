@@ -31,6 +31,8 @@ const { ctl } = vi.hoisted(() => ({
         getDocsGate: null as Promise<void> | null,
         /** While set, the clock-skew probe's write waits on it. */
         probeGate: null as Promise<void> | null,
+        /** Clock-skew probe writes handed to the SDK. */
+        probeWrites: 0,
         /** While set, the next update write by `holdUid` waits on it. */
         holdUid: null as string | null,
         holdGate: null as Promise<void> | null,
@@ -57,6 +59,7 @@ vi.mock('@firebase/firestore', async (importOriginal: () => Promise<any>) => {
             return actual.addDoc(collectionRef, data);
         },
         setDoc: async (ref: any, ...rest: any[]) => {
+            if (String(ref.path).includes('/maintenance/')) ctl.probeWrites++;
             if (ctl.probeGate && String(ref.path).includes('/maintenance/')) await ctl.probeGate;
             return actual.setDoc(ref, ...rest);
         },
@@ -114,6 +117,7 @@ describe('Saves around initial sync', () => {
     beforeEach(() => {
         ctl.writes = [];
         ctl.listeners = [];
+        ctl.probeWrites = 0;
     });
 
     afterEach(async () => {
@@ -197,18 +201,28 @@ describe('Saves around initial sync', () => {
         const doc = new Y.Doc();
         let acknowledge!: () => void;
         ctl.probeGate = new Promise<void>(resolve => { acknowledge = resolve; });
-        // Measures clock skew, so initial sync waits for the probe.
+        // The offset is unmeasured. The probe is off the startup path: initial
+        // sync completes without it, and the first lock need takes it.
         const provider = createProvider(doc, path, { maxWaitTime: 50, maxAggregationTime: 60000, cachedClockOffset: undefined });
+        await waitSynced(provider);
+        expect(ctl.probeWrites).toBe(0);
+
+        // The first compaction measures the offset; its probe write stays
+        // unacknowledged.
+        const compaction = provider.compact();
+        await waitForConditionTruthy(() => ctl.probeWrites > 0, {
+            timeout: 10000, message: 'the compaction starts the clock-skew probe',
+        });
 
         doc.getText('t').insert(0, 'typed-while-probing');
         await waitForConditionTruthy(() => writesBy(provider) > 0, {
             timeout: 10000, message: 'the edit is handed to the SDK while the probe is unacknowledged',
         });
-        expect(provider.synced).toBe(false);
+        expect(ctl.probeWrites).toBe(1);
 
         ctl.probeGate = null;
         acknowledge();
-        await waitSynced(provider);
+        await compaction;
         await release(provider);
         expect(await readFromFreshClient(path)).toBe('typed-while-probing');
     });

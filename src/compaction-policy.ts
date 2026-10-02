@@ -132,9 +132,22 @@ export function shouldUseDelta(params: {
     maxHistory?: number;
 }): boolean {
     const { hasBase, updateCount, historyCount, historyFoldThreshold, maxHistory = DEFAULTS.MAX_COMPACTION_HISTORY } = params;
-    const foldThreshold = Math.min(historyFoldThreshold, maxHistory + 1);
+    const foldThreshold = effectiveFoldThreshold(historyFoldThreshold, maxHistory);
 
     return hasBase && updateCount > 0 && historyCount + 1 < foldThreshold;
+}
+
+/**
+ * The fold threshold shouldUseDelta applies: historyFoldThreshold capped at
+ * maxHistory + 1 (see shouldUseDelta). Compaction counts history segments
+ * only up to this many, since every count from there on folds.
+ *
+ * @param historyFoldThreshold - The configured fold threshold.
+ * @param maxHistory - The per-cycle history cap.
+ * @returns The capped threshold.
+ */
+export function effectiveFoldThreshold(historyFoldThreshold: number, maxHistory: number = DEFAULTS.MAX_COMPACTION_HISTORY): number {
+    return Math.min(historyFoldThreshold, maxHistory + 1);
 }
 
 /**

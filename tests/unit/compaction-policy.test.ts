@@ -16,6 +16,7 @@ import {
     chooseDeleteSetField,
     deleteSetFitsInline,
     deltaSegmentFitsInline,
+    effectiveFoldThreshold,
     epochOf,
     foldDeleteSetPath,
     foldSnapshotPath,
@@ -207,6 +208,59 @@ describe('shouldUseDelta', () => {
     it('takes the cap from maxHistory when given', () => {
         expect(shouldUseDelta({ ...base, historyCount: 3, historyFoldThreshold: 8, maxHistory: 4 })).toBe(true);
         expect(shouldUseDelta({ ...base, historyCount: 4, historyFoldThreshold: 8, maxHistory: 4 })).toBe(false);
+    });
+
+    /*
+     * compact() does not count history when an empty history already folds
+     * (no base, nothing new, threshold 1): that is only sound if a longer
+     * history never brings DELTA back.
+     */
+    it('never prefers delta for a longer history', () => {
+        for (const hasBase of [true, false]) {
+            for (const updateCount of [0, 3]) {
+                for (const historyFoldThreshold of [0, 1, 2, 8, 150]) {
+                    let folded = false;
+                    for (let historyCount = 0; historyCount <= DEFAULTS.MAX_COMPACTION_HISTORY + 1; historyCount++) {
+                        const delta = shouldUseDelta({ hasBase, updateCount, historyCount, historyFoldThreshold });
+                        if (folded) {
+                            expect(delta).toBe(false);
+                        }
+                        folded = folded || !delta;
+                    }
+                }
+            }
+        }
+    });
+});
+
+describe('effectiveFoldThreshold', () => {
+    it('keeps a threshold one fold can reach', () => {
+        expect(effectiveFoldThreshold(1)).toBe(1);
+        expect(effectiveFoldThreshold(8)).toBe(8);
+        expect(effectiveFoldThreshold(DEFAULTS.MAX_COMPACTION_HISTORY + 1)).toBe(DEFAULTS.MAX_COMPACTION_HISTORY + 1);
+    });
+
+    it('caps the threshold at what one compaction can read', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        for (const historyFoldThreshold of [max + 2, 150]) {
+            expect(effectiveFoldThreshold(historyFoldThreshold)).toBe(max + 1);
+        }
+    });
+
+    /*
+     * compact() counts history only up to this value: a count that stops
+     * there must already fold, however long history really is.
+     */
+    it('is a history count at which shouldUseDelta folds', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        for (const historyFoldThreshold of [1, 2, 8, max + 1, max + 2, 150]) {
+            const historyCount = effectiveFoldThreshold(historyFoldThreshold);
+            expect(shouldUseDelta({ hasBase: true, updateCount: 3, historyCount, historyFoldThreshold })).toBe(false);
+        }
+    });
+
+    it('takes the cap from maxHistory when given', () => {
+        expect(effectiveFoldThreshold(8, 4)).toBe(5);
     });
 });
 

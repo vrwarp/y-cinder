@@ -412,6 +412,22 @@ Measured (240 sessions, identical workload): steady-state cycle cost
 compaction CPU 85.7 s → **8.7 s**; total compaction transfer ~990 MB →
 **110 MB**.
 
+The mode choice needs only the NUMBER of history segments, yet compaction
+downloaded every segment, payload included, before choosing: the k-th
+delta after a fold re-read the k segments every client already holds —
+O(k) reads and bytes per cycle, ~T²/2 segment downloads per fold period.
+Delta cycles now count them (`getCountFromServer`, limited to the fold
+threshold: one billed read) and only a fold fetches the payloads it
+merges. Measured by `tests/integration/compaction_history_reads.test.ts`
+(versicle workload, 50 saves per cycle, Firestore's billing model), per
+fold period at the default T=8: delta cycles download 508.5 KB →
+**177.4 KB** and bill 386 → **371** reads (history: 21 segment documents
+/ 331 KB → none; 22 billed reads → 7 count reads); at T=32, 8,859 KB →
+**822 KB** and 2,078 → **1,643** reads. A delta cycle's cost no longer
+depends on how much history exists; the fold pays one extra count read.
+Raising `historyFoldThreshold` still costs cold-start initial sync, which
+downloads the ~T/2 segments history holds on average.
+
 ## Fix 2: the delete-set fingerprint no longer dies of old age
 
 The reconnect fast paths depend on the snapshot's delete-set fingerprint.

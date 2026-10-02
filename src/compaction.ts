@@ -57,6 +57,7 @@ import {
     orderBy,
     getDocs,
     getDoc,
+    getCountFromServer,
     serverTimestamp,
     deleteField,
     limit,
@@ -72,6 +73,7 @@ import {
     buildSnapshotResult,
     deleteSetFitsInline,
     deltaSegmentFitsInline,
+    effectiveFoldThreshold,
     epochOf,
     foldDeleteSetPath,
     foldSnapshotPath,
@@ -224,15 +226,17 @@ export async function compact(
             orderBy('startTime', 'asc'),
             limit(DEFAULTS.MAX_COMPACTION_HISTORY + 1)
         );
-        const historySnaps = await getDocs(historyQ);
+        // Segment payloads are only merged by a fold, so the fold path
+        // fetches them; a delta cycle just counts the segments (STEP 3).
+        // With no update documents there is nothing to delta: fetch them
+        // now, which also detects a cycle with nothing to do.
+        const prefetchedHistory = updatesSnap.empty ? await getDocs(historyQ) : null;
 
-        if (updatesSnap.empty && historySnaps.empty) {
+        if (updatesSnap.empty && prefetchedHistory.empty) {
             return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
         }
 
         const updateDocs = updatesSnap.docs;
-        const historyTruncated = historySnaps.docs.length > DEFAULTS.MAX_COMPACTION_HISTORY;
-        const historyDocs = historySnaps.docs.slice(0, DEFAULTS.MAX_COMPACTION_HISTORY);
 
         // Test hook for simulating concurrent modifications
         if (testHooks?.beforeTransaction) {
@@ -260,7 +264,7 @@ export async function compact(
         // the pointer (see reclaimUpdateBlobs).
         const updateBlobs = new Map<string, string>();
 
-        // Use the data already returned by the queries above. Update and
+        // Use the data already returned by the queries. Update and
         // history documents are immutable (only ever created or deleted),
         // so neither this step nor the commit transaction re-fetches them
         // (see "Deletion" in the module header): that would only double
@@ -309,6 +313,49 @@ export async function compact(
         }));
         const updatesToProcess = updateResults.filter((u): u is { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp } => u !== null);
 
+        // === STEP 3: Choose compaction mode ===
+        //
+        // DELTA (the steady-state cycle on aged documents): merge ONLY the
+        // pending update documents into one history segment. O(new data)
+        // CPU and bandwidth — the multi-MB base snapshot is neither
+        // downloaded nor re-uploaded.
+        //
+        // FOLD (amortized): everything (base + history + updates) merges
+        // into a fresh GC'd snapshot. Runs when history has accumulated to
+        // the fold threshold, when there is no base yet, or when a delta
+        // segment would not fit inline in a Firestore document.
+        //
+        // The choice needs only how many history segments exist, so they
+        // are counted (countHistory), not downloaded: the k-th delta after
+        // a fold would otherwise re-download the k segments every client
+        // already holds. shouldUseDelta only grows stricter as history
+        // grows, so when even an empty history would fold (no base, nothing
+        // new, a threshold of 1) the fold is certain and the count skipped.
+        const modeParams = { hasBase, updateCount: updatesToProcess.length, historyFoldThreshold };
+        const wantDelta = shouldUseDelta({ ...modeParams, historyCount: 0 })
+            && shouldUseDelta({ ...modeParams, historyCount: await countHistory(db, path, historyFoldThreshold) });
+
+        if (wantDelta) {
+            const delta = await tryDeltaCompaction({
+                db,
+                path,
+                uid,
+                updatesToProcess,
+                staleRefs,
+                epoch: currentEpoch,
+            });
+            if (delta !== null) {
+                await reclaimUpdateBlobs(storage, updateBlobs, delta.deletedRefs);
+                return delta.result;
+            }
+            // Segment would not fit inline — fall through to a full fold.
+        }
+
+        // A fold merges the segments themselves, so it needs their payloads.
+        const historySnaps = prefetchedHistory ?? await getDocs(historyQ);
+        const historyTruncated = historySnaps.docs.length > DEFAULTS.MAX_COMPACTION_HISTORY;
+        const historyDocs = historySnaps.docs.slice(0, DEFAULTS.MAX_COMPACTION_HISTORY);
+
         const historyToMerge = historyDocs
             .map((hDoc) => {
                 const data = hDoc.data() as Record<string, any>;
@@ -335,40 +382,6 @@ export async function compact(
                 return { success: true, type: 'none' as const, updatesCompacted: staleRefs.length, historySegmentsMerged: 0 };
             }
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
-        }
-
-        // === STEP 3: Choose compaction mode ===
-        //
-        // DELTA (the steady-state cycle on aged documents): merge ONLY the
-        // pending update documents into one history segment. O(new data)
-        // CPU and bandwidth — the multi-MB base snapshot is neither
-        // downloaded nor re-uploaded.
-        //
-        // FOLD (amortized): everything (base + history + updates) merges
-        // into a fresh GC'd snapshot. Runs when history has accumulated to
-        // the fold threshold, when there is no base yet, or when a delta
-        // segment would not fit inline in a Firestore document.
-        const wantDelta = shouldUseDelta({
-            hasBase,
-            updateCount: updatesToProcess.length,
-            historyCount: historyToMerge.length,
-            historyFoldThreshold,
-        });
-
-        if (wantDelta) {
-            const delta = await tryDeltaCompaction({
-                db,
-                path,
-                uid,
-                updatesToProcess,
-                staleRefs,
-                epoch: currentEpoch,
-            });
-            if (delta !== null) {
-                await reclaimUpdateBlobs(storage, updateBlobs, delta.deletedRefs);
-                return delta.result;
-            }
-            // Segment would not fit inline — fall through to a full fold.
         }
 
         // A fold must merge a per-client prefix of the document: the
@@ -521,6 +534,25 @@ export async function compact(
     } finally {
         await releaseLock({ db, path, uid });
     }
+}
+
+/**
+ * Counts history segments for the DELTA/FOLD choice without downloading
+ * them. The count stops at the effective fold threshold (every count from
+ * there on folds), so it bills one read however long history is.
+ *
+ * It counts what the fold's history query reads, stale-epoch segments
+ * included: a fold that comes sooner for them is still correct, and it
+ * deletes them. Only the lock holder creates or deletes segments, so the
+ * count holds until this cycle's transaction.
+ */
+async function countHistory(db: Firestore, path: string, historyFoldThreshold: number): Promise<number> {
+    const snap = await getCountFromServer(query(
+        collection(db, path, FIRESTORE_PATHS.HISTORY),
+        orderBy('startTime', 'asc'),
+        limit(effectiveFoldThreshold(historyFoldThreshold))
+    ));
+    return snap.data().count;
 }
 
 /**

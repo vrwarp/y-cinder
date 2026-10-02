@@ -199,6 +199,14 @@ export class FireProvider extends ObservableV2<any> {
    * (see initialSyncSaveHold).
    */
   private _initialSyncInFlight = false;
+  /**
+   * Resolves once local persistence has loaded into the doc, failed to,
+   * or timed out (see FireProviderConfig.localReady). Bounded once for
+   * the provider's lifetime, so retried syncs do not wait again.
+   */
+  private _localReady: Promise<void> | undefined;
+  /** Ends the _localReady wait early (on destroy) */
+  private _endLocalReadyWait: (() => void) | null = null;
 
   /**
    * Creates a new FireProvider instance.
@@ -273,6 +281,11 @@ export class FireProvider extends ObservableV2<any> {
     this.compactionLimit = compactionLimit;
     this.persistence = config.persistence;
     this._testHooks = testHooks;
+    // Bounded from construction on: the initial-sync reads overlap with
+    // the load it waits for
+    if (config.localReady) {
+      this._localReady = this._boundLocalReady(config.localReady);
+    }
 
     // The document knows which epoch it belongs to (stamped by squash);
     // fresh documents are epoch 0 until initial sync reports otherwise.
@@ -618,6 +631,10 @@ export class FireProvider extends ObservableV2<any> {
       this._syncRetryTimerId = null;
     }
 
+    // An initial sync waiting for local persistence returns now (it
+    // re-checks isDestroyed) instead of when the timeout fires
+    this._endLocalReadyWait?.();
+
     // Clear all listeners
     this._unsubscribers.forEach(unsub => unsub());
     this._unsubscribers = [];
@@ -709,6 +726,31 @@ export class FireProvider extends ObservableV2<any> {
   // --- Private Methods ---
 
   /**
+   * Bounds the wait for local persistence (FireProviderConfig.localReady).
+   * y-idb's whenSynced never rejects, and never settles if the persistence
+   * is destroyed first, so the wait also ends after
+   * LOCAL_READY_TIMEOUT_MS or on destroy. It always resolves: a failed or
+   * timed-out load leaves sync exactly as it is without the option.
+   */
+  private _boundLocalReady(localReady: Promise<unknown>): Promise<void> {
+    let timerId: ReturnType<typeof setTimeout> | undefined;
+    return new Promise<void>(resolve => {
+      this._endLocalReadyWait = resolve;
+      timerId = setTimeout(() => {
+        console.warn(`Local persistence not ready after ${DEFAULTS.LOCAL_READY_TIMEOUT_MS}ms, syncing without it`);
+        resolve();
+      }, DEFAULTS.LOCAL_READY_TIMEOUT_MS);
+      Promise.resolve(localReady).then(() => resolve(), (err) => {
+        console.warn("Local persistence failed to load, syncing without it:", err);
+        resolve();
+      });
+    }).finally(() => {
+      clearTimeout(timerId);
+      this._endLocalReadyWait = null;
+    });
+  }
+
+  /**
    * Performs initial synchronization and sets up real-time listener.
    * 
    * P0.7 NOTE: The sync algorithm uses eventual consistency.
@@ -747,6 +789,7 @@ export class FireProvider extends ObservableV2<any> {
       onLocalStateCaptured: () => {
         captured = { buffer: this._pendingUpdates, count: this._pendingUpdates.length };
       },
+      localReady: this._localReady,
     };
 
     try {

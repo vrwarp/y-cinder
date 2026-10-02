@@ -723,9 +723,8 @@ them, already or inside the push) and emits `'saved'` for them. A save
 that comes due while initial sync runs waits for it, but never past
 `maxAggregationTime` from the first buffered update
 (`initialSyncSaveHold`), so a stalled sync (offline, its push never
-acknowledged) cannot keep edits out of the SDK's write queue. The
-clock-skew probe does not hold saves. Entries buffered after the capture
-are saved normally, a failed attempt drops nothing, and a save that
+acknowledged) cannot keep edits out of the SDK's write queue. Entries
+buffered after the capture are saved normally, a failed attempt drops nothing, and a save that
 started since the capture keeps its batch (a harmless duplicate at worst).
 The `destroy()`, unload and `squash()` flushes are unchanged.
 
@@ -748,9 +747,63 @@ full apply of the metadata-less echo costs 57 / 98 / 187 ms at 60 / 120 /
 240 sessions on every online peer, every cold start, and the cold-start
 client's save-path metadata walk 22 / 45 / 75 ms.
 
-Two cases still upload the hydrated document: hydration that lands after
+One case still uploads the hydrated document: hydration that lands after
 initial sync has read the local doc (its update is indistinguishable from
-offline edits the server lacks, and filtering by origin would lose those),
-and a save that comes due during the clock-skew probe. Constructing the
-provider after local persistence has loaded (y-idb `whenSynced`)
-avoids both.
+offline edits the server lacks, and filtering by origin would lose those).
+Constructing the provider after local persistence has loaded (y-idb
+`whenSynced`), or passing `localReady` (next section), avoids it. (A save
+that came due during the clock-skew probe used to be a second case; the
+probe is no longer on the startup path.)
+
+## Cold start: local persistence loading after the provider
+
+versicle builds a fresh `Y.Doc` and its providers on every page load,
+before y-idb has loaded the stored state. `performInitialSync` decided
+whether to download the Storage snapshot (`localCoversSnapshot`) right
+after its main-doc read, so when IndexedDB delivered later than those 3-5
+serial round trips, the still-empty doc did not cover the snapshot and the
+whole blob was downloaded: O(snapshot), for a document the device already
+held in full. Either initial sync then applied it and y-idb's load decoded
+everything again for nothing (fast links), or the load landed mid-download
+and the download alone was wasted. The same race let old-epoch local state
+past the epoch fence: the new epoch's snapshot was applied on top of it
+(duplicated content) and the old-epoch structs were pushed tagged with the
+new epoch.
+
+`localReady` (y-idb: `whenSynced`) closes the race. Initial sync still
+issues its reads while the load runs, then awaits it after the main-doc
+read and before the epoch fence, the snapshot decision and the push. The
+wait is bounded once per provider (`LOCAL_READY_TIMEOUT_MS`, 10 s; a
+rejection or `destroy()` also ends it, and retried syncs reuse it), so a
+load that never reports back leaves sync exactly as it is without the
+option. Constructing the provider after `whenSynced` remains the simplest
+ordering and needs no option.
+
+Measured with `tests/integration/hydration_race_snapshot_download.test.ts`
+(emulator, versicle doc aged 100 sessions, 1,515,332 B snapshot; two
+interleaved invocations per side, medians of 5 runs each):
+
+| cold start (provider constructed first) | snapshot downloaded | synced at |
+| --- | ---: | ---: |
+| load lands right after the main-doc read, 25 / 100 sessions | 408,884 / 1,515,332 B → **0** | |
+| 25 ms per op, 50 Mbit/s, load at 150 ms, no skew probe | 1,515,332 B → **0** | 565 / 532 → 305 / 313 ms |
+| same, load at 400 ms, with skew probe | 1,515,332 B → **0** | 726 / 736 → 541 / 548 ms |
+| same, load at 400 ms, no skew probe | 1,515,332 B → **0** | 699 / 654 → 574 / 543 ms |
+| load at 400 ms, Storage unthrottled | 1,515,332 B → **0** | 433 / 433 → 539 / 573 ms |
+
+In the last row the unfixed provider finished the download before the
+load landed, so it also paid a redundant 59 / 72 ms decode (→ 0); with the
+option, sync completes later because it waits for the load. How often the
+race is lost depends on when IndexedDB delivers the rows, not on total
+hydration time (y-idb applies them in one synchronous transaction): a few
+ms in fake-indexeddb, typically tens of ms in browsers, against 3-5
+Firestore round trips plus connection setup, so hydration usually wins
+already. Slow IndexedDB (WebKit/Android, cold profiles), serialized
+hydrations, or a y-idb instance created after an await lose it; each such
+cold start no longer downloads O(snapshot) (about 3.5 MB at 240 sessions).
+With `localReady`, the load's own `'update'` event always reaches the
+provider's save buffer as a local edit (the load now lands before initial
+sync applies anything); without it, that happened whenever the load won
+the race. Initial sync captures the buffer only after the wait, so a
+successful sync retires that update with the rest of the buffer (previous
+section) instead of uploading the document again.

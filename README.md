@@ -100,6 +100,18 @@ const provider = new FireProvider({
 // provider.destroy();
 ```
 
+### Local persistence (y-indexeddb / y-idb)
+
+The simplest correct ordering is to construct the provider once local persistence has loaded the document:
+
+```typescript
+const persistence = new IndexeddbPersistence("my-doc", ydoc);
+await persistence.whenSynced;
+const provider = new FireProvider({ firebaseApp, ydoc, path: "documents/my-doc" });
+```
+
+Initial sync then compares the server with the loaded state, and the provider never sees the load as a local edit. If the provider must be constructed first, pass `localReady: persistence.whenSynced`: initial sync still reads the server meanwhile, but waits for the load before comparing. Without it, a load that lands after initial sync has read the main document makes it download the whole Storage snapshot the device already holds, and lets old-epoch local state slip past the epoch fence (the new epoch's content is applied on top of it, duplicating it). On a fast connection, initial sync can complete slightly later with `localReady`, since it waits for the load.
+
 ## Configuration
 
 The `FireProvider` constructor accepts the following configuration options:
@@ -115,6 +127,7 @@ The `FireProvider` constructor accepts the following configuration options:
 | `gcCompaction` | `boolean` | No | `true` | Garbage-collect deleted content when compacting snapshots. Keeps long-lived documents proportional to live content instead of total historical churn. See [docs/performance.md](docs/performance.md). |
 | `historyFoldThreshold` | `number` | No | `8` | History segments accumulated before compaction folds everything into the base snapshot. Between folds, compaction runs in cheap **delta mode** (pending updates → one history segment, `O(new data)`) instead of downloading/re-merging/re-uploading the whole snapshot every `maxUpdatesThreshold` updates. `1` restores the old always-fold behavior. Values above `100` behave like `100`: one fold merges at most 99 history segments (Firestore's 500-write transaction limit). |
 | `subdocLoadingMode` | `'eager' \| 'lazy'` | No | `'eager'` | `'lazy'` defers syncing remote subdocuments until `subdoc.load()` is called (Yjs convention), avoiding N initial syncs + 3N listeners at startup for documents with many subdocs. |
+| `localReady` | `Promise<unknown>` | No | - | Settles once local persistence has loaded `ydoc` (y-indexeddb / y-idb: `persistence.whenSynced`). Initial sync waits for it before comparing the local doc with the server; see [Local persistence](#local-persistence-y-indexeddb--y-idb). A rejection, or no settlement within 10 seconds, lets sync proceed without it. Not passed on to subdocument providers. |
 
 ### API Methods
 

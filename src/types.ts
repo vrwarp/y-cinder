@@ -135,6 +135,18 @@ export interface FireProviderConfig {
      */
     cachedClockOffset?: number;
     /**
+     * Settles once local persistence has loaded the stored state into
+     * `ydoc` (y-indexeddb / y-idb: `persistence.whenSynced`). Pass it when
+     * the provider is constructed before that load completes: initial sync
+     * still reads the server meanwhile, but waits for it before comparing
+     * the local doc with the server. A doc that is still empty there
+     * downloads the whole Storage snapshot local persistence is about to
+     * load anyway, and old-epoch local state slips past the epoch fence.
+     * A rejection, or no settlement within 10 seconds, lets sync proceed
+     * without it. Not passed on to subdocument providers.
+     */
+    localReady?: Promise<unknown>;
+    /**
      * Test hooks for dependency injection.
      * @internal
      */
@@ -216,6 +228,12 @@ export const DEFAULTS = {
      * SDK and are sent on reconnect, so destroy() settles anyway.
      */
     DESTROY_FLUSH_TIMEOUT_MS: 5_000,
+    /**
+     * How long initial sync waits for `localReady`. y-idb's whenSynced
+     * never rejects, and never settles if the persistence is destroyed
+     * first; past this, sync proceeds as if the option were absent.
+     */
+    LOCAL_READY_TIMEOUT_MS: 10_000,
     /**
      * Caps on documents deleted per compaction transaction. Firestore
      * transactions allow at most 500 writes; updates + history + 1 snapshot

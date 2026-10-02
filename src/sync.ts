@@ -158,6 +158,13 @@ export interface SyncContext {
      * instead of saving them a second time.
      */
     onLocalStateCaptured?: () => void;
+    /**
+     * Resolves once local persistence has loaded into the doc (bounded by
+     * the provider; never rejects — see FireProviderConfig.localReady).
+     * Initial sync awaits it after its server reads, before anything
+     * compares the local doc with the server.
+     */
+    localReady?: Promise<void>;
 }
 
 /**
@@ -383,6 +390,16 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         const mainSnap = await getDoc(mainRef);
         requireServerRead(mainSnap);
         if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+
+        // Local persistence may still be loading into the doc (provider
+        // constructed first); the reads above overlapped with it. Wait for
+        // it before anything below compares the doc with the server: a
+        // still-empty doc would slip past the epoch fence and download the
+        // Storage snapshot that local persistence is about to load.
+        if (ctx.localReady) {
+            await ctx.localReady;
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+        }
 
         let snapshotVersion: number | null = null;
         let serverEpoch = 0;

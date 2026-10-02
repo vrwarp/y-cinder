@@ -884,6 +884,47 @@ for the 3.31 MB snapshot (median of 5 runs, 199-224 ms), in the worker,
 next to a 424-451 ms fold merge. The inline Firestore fields
 (fingerprint, history segments) stay raw V1.
 
+## Fix 12: a second device online no longer undoes delta compaction
+
+Every online client's update listener triggers on the same threshold
+crossing, and their lock transactions race. The Firestore SDK retries the
+loser's transaction after ~1 s; when the winner's compaction was shorter,
+the retry finds the lock free and compacts whatever is left, with no
+minimum. With nothing left (the usual shape for a reader, who pauses
+after a crossing) `shouldUseDelta` needs updates, so the late winner
+FOLDED base + history into a new snapshot: O(snapshot) download, merge
+and upload plus a new version for every client, for zero updates, on
+every crossing where the race lands that way. A few leftovers instead
+became a tiny segment that used up a fold slot.
+
+Threshold-triggered compactions now carry a minimum batch
+(`CompactionContext.minUpdates`, half of `maxUpdatesThreshold`, clamped
+to what one cycle reads and to the realtime hard cap). A cycle that finds
+fewer update documents (raw count, stale-epoch ones included) and no fold
+due releases the lock right after its queries — the updates, plus the
+history count (one billed read; the history query itself when there are
+no update documents) — before the main document read
+(`shouldDeferCompaction`); the leftovers join the next crossing. Manual `compact()` and the squash pre-fold pass no minimum and
+still drain everything.
+
+Measured in `tests/integration/multi_client_mini_compactions.test.ts`
+(two devices with their own Firestore clients, threshold 10, 50 KB base
+snapshot, 4 crossings, the peer's lock forced to land after the writer's
+release; counts identical across 5 interleaved runs per side):
+
+| peer finds | folds | segments (tiny) | reads | writes | deletes | Storage bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 leftovers, before | 4 | 4 (0) | 140 | 16 | 56 | 403,310 |
+| 0 leftovers, after | **0** | 4 (0) | 133 | 12 | 52 | **0** |
+| 3 leftovers, before | 1 | 7 (3) | 181 | 16 | 71 | 100,952 |
+| 3 leftovers, after | **0** | **4 (0)** | 141 | 12 | 52 | **0** |
+
+Each late attempt now costs its lock round trip and the two queries
+(5-8 reads, 1 write, 1 delete) instead of a fold, which on the 3.31 MB
+aged document costs ~6.6 MB of Storage transfer and ~630 ms of merge CPU
+(the table at the top of this section). History keeps the single-writer
+cadence of one segment per crossing.
+
 ## The remaining floor: epoch squash
 
 Everything above bounds the *per-cycle* costs, but the floor itself —

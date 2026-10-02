@@ -182,6 +182,48 @@ export function shouldFoldWithoutUpdates(params: {
 }
 
 /**
+ * Whether a threshold-triggered compaction should leave the cycle it just
+ * locked to a later trigger.
+ *
+ * Every online client's update listener triggers on the same threshold
+ * crossing. A client whose lock attempt lands after the winner released
+ * the lock (the SDK retries a contended transaction after ~1 s; a
+ * throttled tab sees the crossing late) finds only what arrived since.
+ * Compacting that writes a tiny history segment that uses up a fold slot
+ * — or, with nothing pending, folds base + history into a new snapshot
+ * for zero updates: O(snapshot) transfer and a new version for every
+ * client. Below `minUpdates` such a cycle is skipped unless a fold is due
+ * anyway (the same test as shouldUseDelta, which also rules out truncated
+ * history). Skipping only defers: the leftovers join the next crossing.
+ *
+ * `updateCount` is the raw number of update documents read, stale-epoch
+ * and unusable ones included: the trigger counts them too, and deferring
+ * their cleanup would keep every client triggering futile cycles. The
+ * minimum is clamped to what one cycle reads and to the realtime hard
+ * cap, so a large `maxUpdatesThreshold` can never starve compaction.
+ * Manual and squash compactions pass 0 and always drain.
+ *
+ * @param params - The minimum, the raw counts read, the per-cycle update
+ * read limit, the fold threshold and the per-cycle history cap.
+ * @returns true to release the lock without compacting.
+ */
+export function shouldDeferCompaction(params: {
+    minUpdates: number;
+    updateCount: number;
+    updateLimit: number;
+    historyCount: number;
+    historyFoldThreshold: number;
+    maxHistory?: number;
+    hardCap?: number;
+}): boolean {
+    const { minUpdates, updateCount, updateLimit, historyCount, historyFoldThreshold, maxHistory = DEFAULTS.MAX_COMPACTION_HISTORY, hardCap = DEFAULTS.REALTIME_LIMIT } = params;
+    const foldThreshold = Math.min(historyFoldThreshold, maxHistory + 1);
+
+    return updateCount < Math.min(minUpdates, updateLimit, hardCap)
+        && historyCount + 1 < foldThreshold;
+}
+
+/**
  * Whether a Firestore failure is worth another attempt.
  *
  * Only contention and transport failures are; anything else (permission

@@ -83,6 +83,7 @@ import {
     planHistoryDoc,
     planUpdateDoc,
     readMainDocState,
+    shouldDeferCompaction,
     shouldFoldWithoutUpdates,
     shouldPublishFoldTail,
     shouldRetryCompaction,
@@ -142,6 +143,13 @@ export interface CompactionContext {
      * deletes them all; should it fail, the next cycle folds).
      */
     beforeSquash?: boolean;
+    /**
+     * Smallest update backlog worth a cycle, set by the update listener's
+     * threshold trigger: fewer pending updates are left for the next
+     * crossing unless a fold is due (see shouldDeferCompaction). Defaults
+     * to 0, which drains everything (manual and squash compactions).
+     */
+    minUpdates?: number;
     /**
      * Test seam: inline cap for the delete-set fingerprint field.
      * Defaults to DEFAULTS.MAX_DELETE_SET_FIELD_BYTES.
@@ -222,10 +230,11 @@ export async function compact(
         // Limits are clamped so deletes (updates + history) plus the snapshot
         // write stay within Firestore's 500-op transaction budget. Anything
         // left over is picked up by the next compaction cycle.
+        const updateLimit = Math.min(compactionLimit, DEFAULTS.MAX_COMPACTION_UPDATES);
         const updatesQ = query(
             collection(db, path, FIRESTORE_PATHS.UPDATES),
             orderBy('createdAt', 'asc'),
-            limit(Math.min(compactionLimit, DEFAULTS.MAX_COMPACTION_UPDATES))
+            limit(updateLimit)
         );
         const updatesSnap = await getDocs(updatesQ);
 
@@ -241,6 +250,27 @@ export async function compact(
         // With no update documents there is nothing to delta: fetch them
         // now, which also detects a cycle with nothing to do.
         const prefetchedHistory = updatesSnap.empty ? await getDocs(historyQ) : null;
+
+        // The number of history segments, for the decisions that need only
+        // that: from the prefetched payloads when there are any, otherwise
+        // counted (countHistory, one billed read) at most once per cycle.
+        let historyCountRead: Promise<number> | null = null;
+        const historyCount = (): Promise<number> => historyCountRead ??= prefetchedHistory
+            ? Promise.resolve(prefetchedHistory.size)
+            : countHistory(db, path, historyFoldThreshold);
+
+        // A threshold-triggered cycle that lost the crossing to another
+        // client finds only its leftovers. Skip before the main-document
+        // read: with no updates the code below would fold base + history
+        // (shouldUseDelta needs updates), and a few would make a tiny
+        // segment that brings the next fold closer. A longer history only
+        // makes deferring less likely, so history is counted only when an
+        // empty one would defer.
+        const deferParams = { minUpdates: ctx.minUpdates ?? 0, updateCount: updatesSnap.size, updateLimit, historyFoldThreshold };
+        if (shouldDeferCompaction({ ...deferParams, historyCount: 0 })
+            && shouldDeferCompaction({ ...deferParams, historyCount: await historyCount() })) {
+            return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
+        }
 
         if (updatesSnap.empty && prefetchedHistory.empty) {
             return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
@@ -343,7 +373,7 @@ export async function compact(
         // new, a threshold of 1) the fold is certain and the count skipped.
         const modeParams = { hasBase, updateCount: updatesToProcess.length, historyFoldThreshold };
         const wantDelta = shouldUseDelta({ ...modeParams, historyCount: 0 })
-            && shouldUseDelta({ ...modeParams, historyCount: await countHistory(db, path, historyFoldThreshold) });
+            && shouldUseDelta({ ...modeParams, historyCount: await historyCount() });
 
         if (wantDelta) {
             const delta = await tryDeltaCompaction({

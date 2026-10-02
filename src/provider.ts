@@ -358,10 +358,12 @@ export class FireProvider extends ObservableV2<any> {
    * (see the 'compaction-failed' event).
    * 
    * @param attempt - Internal retry counter (do not set manually)
+   * @param minUpdates - Internal: smallest backlog worth compacting, set by
+   *   the threshold trigger (do not set manually; 0 drains everything)
    * @throws {Error} If locking fails or Firestore operations error
    */
-  compact(attempt: number = 1): Promise<void> {
-    return this._compact(attempt, false);
+  compact(attempt: number = 1, minUpdates: number = 0): Promise<void> {
+    return this._compact(attempt, false, minUpdates);
   }
 
   /**
@@ -369,15 +371,17 @@ export class FireProvider extends ObservableV2<any> {
    *
    * @param beforeSquash - Run as squash()'s preparatory cycle (see
    *   CompactionContext.beforeSquash)
+   * @param minUpdates - Smallest backlog worth compacting (see
+   *   CompactionContext.minUpdates; 0 drains everything)
    */
-  private _compact(attempt: number, beforeSquash: boolean): Promise<void> {
+  private _compact(attempt: number, beforeSquash: boolean, minUpdates: number = 0): Promise<void> {
     // Prevent concurrent compaction from same instance, and never start
     // while a squash holds the lock (see _inflightCompaction)
     if ((this._inflightCompaction || this._inflightSquash) && attempt === 1) {
       return Promise.resolve();
     }
 
-    this._inflightCompaction = this._executeCompaction(attempt, beforeSquash).finally(() => {
+    this._inflightCompaction = this._executeCompaction(attempt, beforeSquash, minUpdates).finally(() => {
       this._inflightCompaction = null;
     });
     return this._inflightCompaction;
@@ -398,7 +402,20 @@ export class FireProvider extends ObservableV2<any> {
     return this._cachedClockOffset;
   }
 
-  private async _executeCompaction(attempt: number, beforeSquash: boolean): Promise<void> {
+  /**
+   * Compaction requested by the update listener's threshold trigger.
+   *
+   * Every online client's listener fires on the same crossing, and a
+   * client whose lock attempt lands after the winner's finds only the
+   * leftovers. Triggered cycles therefore act on at least half a
+   * threshold's worth of updates, or when a fold is due; smaller
+   * leftovers wait for the next crossing (see shouldDeferCompaction).
+   */
+  private _compactOnTrigger(): Promise<void> {
+    return this.compact(1, Math.ceil(this.maxUpdatesThreshold / 2));
+  }
+
+  private async _executeCompaction(attempt: number, beforeSquash: boolean, minUpdates: number): Promise<void> {
     // acquireLock needs the measured offset: given none, it would measure
     // again on every call. Only the first compaction waits for it, before
     // the history listener is paused.
@@ -421,6 +438,7 @@ export class FireProvider extends ObservableV2<any> {
       gc: this.gcCompaction,
       historyFoldThreshold: this.historyFoldThreshold,
       beforeSquash,
+      minUpdates,
     };
 
     // FIX: Pause history listener during compaction to avoid contention/deadlock in emulator
@@ -445,7 +463,7 @@ export class FireProvider extends ObservableV2<any> {
           doc: this.doc,
           uid: this.uid,
           maxUpdatesThreshold: this.maxUpdatesThreshold,
-          onCompactionNeeded: () => this.compact(),
+          onCompactionNeeded: () => this._compactOnTrigger(),
           getCompactionBackoffUntil: () => this._compactionBackoffUntil,
           onCompactionProgress: () => this._endCompactionBackoff(),
           isDestroyed: () => this._isDestroyed,
@@ -837,7 +855,7 @@ export class FireProvider extends ObservableV2<any> {
       doc: this.doc,
       uid: this.uid,
       maxUpdatesThreshold: this.maxUpdatesThreshold,
-      onCompactionNeeded: () => this.compact(),
+      onCompactionNeeded: () => this._compactOnTrigger(),
       getCompactionBackoffUntil: () => this._compactionBackoffUntil,
       onCompactionProgress: () => this._endCompactionBackoff(),
       isDestroyed: () => this._isDestroyed,

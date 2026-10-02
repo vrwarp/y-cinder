@@ -29,6 +29,7 @@ import {
     planHistoryDoc,
     planUpdateDoc,
     readMainDocState,
+    shouldDeferCompaction,
     shouldFoldWithoutUpdates,
     shouldPublishFoldTail,
     shouldRetryCompaction,
@@ -321,6 +322,76 @@ describe('shouldFoldWithoutUpdates', () => {
     it('takes the cap from maxHistory when given', () => {
         expect(shouldFoldWithoutUpdates({ ...base, historyCount: 3, historyFoldThreshold: 8, maxHistory: 4 })).toBe(false);
         expect(shouldFoldWithoutUpdates({ ...base, historyCount: 4, historyFoldThreshold: 8, maxHistory: 4 })).toBe(true);
+    });
+});
+
+describe('shouldDeferCompaction', () => {
+    // A triggered cycle (threshold 10 -> minimum 5) that lost the crossing.
+    const base = { minUpdates: 5, updateCount: 3, updateLimit: 200, historyCount: 1, historyFoldThreshold: 8 };
+
+    it('defers a few leftover updates instead of writing a tiny segment', () => {
+        expect(shouldDeferCompaction(base)).toBe(true);
+    });
+
+    /*
+     * The costly case: with no updates shouldUseDelta folds, so a late
+     * lock winner would rebuild the snapshot from base + history for
+     * nothing new.
+     */
+    it('defers when nothing is pending rather than folding history early', () => {
+        expect(shouldDeferCompaction({ ...base, updateCount: 0 })).toBe(true);
+    });
+
+    it('runs once the minimum is reached', () => {
+        expect(shouldDeferCompaction({ ...base, updateCount: 4 })).toBe(true);
+        expect(shouldDeferCompaction({ ...base, updateCount: 5 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, updateCount: 6 })).toBe(false);
+    });
+
+    it('never defers manual or squash compactions, which pass no minimum', () => {
+        expect(shouldDeferCompaction({ ...base, minUpdates: 0, updateCount: 0 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, minUpdates: 0, updateCount: 0, historyCount: 0 })).toBe(false);
+    });
+
+    /*
+     * Same boundary as shouldUseDelta: once the segment this cycle would
+     * add reaches the threshold, the fold is due on cadence and runs.
+     */
+    it('runs when a fold is due', () => {
+        expect(shouldDeferCompaction({ ...base, historyCount: 6 })).toBe(true);
+        expect(shouldDeferCompaction({ ...base, historyCount: 7 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, historyCount: 8 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, updateCount: 0, historyCount: 7 })).toBe(false);
+    });
+
+    it('never defers in always-fold mode', () => {
+        expect(shouldDeferCompaction({ ...base, historyCount: 0, historyFoldThreshold: 1 })).toBe(false);
+    });
+
+    it('runs when history extends past what one cycle reads', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        expect(shouldDeferCompaction({ ...base, historyCount: max + 1, historyFoldThreshold: 150 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, historyCount: max - 1, historyFoldThreshold: 150 })).toBe(true);
+        expect(shouldDeferCompaction({ ...base, historyCount: 3, historyFoldThreshold: 8, maxHistory: 3 })).toBe(false);
+    });
+
+    /*
+     * A threshold far above the per-cycle read limit would otherwise ask
+     * for more updates than a cycle can ever see, deferring every trigger
+     * while the updates collection grows without bound.
+     */
+    it('clamps the minimum to what one cycle reads', () => {
+        const triggered = { ...base, minUpdates: 500, updateLimit: 150 };
+        expect(shouldDeferCompaction({ ...triggered, updateCount: 150 })).toBe(false);
+        expect(shouldDeferCompaction({ ...triggered, updateCount: 149 })).toBe(true);
+    });
+
+    it('clamps the minimum to the realtime hard cap', () => {
+        const triggered = { ...base, minUpdates: 300, updateLimit: 400 };
+        expect(shouldDeferCompaction({ ...triggered, updateCount: DEFAULTS.REALTIME_LIMIT })).toBe(false);
+        expect(shouldDeferCompaction({ ...triggered, updateCount: DEFAULTS.REALTIME_LIMIT - 1 })).toBe(true);
+        expect(shouldDeferCompaction({ ...triggered, updateCount: 20, hardCap: 20 })).toBe(false);
+        expect(shouldDeferCompaction({ ...triggered, updateCount: 19, hardCap: 20 })).toBe(true);
     });
 });
 

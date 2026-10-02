@@ -37,6 +37,14 @@ export interface MainDocState {
     baseStoragePath: string | null;
     /** Cloud Storage path of the base's offloaded delete-set fingerprint. */
     baseDeleteSetStoragePath: string | null;
+    /**
+     * Cloud Storage path of the tail published by the fold that wrote the
+     * base. Read whatever version it is bound to: a stale one left behind
+     * by an older client is still a blob to garbage-collect.
+     */
+    baseFoldTailStoragePath: string | null;
+    /** The base snapshot's base64 state vector, when the document has one. */
+    baseStateVector: string | null;
     /** Legacy inline snapshot content, when the base is still inline. */
     baseInline: unknown | null;
     /** Snapshot version, used for optimistic concurrency. */
@@ -60,6 +68,8 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
         hasBase: false,
         baseStoragePath: null,
         baseDeleteSetStoragePath: null,
+        baseFoldTailStoragePath: null,
+        baseStateVector: null,
         baseInline: null,
         currentVersion: 0,
         currentEpoch: 0,
@@ -78,6 +88,12 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
     }
     if (data.deleteSetStoragePath) {
         state.baseDeleteSetStoragePath = data.deleteSetStoragePath;
+    }
+    if (typeof data.foldTailStoragePath === 'string') {
+        state.baseFoldTailStoragePath = data.foldTailStoragePath;
+    }
+    if (typeof data.stateVector === 'string') {
+        state.baseStateVector = data.stateVector;
     }
     if (typeof data.version === 'number') {
         state.currentVersion = data.version;
@@ -378,15 +394,19 @@ export function buildSnapshotResult(params: {
  * replaced. A path the fold itself just wrote is never returned: deleting
  * it would destroy the live snapshot.
  *
+ * The previous fold's tail goes too: the committed fold replaced (or
+ * cleared) the pointer to it, and a tail only ever describes the snapshot
+ * it was published with.
+ *
  * @param previous - The main document state read before the fold.
  * @param written - The Storage paths the fold committed.
  * @returns The paths to delete.
  */
 export function blobsReplacedByFold(
-    previous: Pick<MainDocState, 'baseStoragePath' | 'baseDeleteSetStoragePath'>,
+    previous: Pick<MainDocState, 'baseStoragePath' | 'baseDeleteSetStoragePath' | 'baseFoldTailStoragePath'>,
     written: (string | null)[],
 ): string[] {
-    return [previous.baseStoragePath, previous.baseDeleteSetStoragePath]
+    return [previous.baseStoragePath, previous.baseDeleteSetStoragePath, previous.baseFoldTailStoragePath]
         .filter((p): p is string => p !== null && !written.includes(p));
 }
 
@@ -430,4 +450,74 @@ export function foldSnapshotPath(basePath: string, version: number, attemptId: s
  */
 export function foldDeleteSetPath(basePath: string, version: number, attemptId: string): string {
     return `${basePath}/ds_v${version}_${attemptId}.bin`;
+}
+
+/**
+ * The Cloud Storage path for a fold's tail. Attempt-unique for the same
+ * reason as foldSnapshotPath.
+ *
+ * @param basePath - The document's base path.
+ * @param version - The version the fold will commit.
+ * @param attemptId - Unique to this compaction attempt.
+ * @returns The storage object path.
+ */
+export function foldTailPath(basePath: string, version: number, attemptId: string): string {
+    return `${basePath}/tail_v${version}_${attemptId}.bin`;
+}
+
+/**
+ * The base clocks a fold's tail is published with: the replaced snapshot's
+ * state vector, restricted to the clients the tail touches (0 for a client
+ * the base never saw).
+ *
+ * A reader that holds the replaced snapshot lacks only the tail, but the
+ * full vector is O(every client ever seen) and shares the main document's
+ * size budget with the new one. The restriction loses nothing: a client
+ * the tail does not touch has the same clock in both snapshots, so "covers
+ * the new snapshot wherever it is behind, and every client it is behind on
+ * is listed here at a clock it covers" is exactly "covers the replaced
+ * snapshot".
+ *
+ * @param baseSV - The replaced snapshot's state vector.
+ * @param tailSV - The tail's state vector (clock ends per client).
+ * @returns client -> base clock, for every client in the tail.
+ */
+export function foldTailBaseClocks(baseSV: Map<number, number>, tailSV: Map<number, number>): Map<number, number> {
+    const clocks = new Map<number, number>();
+    for (const client of tailSV.keys()) {
+        clocks.set(client, baseSV.get(client) ?? 0);
+    }
+    return clocks;
+}
+
+/**
+ * Whether a fold should publish its tail beside the new snapshot.
+ *
+ * The tail is un-GC'd, so early in a document's life it can be nearly the
+ * size of the snapshot (the first fold over a small base) — a reader would
+ * gain little, and pay for both when the tail does not suffice. Publish it
+ * only when it is at most half the snapshot.
+ *
+ * Its base clocks are stored on the main document, which already carries
+ * the state vector and possibly the inline delete-set fingerprint (see
+ * deleteSetFitsInline). The tail is the optional one: when its fields do
+ * not fit in the room those two leave, the fold publishes none.
+ *
+ * @param params - Tail and snapshot sizes, the length of the tail's main
+ * document fields, the state vector and inline fingerprint they share the
+ * budget with, and the inline payload ceiling.
+ * @returns true to publish the tail.
+ */
+export function shouldPublishFoldTail(params: {
+    tailBytes: number;
+    snapshotBytes: number;
+    tailFieldsLength: number;
+    stateVectorB64Length: number;
+    inlineDeleteSetBytes: number;
+    inlineLimit: number;
+}): boolean {
+    const { tailBytes, snapshotBytes, tailFieldsLength, stateVectorB64Length, inlineDeleteSetBytes, inlineLimit } = params;
+
+    return tailBytes * 2 <= snapshotBytes
+        && tailFieldsLength + stateVectorB64Length + inlineDeleteSetBytes <= inlineLimit;
 }

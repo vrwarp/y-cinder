@@ -393,6 +393,10 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
                 // A squashed document has no deletions yet
                 deleteSet: Bytes.fromUint8Array(dsUpdate),
                 deleteSetStoragePath: deleteField(),
+                // A fold's tail belongs to the old epoch's id space
+                foldTailStoragePath: deleteField(),
+                foldTailBaseClocks: deleteField(),
+                foldTailVersion: deleteField(),
                 version: nextVersion,
                 epoch: newEpoch,
                 updatedAt: serverTimestamp(),
@@ -418,6 +422,11 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         if (result.success && typeof mainData?.deleteSetStoragePath === 'string') {
             try {
                 await deleteObject(ref(storage, mainData.deleteSetStoragePath));
+            } catch { /* orphaned blob is harmless */ }
+        }
+        if (result.success && typeof mainData?.foldTailStoragePath === 'string') {
+            try {
+                await deleteObject(ref(storage, mainData.foldTailStoragePath));
             } catch { /* orphaned blob is harmless */ }
         }
 

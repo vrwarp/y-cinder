@@ -64,6 +64,7 @@ import {
     PendingUpdate,
     collectServerBlobs,
     ensureDecodedSV,
+    foldTailMayCatchUp,
     localCoversSnapshot,
     processSnapshotMetadata,
     buildServerCoverage,
@@ -422,6 +423,16 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
 
                 // Fetch snapshot from Cloud Storage if available
                 if (data.snapshotStoragePath) {
+                    // A client that missed only the last fold (a device
+                    // returning while another one kept editing) lacks just
+                    // that fold's tail: catch up from it first. Applied on
+                    // its own, ahead of the transaction below, because only
+                    // the re-check after it can tell whether the snapshot
+                    // is still needed.
+                    if (!localCoversSnapshot(data, ydoc) && foldTailMayCatchUp(data, ydoc)) {
+                        await applyFoldTail(ctx.storage, data, ydoc, isDestroyed);
+                        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+                    }
                     // Skip the (potentially large) blob download when the
                     // local doc already covers the snapshot's state vector —
                     // typical for reconnecting clients.
@@ -859,6 +870,12 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
                 console.warn("Failed to apply storage-backed delete-set fingerprint", e);
             }
         }
+        // A client that missed only this fold (e.g. offline across it)
+        // lacks just its tail; the check below decides whether that sufficed.
+        if (!localCoversSnapshot(data, ydoc) && foldTailMayCatchUp(data, ydoc)) {
+            await applyFoldTail(storage, data, ydoc, isDestroyed);
+            if (isDestroyed()) return;
+        }
         if (localCoversSnapshot(data, ydoc)) {
             if (typeof data.version === 'number') {
                 lastProcessedVersion = data.version;
@@ -1021,6 +1038,34 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
 }
 
 // --- Helper Functions ---
+
+/**
+ * Downloads the current fold's tail and applies it to the local document.
+ *
+ * Only a shortcut around the snapshot download (see foldTailMayCatchUp),
+ * so it never throws and quarantines nothing: on any failure — including
+ * a tail the next fold has already garbage-collected — the caller's
+ * coverage re-check still fails and it downloads the snapshot as before.
+ *
+ * @param storage - Firebase Storage instance
+ * @param data - Main document data carrying the tail fields
+ * @param ydoc - Local Yjs document
+ * @param isStopped - Whether the caller has stopped (checked after the download)
+ */
+async function applyFoldTail(
+    storage: FirebaseStorage,
+    data: any,
+    ydoc: Y.Doc,
+    isStopped: () => boolean
+): Promise<void> {
+    try {
+        const buffer = await getBytes(ref(storage, data.foldTailStoragePath));
+        if (isStopped()) return;
+        Y.applyUpdate(ydoc, new Uint8Array(buffer), FIREBASE_ORIGINS.SNAPSHOT);
+    } catch (e) {
+        console.warn(`Failed to apply fold tail ${data.foldTailStoragePath}; downloading the snapshot instead`, e);
+    }
+}
 
 /**
  * Downloads a storage-backed update for the update listener, retrying

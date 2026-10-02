@@ -12,11 +12,14 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import * as Y from 'yjs';
 import { toBase64 } from 'lib0/buffer';
 import { FIREBASE_ORIGINS } from '../../src/types';
+import { foldTailBaseClocks } from '../../src/compaction-policy';
+import { writeStateVector } from '../../src/utils';
 import {
     applyItem,
     buildServerCoverage,
     collectServerBlobs,
     ensureDecodedSV,
+    foldTailMayCatchUp,
     isItemRedundant,
     localCoversSnapshot,
     processHistoryMetadata,
@@ -162,6 +165,122 @@ describe('localCoversSnapshot', () => {
         vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
         expect(localCoversSnapshot({ stateVector: 'not-base64-!!' }, new Y.Doc())).toBe(false);
+    });
+});
+
+describe('foldTailMayCatchUp', () => {
+    /**
+     * The replaced snapshot (the base) holds an earlier session (client 3)
+     * and client 1's first edits; the fold's tail holds client 1's next
+     * edit and a new session (client 2). Returns the base, the tail, the
+     * folded server doc and the main-document fields compaction writes.
+     */
+    const foldedDocument = () => {
+        const earlier = new Y.Doc();
+        earlier.clientID = 3;
+        earlier.getMap('m').set('earlier', true);
+        const server = makeDoc(1, 3);
+        Y.applyUpdate(server, Y.encodeStateAsUpdate(earlier));
+        const base = Y.encodeStateAsUpdate(server);
+        const baseSV = Y.decodeStateVector(Y.encodeStateVector(server));
+
+        const updates: Uint8Array[] = [];
+        server.on('update', (u: Uint8Array) => updates.push(u));
+        server.transact(() => server.getMap('m').set('k3', 3));
+        server.clientID = 2;
+        server.transact(() => server.getMap('m').set('fresh', 1));
+        const tail = Y.mergeUpdates(updates);
+
+        const data: any = {
+            stateVector: svBase64(server),
+            version: 7,
+            foldTailStoragePath: 'gs://tail_v7.bin',
+            foldTailBaseClocks: toBase64(writeStateVector(foldTailBaseClocks(baseSV, Y.parseUpdateMeta(tail).to))),
+            foldTailVersion: 7,
+        };
+        return { base, tail, server, data };
+    };
+
+    /** A device that held the replaced snapshot. */
+    const holderOf = (base: Uint8Array) => {
+        const doc = new Y.Doc();
+        Y.applyUpdate(doc, base);
+        return doc;
+    };
+
+    it('is true for a doc that holds the replaced snapshot, which the tail then completes', () => {
+        const { base, tail, data } = foldedDocument();
+        const local = holderOf(base);
+
+        expect(localCoversSnapshot(data, local)).toBe(false);
+        expect(foldTailMayCatchUp(data, local)).toBe(true);
+        Y.applyUpdate(local, tail);
+        expect(localCoversSnapshot(data, local)).toBe(true);
+    });
+
+    it('is true for a doc that also holds part of the tail', () => {
+        const { base, server, data } = foldedDocument();
+        const local = holderOf(base);
+        // The new session (client 2) arrived; client 1's tail edit did not
+        Y.applyUpdate(local, Y.encodeStateAsUpdate(server, writeStateVector(new Map([[1, 4], [3, 1]]))));
+        expect(Y.getState(local.store, 2)).toBe(1);
+        expect(Y.getState(local.store, 1)).toBe(3);
+
+        expect(localCoversSnapshot(data, local)).toBe(false);
+        expect(foldTailMayCatchUp(data, local)).toBe(true);
+    });
+
+    /* Two folds behind: the gap is in a client the tail does not touch. */
+    it('is false when the doc is behind on a client the tail does not touch', () => {
+        const { data } = foldedDocument();
+        const withoutEarlierSession = makeDoc(1, 3);
+
+        expect(foldTailMayCatchUp(data, withoutEarlierSession)).toBe(false);
+    });
+
+    it('is false when the doc is behind the base clock of a client the tail touches', () => {
+        const { data } = foldedDocument();
+        const local = makeDoc(1, 2);
+        const earlier = new Y.Doc();
+        earlier.clientID = 3;
+        earlier.getMap('m').set('earlier', true);
+        Y.applyUpdate(local, Y.encodeStateAsUpdate(earlier));
+
+        expect(foldTailMayCatchUp(data, local)).toBe(false);
+    });
+
+    it('is false for an empty doc (a fresh client needs the snapshot)', () => {
+        expect(foldTailMayCatchUp(foldedDocument().data, new Y.Doc())).toBe(false);
+    });
+
+    /*
+     * A main-document writer that predates tails bumps the version and
+     * leaves the fields behind: they describe another snapshot (possibly
+     * another epoch) and must be ignored.
+     */
+    it('is false when the tail is bound to another version', () => {
+        const { base, data } = foldedDocument();
+
+        expect(foldTailMayCatchUp({ ...data, version: 8 }, holderOf(base))).toBe(false);
+        expect(foldTailMayCatchUp({ ...data, foldTailVersion: undefined }, holderOf(base))).toBe(false);
+    });
+
+    it('is false when any tail field, the version or the state vector is missing', () => {
+        const { base, data } = foldedDocument();
+
+        for (const field of ['foldTailStoragePath', 'foldTailBaseClocks', 'stateVector', 'version']) {
+            const fields = { ...data };
+            delete fields[field];
+            delete fields._decodedSV;
+            expect(foldTailMayCatchUp(fields, holderOf(base))).toBe(false);
+        }
+    });
+
+    it('is false — the safe direction — when the base clocks are malformed', () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const { base, data } = foldedDocument();
+
+        expect(foldTailMayCatchUp({ ...data, foldTailBaseClocks: 'not-base64-!!' }, holderOf(base))).toBe(false);
     });
 });
 

@@ -125,6 +125,51 @@ export function localCoversSnapshot(data: any, ydoc: Y.Doc): boolean {
 }
 
 /**
+ * Checks whether the snapshot's fold tail may be all the local document
+ * lacks of it, i.e. the tail is worth downloading instead of the snapshot.
+ *
+ * Compaction publishes the tail (what the fold merged on top of the
+ * replaced snapshot) with its base clocks: the replaced snapshot's state
+ * vector, restricted to the clients the tail touches. Wherever the local
+ * doc is behind the snapshot, that client must be listed at a clock the
+ * local doc covers — which is exactly "covers the replaced snapshot".
+ *
+ * Only a pre-check: the caller applies the tail and re-runs
+ * localCoversSnapshot, which alone decides whether the snapshot is still
+ * needed (a tail with an internal gap leaves structs pending). A tail
+ * bound to another version is ignored: a main-document writer that
+ * predates tails bumps the version and leaves the fields behind.
+ *
+ * Returns false whenever the fields are missing or malformed, so callers
+ * download the snapshot (the safe direction).
+ *
+ * @param data - Main document data
+ * @param ydoc - Local Yjs document
+ */
+export function foldTailMayCatchUp(data: any, ydoc: Y.Doc): boolean {
+    if (typeof data.foldTailStoragePath !== 'string' || typeof data.foldTailBaseClocks !== 'string'
+        || !data.stateVector || typeof data.version !== 'number' || data.foldTailVersion !== data.version) {
+        return false;
+    }
+    try {
+        const baseClocks = Y.decodeStateVector(fromBase64(data.foldTailBaseClocks));
+        const localSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
+        for (const [client, clock] of ensureDecodedSV(data)) {
+            const localClock = localSV.get(client) || 0;
+            if (localClock >= clock) continue;
+            const baseClock = baseClocks.get(client);
+            if (baseClock === undefined || localClock < baseClock) {
+                return false;
+            }
+        }
+        return true;
+    } catch (e) {
+        console.warn("Failed to decode fold tail base clocks", e);
+        return false;
+    }
+}
+
+/**
  * Extracts and aggregates clock values from an update document into the server state vector.
  * Tries stored metadata first, falls back to parsing the update blob.
  * 

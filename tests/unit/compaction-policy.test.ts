@@ -19,12 +19,15 @@ import {
     epochOf,
     foldDeleteSetPath,
     foldSnapshotPath,
+    foldTailBaseClocks,
+    foldTailPath,
     nextSnapshotVersion,
     isLockLostError,
     isRetryableCompactionError,
     planHistoryDoc,
     planUpdateDoc,
     readMainDocState,
+    shouldPublishFoldTail,
     shouldRetryCompaction,
     shouldUseDelta,
 } from '../../src/compaction-policy';
@@ -60,6 +63,8 @@ describe('readMainDocState', () => {
             hasBase: false,
             baseStoragePath: null,
             baseDeleteSetStoragePath: null,
+            baseFoldTailStoragePath: null,
+            baseStateVector: null,
             baseInline: null,
             currentVersion: 0,
             currentEpoch: 0,
@@ -129,6 +134,25 @@ describe('readMainDocState', () => {
 
         expect(state.currentVersion).toBe(0);
         expect(state.currentEpoch).toBe(0);
+    });
+
+    /* The fold builds its tail's base clocks from the replaced vector. */
+    it('reads the base state vector', () => {
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap', stateVector: 'AQID' }).baseStateVector).toBe('AQID');
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap' }).baseStateVector).toBeNull();
+    });
+
+    /*
+     * Fold GC deletes the previous tail through this path — whatever
+     * version it is bound to: an older client's fold leaves a stale one.
+     */
+    it('reads the fold tail path regardless of the version it is bound to', () => {
+        const state = readMainDocState({
+            snapshotStoragePath: 'gs://snap', foldTailStoragePath: 'gs://tail', foldTailVersion: 3, version: 4,
+        });
+
+        expect(state.baseFoldTailStoragePath).toBe('gs://tail');
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap' }).baseFoldTailStoragePath).toBeNull();
     });
 });
 
@@ -466,20 +490,75 @@ describe('nextSnapshotVersion', () => {
  * folding the same version must never share an object, or a compactor
  * whose lease lapsed mid-upload replaces the winner's committed snapshot.
  */
-describe('foldSnapshotPath / foldDeleteSetPath', () => {
+describe('foldSnapshotPath / foldDeleteSetPath / foldTailPath', () => {
     it('names the blobs by version and attempt', () => {
         expect(foldSnapshotPath('docs/a', 3, 'x1')).toBe('docs/a/snapshot_v3_x1.bin');
         expect(foldDeleteSetPath('docs/a', 3, 'x1')).toBe('docs/a/ds_v3_x1.bin');
+        expect(foldTailPath('docs/a', 3, 'x1')).toBe('docs/a/tail_v3_x1.bin');
     });
 
     it('distinguishes attempts folding the same version', () => {
         expect(foldSnapshotPath('docs/a', 3, 'x1')).not.toBe(foldSnapshotPath('docs/a', 3, 'x2'));
         expect(foldDeleteSetPath('docs/a', 3, 'x1')).not.toBe(foldDeleteSetPath('docs/a', 3, 'x2'));
+        expect(foldTailPath('docs/a', 3, 'x1')).not.toBe(foldTailPath('docs/a', 3, 'x2'));
     });
 
     it('distinguishes versions', () => {
         expect(foldSnapshotPath('docs/a', 3, 'x1')).not.toBe(foldSnapshotPath('docs/a', 4, 'x1'));
         expect(foldDeleteSetPath('docs/a', 3, 'x1')).not.toBe(foldDeleteSetPath('docs/a', 4, 'x1'));
+        expect(foldTailPath('docs/a', 3, 'x1')).not.toBe(foldTailPath('docs/a', 4, 'x1'));
+    });
+});
+
+describe('foldTailBaseClocks', () => {
+    it('lists every client the tail touches at its base clock', () => {
+        const base = new Map([[1, 10], [2, 20], [3, 30]]);
+        const tail = new Map([[2, 25], [3, 31]]);
+
+        expect(foldTailBaseClocks(base, tail)).toEqual(new Map([[2, 20], [3, 30]]));
+    });
+
+    /* A session client minted after the base: listed, at clock 0. */
+    it('lists a client the base never saw at clock 0', () => {
+        expect(foldTailBaseClocks(new Map([[1, 10]]), new Map([[9, 4]]))).toEqual(new Map([[9, 0]]));
+    });
+
+    /* O(tail clients): the full base vector does not fit the main document. */
+    it('leaves out clients the tail does not touch', () => {
+        expect(foldTailBaseClocks(new Map([[1, 10], [2, 20]]), new Map()).size).toBe(0);
+    });
+});
+
+describe('shouldPublishFoldTail', () => {
+    const fits = {
+        tailBytes: 50_000,
+        snapshotBytes: 1_000_000,
+        tailFieldsLength: 200,
+        stateVectorB64Length: 10_000,
+        inlineDeleteSetBytes: 100_000,
+        inlineLimit: DEFAULTS.INLINE_UPDATE_LIMIT,
+    };
+
+    it('publishes a small tail that fits beside the other fields', () => {
+        expect(shouldPublishFoldTail(fits)).toBe(true);
+    });
+
+    /* A tail near the snapshot's size saves little and risks paying for both. */
+    it('publishes only a tail of at most half the snapshot', () => {
+        expect(shouldPublishFoldTail({ ...fits, tailBytes: 500_000 })).toBe(true);
+        expect(shouldPublishFoldTail({ ...fits, tailBytes: 500_001 })).toBe(false);
+    });
+
+    /*
+     * The base clocks share the main document with the state vector and the
+     * inline fingerprint. Overflowing it is a non-retryable INVALID_ARGUMENT
+     * that stops compaction for good, so the optional tail yields.
+     */
+    it('publishes nothing when the tail fields would overflow the main document', () => {
+        const room = fits.inlineLimit - fits.stateVectorB64Length - fits.inlineDeleteSetBytes;
+
+        expect(shouldPublishFoldTail({ ...fits, tailFieldsLength: room })).toBe(true);
+        expect(shouldPublishFoldTail({ ...fits, tailFieldsLength: room + 1 })).toBe(false);
     });
 });
 
@@ -492,28 +571,36 @@ describe('blobsReplacedByFold', () => {
      */
     it('returns the stored squash snapshot path, not a name rebuilt from the version', () => {
         expect(blobsReplacedByFold(
-            { baseStoragePath: 'docs/a/snapshot_e1_v3_k9.bin', baseDeleteSetStoragePath: null },
+            { baseStoragePath: 'docs/a/snapshot_e1_v3_k9.bin', baseDeleteSetStoragePath: null, baseFoldTailStoragePath: null },
             written,
         )).toEqual(['docs/a/snapshot_e1_v3_k9.bin']);
     });
 
     it('returns the stored snapshot and offloaded delete-set paths', () => {
         expect(blobsReplacedByFold(
-            { baseStoragePath: 'docs/a/snapshot_v3.bin', baseDeleteSetStoragePath: 'docs/a/ds_v3.bin' },
+            { baseStoragePath: 'docs/a/snapshot_v3.bin', baseDeleteSetStoragePath: 'docs/a/ds_v3.bin', baseFoldTailStoragePath: null },
             ['docs/a/snapshot_v4.bin', 'docs/a/ds_v4.bin'],
         )).toEqual(['docs/a/snapshot_v3.bin', 'docs/a/ds_v3.bin']);
     });
 
+    /* A tail describes only the snapshot it was published with. */
+    it('returns the previous fold tail', () => {
+        expect(blobsReplacedByFold(
+            { baseStoragePath: 'docs/a/snapshot_v3.bin', baseDeleteSetStoragePath: null, baseFoldTailStoragePath: 'docs/a/tail_v3.bin' },
+            ['docs/a/snapshot_v4.bin', null, 'docs/a/tail_v4.bin'],
+        )).toEqual(['docs/a/snapshot_v3.bin', 'docs/a/tail_v3.bin']);
+    });
+
     it('returns nothing when the replaced document had no Storage blobs', () => {
-        expect(blobsReplacedByFold({ baseStoragePath: null, baseDeleteSetStoragePath: null }, written))
+        expect(blobsReplacedByFold({ baseStoragePath: null, baseDeleteSetStoragePath: null, baseFoldTailStoragePath: null }, written))
             .toEqual([]);
     });
 
     /* Deleting a path the fold just committed would destroy the live snapshot. */
     it('never returns a path the fold itself wrote', () => {
         expect(blobsReplacedByFold(
-            { baseStoragePath: 'docs/a/snapshot_v4.bin', baseDeleteSetStoragePath: 'docs/a/ds_v4.bin' },
-            ['docs/a/snapshot_v4.bin', 'docs/a/ds_v4.bin'],
+            { baseStoragePath: 'docs/a/snapshot_v4.bin', baseDeleteSetStoragePath: 'docs/a/ds_v4.bin', baseFoldTailStoragePath: 'docs/a/tail_v4.bin' },
+            ['docs/a/snapshot_v4.bin', 'docs/a/ds_v4.bin', 'docs/a/tail_v4.bin'],
         )).toEqual([]);
     });
 });

@@ -509,6 +509,60 @@ parallel lookups. End to end, a
 400-save single-client provider session: median 1222 → 824 billed reads
 (3.06 → 2.06 per save, −33%), 441 → 41 RPCs.
 
+## Fix 7: a device that missed a fold downloads the fold's tail
+
+A fold merges base + history + updates into a new snapshot and deletes
+its sources, so afterwards the data a lagging client lacks exists only
+inside the new snapshot. Both catch-up paths — initial sync (a device
+returning warm from y-idb) and the snapshot listener (a device offline
+across the fold) — downloaded and applied the WHOLE snapshot whenever
+`localCoversSnapshot` failed, although such a device typically holds the
+replaced snapshot and lacks only the few sessions the fold added. That is
+O(snapshot) Storage egress and main-thread decode, growing with document
+age, paid by every returning device on every fold it missed (one fold per
+~400 saves, about 6-7 versicle sessions).
+
+Each fold now also publishes its **tail** — `mergeUpdates(history +
+updates it folded)`, gc off — as `tail_v{N}_{attempt}.bin`, and writes
+three fields in the fold's own transaction: `foldTailStoragePath`,
+`foldTailVersion` (binds the tail to that version: fields left behind by a
+writer that predates tails are ignored) and `foldTailBaseClocks`, the
+replaced snapshot's state vector restricted to the clients the tail
+touches. The restriction keeps it O(tail clients) — the full vector would
+push many-client main documents past Firestore's 1 MiB limit — and loses
+nothing: a reader behind only on clients listed there, at clocks it
+covers, holds exactly the replaced snapshot (`foldTailMayCatchUp`). Such a
+reader downloads and applies the tail, re-checks `localCoversSnapshot`,
+and downloads the snapshot only if that still fails; the delete-set
+fingerprint is still applied for deletions. A tail that is gone (the next
+fold collected it) or does not apply is a plain fallback, never a
+quarantine. The next fold garbage-collects the previous tail and squash
+clears it. A tail is published only when it is at most half the snapshot
+(early folds over a small base are not) and its fields fit beside the
+state vector and inline fingerprint.
+
+Measured in `benchmarks/returning-device.bench.ts` (B hydrated, then away
+while A crosses exactly one fold plus 2 sessions; B's catch-up via the
+snapshot vs via the published tail; CPU is the median of 5 runs):
+
+| B hydrated at | snapshot download | tail download | structs decoded | CPU to synced |
+| ---: | ---: | ---: | ---: | ---: |
+| 60 sessions  | 996.9 KB | 152.9 KB | 45,837 → 5,150  | 79 → 18 ms |
+| 120 sessions | 1.78 MB  | 152.7 KB | 84,806 → 5,127  | 141 → 18 ms |
+| 240 sessions | 3.35 MB  | 139.6 KB | 160,617 → 4,683 | 268 → 23 ms |
+
+The snapshot column grows with document age; the tail tracks what B
+actually lacks (1.0-1.1x B's real diff). End to end on the emulator
+(`tests/integration/returning_device_fold_tail.test.ts`, 40-session
+document), both the warm start and the listener now download the
+47,664 B tail instead of the 652,181 B snapshot. On a 120-session
+document, a returning device's warm start downloads 52.8 KB instead of
+the 1.83 MB snapshot, and its CPU from connect to synced drops from
+404 ms to 76 ms (medians of 10 interleaved runs; 144 → 13 ms of it in
+`Y.applyUpdate`). The fold pays one extra worker-side merge and upload
+of the tail (4-15% of the snapshot) and one Storage delete. A device
+several folds behind still needs the snapshot.
+
 ## The remaining floor: epoch squash
 
 Everything above bounds the *per-cycle* costs, but the floor itself —

@@ -10,7 +10,8 @@
  *
  * Contract checked here: after squash() followed by a fold, the only
  * objects under the document's Storage prefix are the ones the main
- * document references (its snapshot and, if offloaded, its delete-set).
+ * document references (its snapshot and, if offloaded, its delete-set;
+ * if published, the fold's tail).
  *
  * @file compaction_gc_squash_snapshot.test.ts
  */
@@ -48,7 +49,7 @@ describe('Compaction GC after squash', () => {
     /** Storage objects the main document currently points at. */
     async function referencedBlobs(): Promise<string[]> {
         const data = (await getDoc(doc(db, path))).data() ?? {};
-        return [data.snapshotStoragePath, data.deleteSetStoragePath]
+        return [data.snapshotStoragePath, data.deleteSetStoragePath, data.foldTailStoragePath]
             .filter((p): p is string => typeof p === 'string')
             .sort();
     }

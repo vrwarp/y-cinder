@@ -64,7 +64,8 @@ import {
     Timestamp,
 } from "@firebase/firestore";
 import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
-import { toBase64 } from "lib0/buffer";
+import * as Y from "yjs";
+import { fromBase64, toBase64 } from "lib0/buffer";
 import {
     blobsReplacedByFold,
     buildDeltaSegmentDoc,
@@ -74,15 +75,18 @@ import {
     epochOf,
     foldDeleteSetPath,
     foldSnapshotPath,
+    foldTailBaseClocks,
+    foldTailPath,
     nextSnapshotVersion,
     planHistoryDoc,
     planUpdateDoc,
     readMainDocState,
+    shouldPublishFoldTail,
     shouldRetryCompaction,
     shouldUseDelta,
 } from './compaction-policy';
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
-import { wait, calculateBackoff, generateSessionId } from "./utils";
+import { wait, calculateBackoff, generateSessionId, writeStateVector } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
 import { mergeUpdatesWithMetaAsync } from "./merge-utils";
 import { updateHasDeletions } from "./update-metadata";
@@ -382,7 +386,8 @@ export async function compact(
         // keeps compaction's main-thread cost near zero. A validation
         // failure rejects, and a corrupted merge must never overwrite the
         // canonical snapshot.
-        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToFold.map(u => u.data)];
+        const tailSources = [...historyToMerge.map(h => h.val), ...updatesToFold.map(u => u.data)];
+        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...tailSources];
         let candidate: Uint8Array;
         let stateVectorB64: string;
         let deleteSetUpdate: Uint8Array | null = null;
@@ -436,6 +441,21 @@ export async function compact(
             await uploadBytes(ref(storage, deleteSetStoragePath), oversizedDeleteSet);
         }
 
+        // A client that held the replaced snapshot lacks only what this
+        // fold merges on top of it. Publish that tail beside the snapshot
+        // so such a client can catch up without downloading the snapshot.
+        const foldTail = baseSnapshot && mainState.baseStateVector
+            ? await publishFoldTail({
+                storage,
+                storagePath: foldTailPath(path, nextVersion, attemptId),
+                sources: tailSources,
+                baseStateVector: mainState.baseStateVector,
+                snapshotBytes: candidate.byteLength,
+                stateVectorB64Length: stateVectorB64.length,
+                inlineDeleteSetBytes: deleteSetUpdate?.byteLength ?? 0,
+            })
+            : null;
+
         // === STEP 4: Transaction ===
         const result = await performCompactionTransaction({
             db,
@@ -449,10 +469,11 @@ export async function compact(
             stateVectorB64,
             deleteSetUpdate,
             deleteSetStoragePath,
+            foldTail,
             expectedVersion: currentVersion,
         });
 
-        // Garbage Collect Old Storage Snapshot (and its delete-set blob).
+        // Garbage Collect Old Storage Snapshot (and its delete-set and tail blobs).
         // Delete the paths the replaced main document stored: blob names are
         // attempt-unique (and a squash snapshot is named
         // snapshot_e{E}_v{V}_{id}.bin), so they cannot be rebuilt from the
@@ -460,7 +481,7 @@ export async function compact(
         // every writer of these fields bumps it, so they still describe what
         // we replaced.
         if (result.success && result.type === 'snapshot') {
-            for (const oldPath of blobsReplacedByFold(mainState, [storagePath, deleteSetStoragePath])) {
+            for (const oldPath of blobsReplacedByFold(mainState, [storagePath, deleteSetStoragePath, foldTail?.storagePath ?? null])) {
                 try {
                     await deleteObject(ref(storage, oldPath));
                     console.log(`Garbage collected old blob: ${oldPath}`);
@@ -547,6 +568,72 @@ async function tryDeltaCompaction(params: {
     });
 }
 
+/** A fold's published tail, as stored on the main document. */
+interface FoldTail {
+    /** Cloud Storage path of the tail blob */
+    storagePath: string;
+    /** Base64 base clocks of the tail (see foldTailBaseClocks) */
+    baseClocks: string;
+}
+
+/**
+ * Publishes a fold's tail: everything the fold merges on top of the base
+ * (its history segments and update documents, un-GC'd) as one blob.
+ *
+ * A fold deletes its sources, so afterwards the data a lagging client
+ * lacks exists only inside the new snapshot — multi-MB on an aged
+ * document, and growing with its age. A client that held the replaced
+ * snapshot (typically a device that was away while another one crossed a
+ * fold) lacks only this tail, a few percent of the snapshot, and the sync
+ * layer downloads it instead (see foldTailMayCatchUp).
+ *
+ * Uploaded before the commit, like the snapshot, so the pointer never
+ * names a missing blob. Never throws: the tail is a shortcut, and a fold
+ * without one is complete — readers then download the snapshot.
+ *
+ * @returns The tail's main-document fields, or null when none is published.
+ */
+async function publishFoldTail(params: {
+    storage: FirebaseStorage;
+    storagePath: string;
+    sources: Uint8Array[];
+    baseStateVector: string;
+    snapshotBytes: number;
+    stateVectorB64Length: number;
+    inlineDeleteSetBytes: number;
+}): Promise<FoldTail | null> {
+    const { storage, storagePath, sources, baseStateVector, snapshotBytes, stateVectorB64Length, inlineDeleteSetBytes } = params;
+
+    if (sources.length === 0) {
+        return null;
+    }
+    try {
+        // gc off, as for a delta segment: the tail references structs that
+        // live in the base. The merge also validates it and yields the
+        // clients it touches, worker-side.
+        const tail = await mergeUpdatesWithMetaAsync(sources, { gc: false });
+        const baseClocks = toBase64(writeStateVector(foldTailBaseClocks(
+            Y.decodeStateVector(fromBase64(baseStateVector)),
+            Y.decodeStateVector(tail.stateVector),
+        )));
+        if (!shouldPublishFoldTail({
+            tailBytes: tail.result.byteLength,
+            snapshotBytes,
+            tailFieldsLength: baseClocks.length + storagePath.length,
+            stateVectorB64Length,
+            inlineDeleteSetBytes,
+            inlineLimit: DEFAULTS.INLINE_UPDATE_LIMIT,
+        })) {
+            return null;
+        }
+        await uploadBytes(ref(storage, storagePath), tail.result);
+        return { storagePath, baseClocks };
+    } catch (e) {
+        console.warn(`Failed to publish fold tail ${storagePath}; readers will download the snapshot`, e);
+        return null;
+    }
+}
+
 /**
  * Performs the actual compaction within a Firestore transaction.
  *
@@ -564,9 +651,10 @@ async function performCompactionTransaction(params: {
     stateVectorB64: string;
     deleteSetUpdate: Uint8Array | null;
     deleteSetStoragePath: string | null;
+    foldTail: FoldTail | null;
     expectedVersion: number;
 }): Promise<CompactionResult> {
-    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, staleRefs, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, expectedVersion } = params;
+    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, staleRefs, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, foldTail, expectedVersion } = params;
 
     return await runTransaction(db, async (transaction) => {
         // === STEP A: THE KILL SWITCH ===
@@ -613,6 +701,7 @@ async function performCompactionTransaction(params: {
             stateVectorB64,
             deleteSetUpdate,
             deleteSetStoragePath,
+            foldTail,
             currentVersion,
             updatesToProcess,
             historyToMerge,
@@ -657,11 +746,12 @@ function compactToSnapshot(params: {
     stateVectorB64: string;
     deleteSetUpdate: Uint8Array | null;
     deleteSetStoragePath: string | null;
+    foldTail: FoldTail | null;
     currentVersion: number;
     updatesToProcess: { ref: DocumentReference }[];
     historyToMerge: { ref: DocumentReference }[];
 }): CompactionResult {
-    const { transaction, mainRef, uid, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, currentVersion, updatesToProcess, historyToMerge } = params;
+    const { transaction, mainRef, uid, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, foldTail, currentVersion, updatesToProcess, historyToMerge } = params;
 
     console.log(`Compacted to Snapshot (Size: ${candidate.byteLength})`);
 
@@ -684,6 +774,12 @@ function compactToSnapshot(params: {
         // the spurious-push slow path).
         deleteSet: deleteSetUpdate ? Bytes.fromUint8Array(deleteSetUpdate) : deleteField(),
         deleteSetStoragePath: deleteSetStoragePath ?? deleteField(),
+        // The tail is bound to the version it was folded into: a writer
+        // that predates tails bumps the version without touching these
+        // fields, and readers must then ignore them. No tail clears them.
+        foldTailStoragePath: foldTail?.storagePath ?? deleteField(),
+        foldTailBaseClocks: foldTail?.baseClocks ?? deleteField(),
+        foldTailVersion: foldTail ? nextSnapshotVersion(currentVersion) : deleteField(),
         version: nextSnapshotVersion(currentVersion),
         updatedAt: serverTimestamp(),
         // Identifies the compacting client. Its own snapshot listener still

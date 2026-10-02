@@ -345,8 +345,10 @@ export class FireProvider extends ObservableV2<any> {
     try {
       await performTieredCompaction(ctx, attempt);
     } finally {
-      // FIX: Resume history listener
-      if (!this._isDestroyed && !this._unsubscribeHistory) {
+      // FIX: Resume history listener — unless the provider was epoch-fenced
+      // meanwhile (see _stopSyncing): a resumed listener would keep reading
+      // and, on the squasher, apply new-epoch segments onto the old doc.
+      if (!this._isDestroyed && !this._epochFenced && !this._unsubscribeHistory) {
         // Use SyncContext to recreate listener
         // We need to re-construct SyncContext or store it.
         // Re-constructing is cheap.

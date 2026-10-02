@@ -23,6 +23,7 @@ import {
     processSnapshotMetadata,
     processUpdateMetadata,
     refreshLocalClocks,
+    rebaseIfPending,
     type PendingUpdate,
 } from '../../src/sync-helpers';
 
@@ -405,6 +406,51 @@ describe('refreshLocalClocks', () => {
 
         // Named by the snapshot, but nothing integrated locally yet.
         expect(localSVMap.get(5)).toBe(0);
+    });
+});
+
+describe('rebaseIfPending', () => {
+    /** Two consecutive ranges from client 1: "hello" (0..5), " world" (5..11). */
+    const sameClientRanges = () => {
+        const src = new Y.Doc();
+        src.clientID = 1;
+        const updates: Uint8Array[] = [];
+        src.on('update', (u: Uint8Array) => updates.push(u));
+        src.getText('t').insert(0, 'hello');
+        src.getText('t').insert(5, ' world');
+        return { u1: updates[0], u2: updates[1] };
+    };
+
+    it('leaves the cache alone when nothing is pending', () => {
+        const doc = makeDoc(2, 3);
+        const map = new Map<number, number>([[2, 1], [9, 4]]);
+
+        rebaseIfPending(doc, map);
+
+        expect([...map]).toEqual([[2, 1], [9, 4]]);
+    });
+
+    it('drops clocks claimed by a range parked behind a gap', () => {
+        const { u1, u2 } = sameClientRanges();
+        const doc = new Y.Doc();
+        Y.applyUpdate(doc, Y.encodeStateAsUpdate(makeDoc(2, 3)));
+        Y.applyUpdate(doc, u2);
+        const map = new Map<number, number>([[2, 3]]);
+        processUpdateMetadata({ update: bytes(u2) }, map);
+        expect(map.get(1)).toBe(11);
+
+        rebaseIfPending(doc, map);
+
+        // The real state vector: client 1's structs are still pending,
+        // so the range that fills the gap is not redundant.
+        expect([...map]).toEqual([[2, 3]]);
+        expect(isItemRedundant(
+            { type: 'update', priority: 3, data: { clientIDs: [1], clientClocks: [5] } },
+            map,
+        )).toBe(false);
+
+        Y.applyUpdate(doc, u1);
+        expect(doc.getText('t').toString()).toBe('hello world');
     });
 });
 

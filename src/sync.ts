@@ -68,6 +68,7 @@ import {
     processSnapshotMetadata,
     buildServerCoverage,
     refreshLocalClocks,
+    rebaseIfPending,
     isItemRedundant,
     applyItem,
 } from "./sync-helpers";
@@ -452,6 +453,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         // Incremental update of localSVMap instead of expensive re-encode/decode (P3.0 Optimization)
                         // This prevents redundant processing of history/updates already in snapshot/previous segments
                         refreshLocalClocks(item, ydoc, localSVMap);
+                        // Structs parked behind a gap did not advance the doc;
+                        // the item that fills it must not look redundant
+                        rebaseIfPending(ydoc, localSVMap);
                     }
                 }
             }
@@ -631,6 +635,9 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 if (plan.kind === 'skip-own') {
                     // Refresh the clocks it touches anyway so later checks stay accurate.
                     refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
+                    // Our initial-sync push also carries any structs parked in
+                    // pendingStructs; re-base while anything is still parked.
+                    rebaseIfPending(ydoc, localSVMap);
                     return;
                 }
                 if (plan.kind !== 'download' && plan.kind !== 'apply-inline') {
@@ -649,6 +656,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                             Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                             // Incremental update of cached state vector (P3.0 Optimization)
                             refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
+                            rebaseIfPending(ydoc, localSVMap);
                         } catch (e) {
                             console.error(`Failed to apply storage-backed update ${docId} (quarantined)`, e);
                             ctx.corruptedDocIds?.add(docId);
@@ -678,6 +686,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                         // Incremental update of cached state vector (P3.0 Optimization)
                         refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
+                        rebaseIfPending(ydoc, localSVMap);
                     } catch (e) {
                         console.error(`Failed to apply update ${docId} (quarantined)`, e);
                         ctx.corruptedDocIds?.add(docId);
@@ -922,6 +931,7 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
                             Y.applyUpdate(ydoc, (data.segment as Bytes).toUint8Array(), FIREBASE_ORIGINS.HISTORY);
                             // Incremental update of cached state vector (P3.0 Optimization)
                             refreshLocalClocks(item, ydoc, localSVMap);
+                            rebaseIfPending(ydoc, localSVMap);
                         }
                     } catch (err) {
                         console.error(`Failed to apply history segment ${docId} (quarantined)`, err);

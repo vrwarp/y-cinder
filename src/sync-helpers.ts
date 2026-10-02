@@ -263,6 +263,34 @@ export function refreshLocalClocks(
 }
 
 /**
+ * Re-bases a cached local state vector on the document's real one while
+ * structs are parked in pendingStructs.
+ *
+ * Initial sync and the listeners update their cache incrementally after
+ * each apply (see `refreshLocalClocks`) instead of re-encoding the state
+ * vector every time. A cached clock only holds once Yjs has integrated the
+ * item's structs. When a same-client dependency is missing (a later range
+ * ordered before the earlier one), the structs wait in pendingStructs and
+ * the real state vector does not move. An inflated cache would then judge
+ * the document that fills the gap redundant and skip it, so the gap would
+ * never close. While anything is pending, the cache is therefore re-based
+ * on the real state vector as a backstop; with nothing pending, every
+ * cached clock is integrated and the incremental update stands.
+ *
+ * @param ydoc - Local Yjs document the cache tracks
+ * @param localSVMap - Cached local state vector, corrected in place
+ */
+export function rebaseIfPending(ydoc: Y.Doc, localSVMap: Map<number, number>): void {
+    if (ydoc.store.pendingStructs === null) {
+        return;
+    }
+    localSVMap.clear();
+    for (const [client, clock] of Y.decodeStateVector(Y.encodeStateVector(ydoc))) {
+        localSVMap.set(client, clock);
+    }
+}
+
+/**
  * Determines if a pending update is already contained in the local document.
  * Uses clock comparison to avoid re-applying known data.
  * 

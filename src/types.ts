@@ -211,9 +211,10 @@ export const DEFAULTS = {
     MAX_COMPACTION_HISTORY: 99,
     /**
      * Maximum size of the delete-set fingerprint stored inline on the main
-     * document. Larger delete-sets are simply not stored (clients fall back
-     * to a redundant-but-idempotent push), keeping the main document well
-     * under the Firestore size limit.
+     * document. Larger fingerprints are offloaded to Cloud Storage
+     * (`deleteSetStoragePath`). So are smaller ones that would not fit
+     * within INLINE_UPDATE_LIMIT beside the main document's base64 state
+     * vector, which grows with every client ever seen.
      */
     MAX_DELETE_SET_FIELD_BYTES: 700_000,
 } as const;

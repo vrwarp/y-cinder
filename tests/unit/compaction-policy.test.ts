@@ -13,6 +13,7 @@ import {
     buildDeltaSegmentDoc,
     buildSnapshotResult,
     chooseDeleteSetField,
+    deleteSetFitsInline,
     deltaSegmentFitsInline,
     epochOf,
     foldDeleteSetPath,
@@ -291,16 +292,60 @@ describe('planHistoryDoc', () => {
 
 describe('deltaSegmentFitsInline', () => {
     it('fits below and at the limit', () => {
-        expect(deltaSegmentFitsInline(999, 1_000)).toBe(true);
-        expect(deltaSegmentFitsInline(1_000, 1_000)).toBe(true);
+        expect(deltaSegmentFitsInline(999, 0, 1_000)).toBe(true);
+        expect(deltaSegmentFitsInline(1_000, 0, 1_000)).toBe(true);
     });
 
     it('does not fit one byte over', () => {
-        expect(deltaSegmentFitsInline(1_001, 1_000)).toBe(false);
+        expect(deltaSegmentFitsInline(1_001, 0, 1_000)).toBe(false);
     });
 
     it('fits an empty segment', () => {
-        expect(deltaSegmentFitsInline(0, 1_000)).toBe(true);
+        expect(deltaSegmentFitsInline(0, 0, 1_000)).toBe(true);
+    });
+
+    /*
+     * The state vector rides on the same history document. A segment just
+     * under the limit plus a many-client state vector is rejected by
+     * Firestore with a non-retryable INVALID_ARGUMENT.
+     */
+    it('counts the state vector stored beside the segment', () => {
+        expect(deltaSegmentFitsInline(900, 100, 1_000)).toBe(true);
+        expect(deltaSegmentFitsInline(900, 101, 1_000)).toBe(false);
+    });
+});
+
+describe('deleteSetFitsInline', () => {
+    const fits = (deleteSetBytes: number, stateVectorB64Length: number) =>
+        deleteSetFitsInline({ deleteSetBytes, stateVectorB64Length, maxFieldBytes: 700, inlineLimit: 1_000 });
+
+    it('inlines a fingerprint under the field cap with room beside the state vector', () => {
+        expect(fits(700, 300)).toBe(true);
+        expect(fits(0, 0)).toBe(true);
+    });
+
+    it('offloads a fingerprint over the field cap', () => {
+        expect(fits(701, 0)).toBe(false);
+    });
+
+    /*
+     * Under the field cap is not enough: on an aged many-client document
+     * the state vector and the fingerprint together pass the Firestore
+     * limit, and the snapshot write would fail permanently.
+     */
+    it('offloads a fingerprint that would not fit beside the state vector', () => {
+        expect(fits(600, 401)).toBe(false);
+        expect(fits(1, 1_000)).toBe(false);
+    });
+
+    it('applies the real defaults to the regression scenario', () => {
+        // ~75k clients: base64 state vector ~600 KB, fingerprint ~600 KB.
+        expect(deleteSetFitsInline({
+            deleteSetBytes: 599_996,
+            stateVectorB64Length: 600_004,
+            maxFieldBytes: DEFAULTS.MAX_DELETE_SET_FIELD_BYTES,
+            inlineLimit: DEFAULTS.INLINE_UPDATE_LIMIT,
+        })).toBe(false);
     });
 });
 

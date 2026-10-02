@@ -224,16 +224,23 @@ export function planHistoryDoc(data: Record<string, any> | null | undefined, cur
  * Whether a merged delta segment is small enough to store inline on a
  * Firestore document.
  *
+ * The segment document also carries the segment's base64 state vector
+ * (~8 bytes per client in the segment), so both count: Firestore rejects
+ * an oversized document with INVALID_ARGUMENT, which is not retryable,
+ * and the same pending updates would re-merge to the same segment on
+ * every later cycle.
+ *
  * Over the limit, delta mode is abandoned for this cycle and compaction
  * folds instead — the segment would not fit, and splitting it would defeat
  * the point of a delta.
  *
  * @param byteLength - Size of the merged segment.
+ * @param stateVectorB64Length - Length of the segment's base64 state vector.
  * @param inlineLimit - The inline payload ceiling.
  * @returns true when the segment fits inline.
  */
-export function deltaSegmentFitsInline(byteLength: number, inlineLimit: number): boolean {
-    return byteLength <= inlineLimit;
+export function deltaSegmentFitsInline(byteLength: number, stateVectorB64Length: number, inlineLimit: number): boolean {
+    return byteLength + stateVectorB64Length <= inlineLimit;
 }
 
 /**
@@ -266,6 +273,35 @@ export function buildDeltaSegmentDoc(params: {
         createdBy: uid,
         ...(epoch > 0 ? { epoch } : {}),
     };
+}
+
+/**
+ * Whether a snapshot's delete-set fingerprint can be stored inline on the
+ * main document, or must be offloaded to Cloud Storage.
+ *
+ * The per-field cap alone does not keep the main document under the
+ * Firestore limit: the fingerprint shares it with the base64 state vector
+ * (~8 bytes per client ever seen), which has no offload path. On an aged
+ * many-client document the two together exceed the limit, Firestore
+ * rejects the snapshot write with a non-retryable INVALID_ARGUMENT, and
+ * every later fold recomputes the same fields — compaction stops for
+ * good. So the fingerprint must also fit in the room the state vector
+ * leaves.
+ *
+ * @param params - Fingerprint size, base64 state vector length, the
+ * per-field cap and the inline payload ceiling.
+ * @returns true to store the fingerprint inline, false to offload it.
+ */
+export function deleteSetFitsInline(params: {
+    deleteSetBytes: number;
+    stateVectorB64Length: number;
+    maxFieldBytes: number;
+    inlineLimit: number;
+}): boolean {
+    const { deleteSetBytes, stateVectorB64Length, maxFieldBytes, inlineLimit } = params;
+
+    return deleteSetBytes <= maxFieldBytes
+        && deleteSetBytes + stateVectorB64Length <= inlineLimit;
 }
 
 /**

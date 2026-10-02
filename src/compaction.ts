@@ -55,6 +55,7 @@ import { toBase64 } from "lib0/buffer";
 import {
     buildDeltaSegmentDoc,
     buildSnapshotResult,
+    deleteSetFitsInline,
     deltaSegmentFitsInline,
     epochOf,
     foldDeleteSetPath,
@@ -366,14 +367,20 @@ export async function compact(
             // the main document: it lets clients that already cover the
             // snapshot's state vector skip downloading the blob while still
             // proving their deletions are on the server.
-            if (merged.dsUpdate.byteLength <= (ctx.maxDeleteSetFieldBytes ?? DEFAULTS.MAX_DELETE_SET_FIELD_BYTES)) {
+            if (deleteSetFitsInline({
+                deleteSetBytes: merged.dsUpdate.byteLength,
+                stateVectorB64Length: stateVectorB64.length,
+                maxFieldBytes: ctx.maxDeleteSetFieldBytes ?? DEFAULTS.MAX_DELETE_SET_FIELD_BYTES,
+                inlineLimit: DEFAULTS.INLINE_UPDATE_LIMIT,
+            })) {
                 deleteSetUpdate = merged.dsUpdate;
             } else {
-                // Too large to inline (very old, deletion-heavy document).
-                // Offload to Cloud Storage instead of dropping it: without a
-                // fingerprint every reconnecting client fails the push-guard
-                // coverage proof and writes a spurious O(delete-set) update
-                // document on every boot, forever.
+                // Too large to inline beside the state vector (very old,
+                // deletion-heavy or many-client document). Offload to Cloud
+                // Storage instead of dropping it: without a fingerprint
+                // every reconnecting client fails the push-guard coverage
+                // proof and writes a spurious O(delete-set) update document
+                // on every boot, forever.
                 oversizedDeleteSet = merged.dsUpdate;
             }
         } catch (decodeErr) {
@@ -474,11 +481,12 @@ async function tryDeltaCompaction(params: {
     // attempt.
     const merged = await mergeUpdatesWithMetaAsync(updatesToProcess.map(u => u.data), { gc: false });
 
-    if (!deltaSegmentFitsInline(merged.result.byteLength, DEFAULTS.INLINE_UPDATE_LIMIT)) {
+    const segmentB64Sv = toBase64(merged.stateVector);
+
+    if (!deltaSegmentFitsInline(merged.result.byteLength, segmentB64Sv.length, DEFAULTS.INLINE_UPDATE_LIMIT)) {
         return null;
     }
 
-    const segmentB64Sv = toBase64(merged.stateVector);
     // The state vector cannot show deletions; flag them so readers never
     // skip this segment as covered (see buildDeltaSegmentDoc).
     const hasDeletions = updateHasDeletions(merged.dsUpdate);

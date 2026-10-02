@@ -191,15 +191,20 @@ describe('stillHoldsLock', () => {
 });
 
 describe('squashSnapshotPath', () => {
-    it('includes both epoch and version so blobs never collide', () => {
-        expect(squashSnapshotPath('docs/a', 2, 7)).toBe('docs/a/snapshot_e2_v7.bin');
+    it('includes epoch, version and attempt so blobs never collide', () => {
+        expect(squashSnapshotPath('docs/a', 2, 7, 'x1')).toBe('docs/a/snapshot_e2_v7_x1.bin');
     });
 
     it('distinguishes epochs at the same version', () => {
-        expect(squashSnapshotPath('docs/a', 1, 7)).not.toBe(squashSnapshotPath('docs/a', 2, 7));
+        expect(squashSnapshotPath('docs/a', 1, 7, 'x1')).not.toBe(squashSnapshotPath('docs/a', 2, 7, 'x1'));
     });
 
     it('distinguishes versions within an epoch', () => {
-        expect(squashSnapshotPath('docs/a', 2, 7)).not.toBe(squashSnapshotPath('docs/a', 2, 8));
+        expect(squashSnapshotPath('docs/a', 2, 7, 'x1')).not.toBe(squashSnapshotPath('docs/a', 2, 8, 'x1'));
+    });
+
+    /* A squasher whose lease lapsed mid-upload must not hit the winner's blob. */
+    it('distinguishes attempts squashing from the same version', () => {
+        expect(squashSnapshotPath('docs/a', 2, 7, 'x1')).not.toBe(squashSnapshotPath('docs/a', 2, 7, 'x2'));
     });
 });

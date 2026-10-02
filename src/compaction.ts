@@ -57,6 +57,8 @@ import {
     buildSnapshotResult,
     deltaSegmentFitsInline,
     epochOf,
+    foldDeleteSetPath,
+    foldSnapshotPath,
     nextSnapshotVersion,
     planHistoryDoc,
     planUpdateDoc,
@@ -65,7 +67,7 @@ import {
     shouldUseDelta,
 } from './compaction-policy';
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
-import { wait, calculateBackoff } from "./utils";
+import { wait, calculateBackoff, generateSessionId } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
 import { mergeUpdatesWithMetaAsync } from "./merge-utils";
 
@@ -208,7 +210,7 @@ export async function compact(
         const mainSnap = await getDoc(mainRef);
 
         const mainState = readMainDocState(mainSnap.exists() ? mainSnap.data() : null);
-        const { hasBase, baseStoragePath, currentVersion, currentEpoch } = mainState;
+        const { hasBase, baseStoragePath, baseDeleteSetStoragePath, currentVersion, currentEpoch } = mainState;
         const baseInline = mainState.baseInline as Bytes | null;
 
         // Epoch fence: documents written before a squash belong to an
@@ -373,17 +375,20 @@ export async function compact(
         }
 
         const nextVersion = currentVersion + 1;
-        const snapshotFilename = `snapshot_v${nextVersion}.bin`;
-        const storagePath = `${path}/${snapshotFilename}`;
+        const attemptId = generateSessionId();
+        const storagePath = foldSnapshotPath(path, nextVersion, attemptId);
         const storageRef = ref(storage, storagePath);
 
         // Upload candidate blob to Cloud Storage first
         // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
+        // The path is unique to this attempt: if we lose the lock while
+        // uploading, another client may commit the same version, and a
+        // version-derived name would let our late upload replace its blob.
         await uploadBytes(storageRef, candidate);
 
         let deleteSetStoragePath: string | null = null;
         if (oversizedDeleteSet) {
-            deleteSetStoragePath = `${path}/ds_v${nextVersion}.bin`;
+            deleteSetStoragePath = foldDeleteSetPath(path, nextVersion, attemptId);
             await uploadBytes(ref(storage, deleteSetStoragePath), oversizedDeleteSet);
         }
 
@@ -403,20 +408,26 @@ export async function compact(
             expectedVersion: currentVersion,
         });
 
-        // Garbage Collect Old Storage Snapshot (and its delete-set blob)
-        if (result.success && result.type === 'snapshot' && result.previousVersion !== undefined && result.previousVersion > 0) {
-            try {
-                const oldSnapshotPath = `${path}/snapshot_v${result.previousVersion}.bin`;
-                const oldStorageRef = ref(storage, oldSnapshotPath);
-                await deleteObject(oldStorageRef);
-                console.log(`Garbage collected old snapshot: ${oldSnapshotPath}`);
-            } catch (err) {
-                console.warn(`Failed to garbage collect old snapshot for ${path}`, err);
+        // Garbage Collect Old Storage Snapshot (and its delete-set blob).
+        // Use the paths the replaced main document stored: blob names are
+        // attempt-unique, so they cannot be rebuilt from the version. The
+        // transaction verified the version is unchanged, and every writer
+        // of these fields bumps it, so they still describe what we replaced.
+        if (result.success && result.type === 'snapshot') {
+            if (baseStoragePath) {
+                try {
+                    await deleteObject(ref(storage, baseStoragePath));
+                    console.log(`Garbage collected old snapshot: ${baseStoragePath}`);
+                } catch (err) {
+                    console.warn(`Failed to garbage collect old snapshot for ${path}`, err);
+                }
             }
-            try {
-                await deleteObject(ref(storage, `${path}/ds_v${result.previousVersion}.bin`));
-            } catch (err) {
-                // Normal case: no offloaded delete-set existed for that version
+            if (baseDeleteSetStoragePath) {
+                try {
+                    await deleteObject(ref(storage, baseDeleteSetStoragePath));
+                } catch (err) {
+                    console.warn(`Failed to garbage collect old delete-set for ${path}`, err);
+                }
             }
         }
 

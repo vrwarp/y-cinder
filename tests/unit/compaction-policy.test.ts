@@ -15,6 +15,8 @@ import {
     chooseDeleteSetField,
     deltaSegmentFitsInline,
     epochOf,
+    foldDeleteSetPath,
+    foldSnapshotPath,
     nextSnapshotVersion,
     isLockLostError,
     isRetryableCompactionError,
@@ -55,6 +57,7 @@ describe('readMainDocState', () => {
         expect(readMainDocState(null)).toEqual({
             hasBase: false,
             baseStoragePath: null,
+            baseDeleteSetStoragePath: null,
             baseInline: null,
             currentVersion: 0,
             currentEpoch: 0,
@@ -97,6 +100,19 @@ describe('readMainDocState', () => {
 
         expect(state.hasBase).toBe(false);
         expect(state.currentVersion).toBe(9);
+    });
+
+    /* Fold GC deletes the replaced blobs through these stored paths. */
+    it('reads the offloaded delete-set path alongside the snapshot path', () => {
+        const state = readMainDocState({ snapshotStoragePath: 'gs://snap', deleteSetStoragePath: 'gs://ds' });
+
+        expect(state.baseStoragePath).toBe('gs://snap');
+        expect(state.baseDeleteSetStoragePath).toBe('gs://ds');
+    });
+
+    it('reports no delete-set path when the fingerprint is inline', () => {
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap', deleteSet: {} }).baseDeleteSetStoragePath)
+            .toBeNull();
     });
 
     it('ignores a non-numeric version or epoch', () => {
@@ -358,5 +374,27 @@ describe('nextSnapshotVersion', () => {
     it('increments by one', () => {
         expect(nextSnapshotVersion(0)).toBe(1);
         expect(nextSnapshotVersion(41)).toBe(42);
+    });
+});
+
+/*
+ * Candidates are uploaded before the lock-checked commit. Two attempts
+ * folding the same version must never share an object, or a compactor
+ * whose lease lapsed mid-upload replaces the winner's committed snapshot.
+ */
+describe('foldSnapshotPath / foldDeleteSetPath', () => {
+    it('names the blobs by version and attempt', () => {
+        expect(foldSnapshotPath('docs/a', 3, 'x1')).toBe('docs/a/snapshot_v3_x1.bin');
+        expect(foldDeleteSetPath('docs/a', 3, 'x1')).toBe('docs/a/ds_v3_x1.bin');
+    });
+
+    it('distinguishes attempts folding the same version', () => {
+        expect(foldSnapshotPath('docs/a', 3, 'x1')).not.toBe(foldSnapshotPath('docs/a', 3, 'x2'));
+        expect(foldDeleteSetPath('docs/a', 3, 'x1')).not.toBe(foldDeleteSetPath('docs/a', 3, 'x2'));
+    });
+
+    it('distinguishes versions', () => {
+        expect(foldSnapshotPath('docs/a', 3, 'x1')).not.toBe(foldSnapshotPath('docs/a', 4, 'x1'));
+        expect(foldDeleteSetPath('docs/a', 3, 'x1')).not.toBe(foldDeleteSetPath('docs/a', 4, 'x1'));
     });
 });

@@ -58,6 +58,7 @@ import { toBase64, fromBase64 } from "lib0/buffer";
 import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";
+import { generateSessionId } from "./utils";
 import {
     isNotQuiescent,
     isSquashPreempted,
@@ -286,7 +287,7 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         }
 
         const nextVersion = currentVersion + 1;
-        const storagePath = squashSnapshotPath(path, newEpoch, nextVersion);
+        const storagePath = squashSnapshotPath(path, newEpoch, nextVersion, generateSessionId());
         await uploadBytes(ref(storage, storagePath), candidate);
 
         const result = await runTransaction(db, async (transaction) => {

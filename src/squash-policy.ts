@@ -152,13 +152,17 @@ export function stillHoldsLock(lockData: Record<string, any> | null | undefined,
  * The Cloud Storage path for a squashed snapshot.
  *
  * Epoch and version both appear so a squash never overwrites the blob a
- * previous epoch's readers may still be fetching.
+ * previous epoch's readers may still be fetching. The per-attempt id keeps
+ * two squashers racing from the same version apart: the blob is uploaded
+ * before the lock-checked commit, so one whose lease lapsed mid-upload
+ * would otherwise replace the snapshot the winner just committed.
  *
  * @param basePath - The document's base path.
  * @param epoch - The new epoch.
  * @param version - The new version.
+ * @param attemptId - Unique to this squash attempt.
  * @returns The storage object path.
  */
-export function squashSnapshotPath(basePath: string, epoch: number, version: number): string {
-    return `${basePath}/snapshot_e${epoch}_v${version}.bin`;
+export function squashSnapshotPath(basePath: string, epoch: number, version: number, attemptId: string): string {
+    return `${basePath}/snapshot_e${epoch}_v${version}_${attemptId}.bin`;
 }

@@ -35,6 +35,8 @@ export interface MainDocState {
     hasBase: boolean;
     /** Cloud Storage path of the base snapshot, when it lives there. */
     baseStoragePath: string | null;
+    /** Cloud Storage path of the base's offloaded delete-set fingerprint. */
+    baseDeleteSetStoragePath: string | null;
     /** Legacy inline snapshot content, when the base is still inline. */
     baseInline: unknown | null;
     /** Snapshot version, used for optimistic concurrency. */
@@ -57,6 +59,7 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
     const state: MainDocState = {
         hasBase: false,
         baseStoragePath: null,
+        baseDeleteSetStoragePath: null,
         baseInline: null,
         currentVersion: 0,
         currentEpoch: 0,
@@ -72,6 +75,9 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
     } else if (data.content) {
         state.hasBase = true;
         state.baseInline = data.content;
+    }
+    if (data.deleteSetStoragePath) {
+        state.baseDeleteSetStoragePath = data.deleteSetStoragePath;
     }
     if (typeof data.version === 'number') {
         state.currentVersion = data.version;
@@ -316,4 +322,36 @@ export function buildSnapshotResult(params: {
  */
 export function nextSnapshotVersion(currentVersion: number): number {
     return currentVersion + 1;
+}
+
+/**
+ * The Cloud Storage path for a fold's candidate snapshot.
+ *
+ * The candidate is uploaded BEFORE the lock-checked commit, and the lock
+ * is a lease with no fencing token: a compactor that stalls past it can
+ * still be uploading after another client folded the same version and
+ * committed. The per-attempt id gives every candidate its own object, so
+ * such a late upload lands where nothing points instead of replacing the
+ * snapshot the winner committed.
+ *
+ * @param basePath - The document's base path.
+ * @param version - The version the fold will commit.
+ * @param attemptId - Unique to this compaction attempt.
+ * @returns The storage object path.
+ */
+export function foldSnapshotPath(basePath: string, version: number, attemptId: string): string {
+    return `${basePath}/snapshot_v${version}_${attemptId}.bin`;
+}
+
+/**
+ * The Cloud Storage path for a fold's offloaded delete-set fingerprint.
+ * Attempt-unique for the same reason as foldSnapshotPath.
+ *
+ * @param basePath - The document's base path.
+ * @param version - The version the fold will commit.
+ * @param attemptId - Unique to this compaction attempt.
+ * @returns The storage object path.
+ */
+export function foldDeleteSetPath(basePath: string, version: number, attemptId: string): string {
+    return `${basePath}/ds_v${version}_${attemptId}.bin`;
 }

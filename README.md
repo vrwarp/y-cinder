@@ -140,7 +140,7 @@ The provider extends `ObservableV2` and emits the following events:
 | `connection-error` | `{ code: string, message: string, error: Error }` | Emitted when a Firestore listener encounters an error. |
 | `sync-failure` | `Error` | Emitted when initial sync fails after all retry attempts. |
 | `corrupted-document` | `{ docId: string, error: Error }` | Emitted when a corrupted Firestore document is quarantined. |
-| `save-rejected` | See below | Emitted when a local update **cannot** be persisted to Firestore. |
+| `save-rejected` | See below | Emitted when a local update **cannot** be persisted to Firestore. The update is not dropped: it stays queued ahead of newer edits and is retried with the next save (or the `destroy()` flush). |
 | `squashed` | `{ epoch: number }` | Emitted on the client that successfully ran `squash()`. The provider has stopped syncing; rebuild the local document from the new epoch's snapshot and recreate providers. |
 | `epoch-changed` | `{ previousEpoch: number, epoch: number, localState: Uint8Array \| null }` | Emitted when the server was squashed past this client's epoch. The provider has stopped syncing (nothing was applied — applying would duplicate content). `localState` is the full old-epoch local state for the application to inspect/merge; rebuild the local doc from the new snapshot and recreate providers. |
 
@@ -206,7 +206,7 @@ However, users should evaluate their specific constraints:
 - **Latency**: Firestore snapshot listeners typically have higher latency (500ms - 1s) compared to dedicated WebSocket servers (< 50ms). This makes `y-cinder` excellent for collaborative editing (docs, notes) but unsuitable for high-frequency real-time applications like gaming or cursor tracking.
 - **Cost vs. Scale**: While `y-cinder` is highly optimized, every keystroke debounced to a write is still a Firestore operation. Documents with extreme concurrency (50+ active users simultaneously) may still incur significant costs or hit Firestore's write rate limits on specific index ranges.
 - **Client-Side Maintenance**: Compaction tasks are distributed among clients. While this keeps the architecture "serverless," it means active clients must burn some CPU and bandwidth to maintain database health.
-- **Storage Limits**: Firestore has a strict 1MB limit per document. Updates and snapshots that exceed the inline limit are automatically offloaded to Cloud Storage with a lightweight pointer document, so large payloads do not fail. A `save-rejected` event (`code: 'document-too-large'`) is only emitted in the rare case of a server-side size rejection; `code: 'max-retries-exceeded'` covers persistent write failures (with exponential backoff between attempts). Both payloads include the affected update for consumer recovery.
+- **Storage Limits**: Firestore has a strict 1MB limit per document. Updates and snapshots that exceed the inline limit are automatically offloaded to Cloud Storage with a lightweight pointer document, so large payloads do not fail. A `save-rejected` event (`code: 'document-too-large'`) is only emitted in the rare case of a server-side size rejection; `code: 'max-retries-exceeded'` covers persistent write failures (with exponential backoff between attempts). Both payloads include the affected update for consumer recovery; the provider also keeps it queued and retries it with the next save, because later edits from the same client cannot be integrated by peers without it.
 
 ## Contributors
 

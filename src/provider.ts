@@ -830,7 +830,9 @@ export class FireProvider extends ObservableV2<any> {
    * diffs) instead of being rejected.
    *
    * Circuit breaker: persistent failures retry with exponential backoff,
-   * then emit 'save-rejected' after MAX_SAVE_RETRIES attempts.
+   * then emit 'save-rejected' after MAX_SAVE_RETRIES attempts. A rejected
+   * batch is never dropped: it stays queued ahead of newer updates, since
+   * later batches cannot integrate on peers without its clock range.
    */
   private saveToFirestore(): Promise<void> {
     if (this._inflightSave) return this._inflightSave;
@@ -902,6 +904,20 @@ export class FireProvider extends ObservableV2<any> {
     } catch (err: any) {
       console.error("Failed to save update to Firestore", err);
 
+      // Recovery: put the failed batch back ahead of any updates that
+      // arrived during the attempt — on every path, including the
+      // terminal ones below. Dropping it would leave a hole in this
+      // client's clock range: every later batch starts past it, so no
+      // peer could ever integrate them (they would sit in pendingStructs
+      // even though 'saved' fired for them).
+      const hasNewerUpdates = this._pendingUpdates.length > 0;
+      this._pendingUpdates.unshift(update);
+      // Restart the aggregation clock: retries pace themselves via
+      // explicit backoff, the cap only guards the debounce path
+      if (this._pendingSince === null) {
+        this._pendingSince = Date.now();
+      }
+
       // Detect Firestore size-limit error (server-side rejection of an
       // inline write; rare now that oversized updates are offloaded with
       // headroom below the limit)
@@ -911,7 +927,9 @@ export class FireProvider extends ObservableV2<any> {
         err?.message?.includes('too large');
 
       if (isDocTooLarge) {
-        // Terminal: the data will never fit, do not retry
+        // Terminal: the data will never fit as is, do not retry on a
+        // timer. The batch stays queued and goes out merged with the next
+        // save (newer updates or the destroy() flush).
         this.emit('save-rejected', [{
           code: 'document-too-large' as const,
           sizeBytes: update.byteLength,
@@ -919,7 +937,7 @@ export class FireProvider extends ObservableV2<any> {
           error: err instanceof Error ? err : new Error(String(err)),
           update,
         }]);
-        if (this._pendingUpdates.length > 0) {
+        if (hasNewerUpdates) {
           this._scheduleSave();
         }
         return;
@@ -939,19 +957,12 @@ export class FireProvider extends ObservableV2<any> {
           update,
         }]);
         this._saveRetryCount = 0;
-        if (this._pendingUpdates.length > 0) {
+        // Stop retrying on a timer; the queued batch goes out with the
+        // next save (newer updates or the destroy() flush)
+        if (hasNewerUpdates) {
           this._scheduleSave();
         }
         return;
-      }
-
-      // Recovery: put the failed batch back ahead of any updates
-      // that arrived during the attempt
-      this._pendingUpdates.unshift(update);
-      // Restart the aggregation clock: retries pace themselves via
-      // explicit backoff, the cap only guards the debounce path
-      if (this._pendingSince === null) {
-        this._pendingSince = Date.now();
       }
 
       // Retry with exponential backoff

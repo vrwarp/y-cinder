@@ -107,6 +107,8 @@ export interface CompactionContext {
      * (updates -> one history segment, O(new data)); at the threshold it
      * folds (snapshot + history + updates -> new snapshot, O(document)).
      * Defaults to DEFAULTS.HISTORY_FOLD_THRESHOLD; 1 = always fold.
+     * Capped at DEFAULTS.MAX_COMPACTION_HISTORY + 1: one fold merges at
+     * most MAX_COMPACTION_HISTORY segments.
      */
     historyFoldThreshold?: number;
     /**
@@ -187,10 +189,12 @@ export async function compact(
         );
         const updatesSnap = await getDocs(updatesQ);
 
+        // One row past the cap: it is never merged, it only reveals that
+        // history extends beyond what this cycle can fold.
         const historyQ = query(
             collection(db, path, FIRESTORE_PATHS.HISTORY),
             orderBy('startTime', 'asc'),
-            limit(DEFAULTS.MAX_COMPACTION_HISTORY)
+            limit(DEFAULTS.MAX_COMPACTION_HISTORY + 1)
         );
         const historySnaps = await getDocs(historyQ);
 
@@ -199,7 +203,8 @@ export async function compact(
         }
 
         const updateDocs = updatesSnap.docs;
-        const historyDocs = historySnaps.docs;
+        const historyTruncated = historySnaps.docs.length > DEFAULTS.MAX_COMPACTION_HISTORY;
+        const historyDocs = historySnaps.docs.slice(0, DEFAULTS.MAX_COMPACTION_HISTORY);
 
         // Test hook for simulating concurrent modifications
         if (testHooks?.beforeTransaction) {
@@ -328,6 +333,16 @@ export async function compact(
             // Segment would not fit inline — fall through to a full fold.
         }
 
+        // A fold must merge a per-client prefix of the document: the
+        // snapshot's state vector holds clock ends, and the sync layer skips
+        // every segment that vector covers. When history extends past what
+        // one fold can merge, the pending updates are newer than the
+        // segments left behind, so folding them in would make the snapshot
+        // claim clocks it does not hold and fresh clients would skip those
+        // segments for good. Such a fold takes base + the oldest history
+        // only; the updates wait for a later cycle.
+        const updatesToFold = historyTruncated ? [] : updatesToProcess;
+
         // === FOLD: download base, merge all, upload new snapshot ===
         let baseSnapshot: Uint8Array | null = null;
         if (baseStoragePath) {
@@ -354,7 +369,7 @@ export async function compact(
         // keeps compaction's main-thread cost near zero. A validation
         // failure rejects, and a corrupted merge must never overwrite the
         // canonical snapshot.
-        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
+        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToFold.map(u => u.data)];
         let candidate: Uint8Array;
         let stateVectorB64: string;
         let deleteSetUpdate: Uint8Array | null = null;
@@ -413,7 +428,7 @@ export async function compact(
             db,
             path,
             uid,
-            verifiedUpdateRefs: updatesToProcess.map(u => u.ref),
+            verifiedUpdateRefs: updatesToFold.map(u => u.ref),
             verifiedHistoryRefs: historyToMerge.map(h => h.ref),
             staleRefs,
             storagePath,

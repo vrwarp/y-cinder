@@ -102,7 +102,9 @@ export interface FireProviderConfig {
      * re-uploading the whole snapshot every maxUpdatesThreshold updates.
      * On aged documents (multi-MB snapshots) this cuts steady-state
      * compaction transfer by roughly this factor.
-     * Set to 1 to restore the old always-fold behavior.
+     * Set to 1 to restore the old always-fold behavior. Values above 100
+     * behave like 100: one fold merges at most 99 history segments
+     * (Firestore's 500-write transaction limit).
      * @default 8
      */
     historyFoldThreshold?: number;

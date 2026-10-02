@@ -113,7 +113,7 @@ The `FireProvider` constructor accepts the following configuration options:
 | `maxWaitTime` | `number` | No | `500` | Debounce time (ms) for writing updates to Firestore. |
 | `maxAggregationTime` | `number` | No | `maxWaitTime * 10` | Hard cap (ms) on how long the sliding debounce may defer a save during continuous editing. |
 | `gcCompaction` | `boolean` | No | `true` | Garbage-collect deleted content when compacting snapshots. Keeps long-lived documents proportional to live content instead of total historical churn. See [docs/performance.md](docs/performance.md). |
-| `historyFoldThreshold` | `number` | No | `8` | History segments accumulated before compaction folds everything into the base snapshot. Between folds, compaction runs in cheap **delta mode** (pending updates → one history segment, `O(new data)`) instead of downloading/re-merging/re-uploading the whole snapshot every `maxUpdatesThreshold` updates. `1` restores the old always-fold behavior. |
+| `historyFoldThreshold` | `number` | No | `8` | History segments accumulated before compaction folds everything into the base snapshot. Between folds, compaction runs in cheap **delta mode** (pending updates → one history segment, `O(new data)`) instead of downloading/re-merging/re-uploading the whole snapshot every `maxUpdatesThreshold` updates. `1` restores the old always-fold behavior. Values above `100` behave like `100`: one fold merges at most 99 history segments (Firestore's 500-write transaction limit). |
 | `subdocLoadingMode` | `'eager' \| 'lazy'` | No | `'eager'` | `'lazy'` defers syncing remote subdocuments until `subdoc.load()` is called (Yjs convention), avoiding N initial syncs + 3N listeners at startup for documents with many subdocs. |
 
 ### API Methods

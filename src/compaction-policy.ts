@@ -99,7 +99,13 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
  * build on, when there is nothing new, or when history has grown to the
  * fold threshold (counting the segment this cycle would add).
  *
- * @param params - Base presence, pending counts and the fold threshold.
+ * The threshold is capped at maxHistory + 1. One fold can merge at most
+ * maxHistory segments (the transaction write budget), so compaction never
+ * counts more than that: a larger threshold could never be reached, and
+ * history would grow without bound, never folding.
+ *
+ * @param params - Base presence, pending counts, the fold threshold and the
+ * per-cycle history cap.
  * @returns true to run DELTA, false to FOLD.
  */
 export function shouldUseDelta(params: {
@@ -107,10 +113,12 @@ export function shouldUseDelta(params: {
     updateCount: number;
     historyCount: number;
     historyFoldThreshold: number;
+    maxHistory?: number;
 }): boolean {
-    const { hasBase, updateCount, historyCount, historyFoldThreshold } = params;
+    const { hasBase, updateCount, historyCount, historyFoldThreshold, maxHistory = DEFAULTS.MAX_COMPACTION_HISTORY } = params;
+    const foldThreshold = Math.min(historyFoldThreshold, maxHistory + 1);
 
-    return hasBase && updateCount > 0 && historyCount + 1 < historyFoldThreshold;
+    return hasBase && updateCount > 0 && historyCount + 1 < foldThreshold;
 }
 
 /**

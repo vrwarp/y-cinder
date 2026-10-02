@@ -164,6 +164,24 @@ describe('shouldUseDelta', () => {
     it('never goes negative on the comparison', () => {
         expect(shouldUseDelta({ ...base, historyCount: 0, historyFoldThreshold: 0 })).toBe(false);
     });
+
+    /*
+     * Compaction reads (and one fold merges) at most MAX_COMPACTION_HISTORY
+     * segments, so historyCount never exceeds it. A larger threshold must
+     * still fold once that window is full, or it never folds at all.
+     */
+    it('caps the threshold at what one compaction can read', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        for (const historyFoldThreshold of [max + 1, max + 2, 150]) {
+            expect(shouldUseDelta({ ...base, historyCount: max - 1, historyFoldThreshold })).toBe(true);
+            expect(shouldUseDelta({ ...base, historyCount: max, historyFoldThreshold })).toBe(false);
+        }
+    });
+
+    it('takes the cap from maxHistory when given', () => {
+        expect(shouldUseDelta({ ...base, historyCount: 3, historyFoldThreshold: 8, maxHistory: 4 })).toBe(true);
+        expect(shouldUseDelta({ ...base, historyCount: 4, historyFoldThreshold: 8, maxHistory: 4 })).toBe(false);
+    });
 });
 
 describe('isRetryableCompactionError', () => {

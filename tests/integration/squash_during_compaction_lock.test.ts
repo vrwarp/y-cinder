@@ -89,7 +89,9 @@ describe('squash() during an in-flight compaction', () => {
             await Promise.race([compaction.catch(() => { }), sleep(15_000)]);
             compaction = null;
         }
-    });
+        // Covers destroy() plus the 15 s compaction wait above; the default
+        // 10 s hook timeout would turn a slow teardown into a second failure.
+    }, 40_000);
 
     /** Loads the document the way any new device would and returns its content. */
     async function loadAsFreshClient(): Promise<Record<string, unknown>> {

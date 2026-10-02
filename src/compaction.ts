@@ -660,7 +660,8 @@ function compactToSnapshot(params: {
         deleteSetStoragePath: deleteSetStoragePath ?? deleteField(),
         version: nextSnapshotVersion(currentVersion),
         updatedAt: serverTimestamp(),
-        // Lets the compacting client's own snapshot listener skip this write
+        // Identifies the compacting client. Its own snapshot listener still
+        // runs the coverage check: the fold may hold data it lacks.
         origin: uid,
     }, { merge: true });
 

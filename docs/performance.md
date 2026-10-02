@@ -414,7 +414,7 @@ The snapshot listener also re-applied the fingerprint on every delivery —
 including the attach-delivery of every reconnect, whose state initial sync
 had *just* processed. Deliveries now carry a version gate
 (`SyncResult.snapshotVersion` → `createSnapshotListener`), so the
-re-apply runs only when a remote compaction actually produced a new fold.
+re-apply runs only when a compaction actually produced a new fold.
 
 ## Fix 4 (latent correctness bug): partial-update metadata was empty
 

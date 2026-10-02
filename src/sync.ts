@@ -741,22 +741,17 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
         const data = snapshot.data();
         if (!data) return;
 
-        // Skip snapshots produced by our own compaction
-        if (data.origin === ctx.uid) {
-            if (typeof data.version === 'number') {
-                lastProcessedVersion = data.version;
-            }
-            return;
-        }
-
         // Epoch fence: someone squashed the document into a new epoch.
         // The new snapshot must NOT be applied onto the old-epoch local
         // doc (content would duplicate — the id spaces are unrelated);
-        // surface it so the application rebuilds instead.
+        // surface it so the application rebuilds instead. Our own squash
+        // fences this provider itself (it emits 'squashed').
         const snapEpoch = typeof data.epoch === 'number' ? data.epoch : 0;
         const curEpoch = ctx.getEpoch?.() ?? 0;
         if (snapEpoch > curEpoch) {
-            ctx.onEpochChanged?.(snapEpoch);
+            if (data.origin !== ctx.uid) {
+                ctx.onEpochChanged?.(snapEpoch);
+            }
             return;
         }
         if (snapEpoch < curEpoch) {
@@ -774,7 +769,11 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
         // Redundancy check: if the local doc already covers the snapshot's
         // state vector, downloading it would be a no-op. The delete-set
         // fingerprint is still applied first to pick up any deletions that
-        // travelled in structs we already cover.
+        // travelled in structs we already cover. Our own compactions go
+        // through this too: a fold merges what the SERVER holds, which can
+        // include data the local doc lacks (e.g. a quarantined update) —
+        // and it deletes the source documents, so this is the only path
+        // left for that data.
         if (data.deleteSet) {
             try {
                 Y.applyUpdate(ydoc, (data.deleteSet as Bytes).toUint8Array(), FIREBASE_ORIGINS.SNAPSHOT);

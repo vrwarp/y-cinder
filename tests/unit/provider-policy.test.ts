@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest';
 import {
     computeSaveDelay,
     isRemoteOrigin,
+    planListenerRecovery,
     squashBlockedBy,
     validateProviderConfig,
 } from '../../src/provider-policy';
@@ -125,6 +126,37 @@ describe('computeSaveDelay', () => {
 
     it('honours an explicit zero rather than falling back to the debounce', () => {
         expect(computeSaveDelay({ ...base, explicitDelayMs: 0 })).toBe(0);
+    });
+});
+
+describe('planListenerRecovery', () => {
+    const base = { retryCount: 0, attachedAt: 100_000, now: 100_500, healthyMs: 30_000, maxRetries: 5 };
+
+    it('re-syncs after the first error', () => {
+        expect(planListenerRecovery(base)).toEqual({ retryCount: 1, giveUp: false });
+    });
+
+    it('escalates when the fresh listeners fail again quickly', () => {
+        expect(planListenerRecovery({ ...base, retryCount: 2 })).toEqual({ retryCount: 3, giveUp: false });
+    });
+
+    /*
+     * The re-sync's reads can succeed while the listen itself keeps being
+     * rejected; without a cap every cycle re-reads the whole document.
+     */
+    it('gives up once errors in quick succession reach maxRetries', () => {
+        expect(planListenerRecovery({ ...base, retryCount: 3 })).toEqual({ retryCount: 4, giveUp: false });
+        expect(planListenerRecovery({ ...base, retryCount: 4 })).toEqual({ retryCount: 5, giveUp: true });
+    });
+
+    it('starts over when the listeners stayed up for healthyMs', () => {
+        expect(planListenerRecovery({ ...base, retryCount: 4, now: base.attachedAt + 30_000 }))
+            .toEqual({ retryCount: 1, giveUp: false });
+    });
+
+    it('still counts listeners that failed just short of healthyMs', () => {
+        expect(planListenerRecovery({ ...base, retryCount: 4, now: base.attachedAt + 29_999 }))
+            .toEqual({ retryCount: 5, giveUp: true });
     });
 });
 

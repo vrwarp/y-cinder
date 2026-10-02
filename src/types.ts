@@ -180,6 +180,12 @@ export const DEFAULTS = {
     MAX_SUBDOC_DEPTH: 50,
     TARGET_SNAPSHOT_SIZE: 900000, // 900KB
     MAX_RETRIES: 5,
+    /**
+     * Real-time listeners that stay up this long count as healthy: their
+     * next error restarts the re-sync backoff instead of counting toward
+     * MAX_RETRIES.
+     */
+    LISTENER_HEALTHY_MS: 30_000,
     /** Maximum docs to fetch per batch during initial sync (P0.1 fix) */
     SYNC_BATCH_SIZE: 100,
     /** Pending-update count that forces a compaction trigger, bypassing the trigger cooldown */

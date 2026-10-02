@@ -88,6 +88,32 @@ export function computeSaveDelay(params: {
     return Math.max(0, Math.min(maxWaitTime, deadline - now));
 }
 
+/**
+ * How to recover from a real-time listener error.
+ *
+ * Firestore ends a listener for good once its error callback fires, so the
+ * provider re-syncs to attach fresh ones. Listeners that stayed up for
+ * `healthyMs` were healthy, so the count starts over. Errors in quick
+ * succession (the re-sync's reads succeed but the listen keeps being
+ * rejected) escalate the backoff and, like initial sync, give up after
+ * `maxRetries` instead of re-reading the whole document forever.
+ *
+ * @param state - Errors so far, when the listeners were attached, now and the limits.
+ * @returns The new error count, and whether to stop re-syncing.
+ */
+export function planListenerRecovery(state: {
+    retryCount: number;
+    attachedAt: number;
+    now: number;
+    healthyMs: number;
+    maxRetries: number;
+}): { retryCount: number; giveUp: boolean } {
+    const healthy = state.now - state.attachedAt >= state.healthyMs;
+    const retryCount = (healthy ? 0 : state.retryCount) + 1;
+
+    return { retryCount, giveUp: retryCount >= state.maxRetries };
+}
+
 /** Why a squash cannot run right now. */
 export type SquashBlock =
     | { kind: 'destroyed' }

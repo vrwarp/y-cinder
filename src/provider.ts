@@ -50,6 +50,7 @@ import {
 import {
   computeSaveDelay,
   isRemoteOrigin,
+  planListenerRecovery,
   squashBlockedBy,
   validateProviderConfig,
 } from './provider-policy';
@@ -155,6 +156,10 @@ export class FireProvider extends ObservableV2<any> {
   private _saveRetryCount = 0;
   /** P1.4 FIX: Sync retry counter for exponential backoff */
   private _syncRetryCount = 0;
+  /** Consecutive listener errors, for re-sync backoff */
+  private _listenerRetryCount = 0;
+  /** When the current real-time listeners were attached */
+  private _listenersAttachedAt = 0;
   /**
    * Wall-clock time when the oldest currently-buffered update arrived.
    * Used to enforce maxAggregationTime against the sliding debounce.
@@ -294,7 +299,8 @@ export class FireProvider extends ObservableV2<any> {
 
   /**
    * Whether initial sync has completed and real-time listeners are active.
-   * Also emitted as a 'sync' event when the state becomes true.
+   * Also emitted as a 'sync' event when the state becomes true. Drops back
+   * to false while recovering from a listener error.
    */
   get synced(): boolean {
     return this._synced;
@@ -360,10 +366,7 @@ export class FireProvider extends ObservableV2<any> {
           maxUpdatesThreshold: this.maxUpdatesThreshold,
           onCompactionNeeded: () => this.compact(),
           isDestroyed: () => this._isDestroyed,
-          onListenerError: (error) => {
-            console.error('Listener error (resumed):', error);
-            this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
-          },
+          onListenerError: (error) => this._handleListenerError(error),
           storage: this.storage,
           corruptedDocIds: this._corruptedDocIds,
           onCorruptedDocument: (docId, error) => {
@@ -684,11 +687,8 @@ export class FireProvider extends ObservableV2<any> {
       maxUpdatesThreshold: this.maxUpdatesThreshold,
       onCompactionNeeded: () => this.compact(),
       isDestroyed: () => this._isDestroyed,
-      // FIX: Wire listener error to event emitter
-      onListenerError: (error) => {
-        console.error('Listener error:', error);
-        this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
-      },
+      // FIX: Wire listener error to event emitter and re-sync
+      onListenerError: (error) => this._handleListenerError(error),
       storage: this.storage,
       corruptedDocIds: this._corruptedDocIds,
       onCorruptedDocument: (docId, error) => {
@@ -752,6 +752,8 @@ export class FireProvider extends ObservableV2<any> {
       this._lastHistoryDoc = result.lastHistoryDoc;
       this._unsubscribeHistory = createHistoryListener(syncCtx, result.lastHistoryDoc);
 
+      this._listenersAttachedAt = Date.now();
+
       // Initial sync complete and listeners attached. The 'sync' event name
       // follows the y-fire / y-* provider convention (y-websocket, y-indexeddb)
       // so consumers can treat this provider as a drop-in.
@@ -784,6 +786,56 @@ export class FireProvider extends ObservableV2<any> {
         }, backoffMs);
       }
     }
+  }
+
+  /**
+   * Handles a real-time listener error.
+   *
+   * Firestore terminates an onSnapshot listener for good once its error
+   * callback fires (e.g. permission-denied while auth is briefly
+   * invalid). Keeping the dead handles left the provider deaf while it
+   * still reported `synced` and kept uploading its own edits. Instead,
+   * drop `synced`, detach every listener and re-run sync() with backoff:
+   * it catches up on whatever was missed and attaches fresh listeners.
+   */
+  private _handleListenerError(error: Error): void {
+    console.error('Listener error:', error);
+    this.emit('connection-error', [{ code: 'listener-error', message: error.message, error }]);
+
+    // The listeners usually fail together: the first error starts the
+    // recovery, and a re-sync already pending replaces them all.
+    if (!this._synced || this._isDestroyed || this._epochFenced) return;
+    this._synced = false;
+
+    this._unsubscribers.forEach(unsub => unsub());
+    this._unsubscribers = [];
+    if (this._unsubscribeHistory) {
+      this._unsubscribeHistory();
+      this._unsubscribeHistory = null;
+    }
+
+    const recovery = planListenerRecovery({
+      retryCount: this._listenerRetryCount,
+      attachedAt: this._listenersAttachedAt,
+      now: Date.now(),
+      healthyMs: DEFAULTS.LISTENER_HEALTHY_MS,
+      maxRetries: DEFAULTS.MAX_RETRIES,
+    });
+    this._listenerRetryCount = recovery.retryCount;
+
+    if (recovery.giveUp) {
+      console.error(`Listeners failed ${recovery.retryCount} times in a row, giving up.`);
+      this.emit('sync-failure', [new Error(`Listeners failed ${recovery.retryCount} times in a row`)]);
+      return;
+    }
+
+    const backoffMs = calculateBackoff(recovery.retryCount);
+    console.log(`Re-syncing in ${backoffMs}ms after listener error (attempt ${recovery.retryCount}/${DEFAULTS.MAX_RETRIES})...`);
+
+    this._syncRetryTimerId = setTimeout(() => {
+      this._syncRetryTimerId = null;
+      if (!this._isDestroyed) this.sync();
+    }, backoffMs);
   }
 
   /**

@@ -127,7 +127,7 @@ The `FireProvider` constructor accepts the following configuration options:
 - **`provider.epoch`** (property):
   The epoch this provider is syncing (`0` for documents never squashed).
 - **`provider.synced`** (property):
-  `true` once initial sync has completed and real-time listeners are active.
+  `true` once initial sync has completed and real-time listeners are active. Drops back to `false` while the provider recovers from a listener error.
 
 ### Events
 
@@ -135,10 +135,10 @@ The provider extends `ObservableV2` and emits the following events:
 
 | Event | Payload | Description |
 | :--- | :--- | :--- |
-| `sync` | `boolean` | Emitted when initial sync completes and real-time listeners are attached. Follows the y-fire / y-* provider convention. |
+| `sync` | `boolean` | Emitted when initial sync completes and real-time listeners are attached, and again each time a re-sync after a listener error completes. Follows the y-fire / y-* provider convention. |
 | `saved` | `number` | Emitted after a local update batch is committed to Firestore, with the commit wall-clock time (`Date.now()`). The success counterpart to `save-rejected`. |
-| `connection-error` | `{ code: string, message: string, error: Error }` | Emitted when a Firestore listener encounters an error. |
-| `sync-failure` | `Error` | Emitted when initial sync fails after all retry attempts. |
+| `connection-error` | `{ code: string, message: string, error: Error }` | Emitted when a Firestore listener encounters an error. Firestore ends a listener once it errors, so the provider sets `synced` to `false`, detaches its listeners and re-syncs with backoff, which re-attaches them. |
+| `sync-failure` | `Error` | Emitted when a sync (initial, or a re-sync after a listener error) fails after all retry attempts, or when listeners keep failing right after each re-sync. Remote changes are no longer received. |
 | `corrupted-document` | `{ docId: string, error: Error }` | Emitted when a corrupted Firestore document is quarantined. |
 | `save-rejected` | See below | Emitted when a local update **cannot** be persisted to Firestore. The update is not dropped: it stays queued ahead of newer edits and is retried with the next save (or the `destroy()` flush). |
 | `squashed` | `{ epoch: number, localState: Uint8Array \| null }` | Emitted on the client that successfully ran `squash()`. The provider has stopped syncing; rebuild the local document from the new epoch's snapshot and recreate providers. `localState` is the full old-epoch local state, as for `epoch-changed`: the new snapshot holds all of it except a local edit that raced the commit itself, which the application can re-apply. |

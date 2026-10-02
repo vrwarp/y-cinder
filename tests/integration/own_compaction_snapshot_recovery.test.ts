@@ -8,7 +8,9 @@
  * to: compaction reads the update documents straight from the server and
  * downloads storage-backed payloads itself, while the local doc can be
  * missing some of them — here, a storage-backed update whose listener
- * download hit a transient Cloud Storage failure and was quarantined. The
+ * download came back corrupted, so applying it threw and the listener
+ * quarantined it. (A transient Storage error is retried by the listener
+ * rather than quarantined; see transient_storage_failure.test.ts.) The
  * same transaction deletes the source update documents, so the snapshot is
  * the only path left for that data.
  *
@@ -27,14 +29,17 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const { storageOutage } = vi.hoisted(() => ({
     storageOutage: {
-        /** While true, downloads of storage-backed update blobs fail. */
+        /** While true, downloads of storage-backed update blobs come back corrupted. */
         active: false,
         failedDownloads: 0,
     },
 }));
 
-// Simulate a transient Cloud Storage outage for storage-backed update blobs
-// (`<path>/large_updates/...`). Snapshot downloads are never affected.
+// Simulate a transient fault that corrupts downloads of storage-backed update
+// blobs (`<path>/large_updates/...`): the stored blob is intact, but this
+// client receives bytes Y.applyUpdate rejects, so its listener quarantines
+// the update. (A thrown transient Storage error would only be retried by the
+// listener.) Snapshot downloads are never affected.
 vi.mock('@firebase/storage', async (importOriginal: () => Promise<any>) => {
     const actual = await importOriginal();
     return {
@@ -43,9 +48,7 @@ vi.mock('@firebase/storage', async (importOriginal: () => Promise<any>) => {
             const fullPath: string = storageRef?.fullPath ?? String(storageRef);
             if (storageOutage.active && fullPath.includes('/large_updates/')) {
                 storageOutage.failedDownloads++;
-                const err: any = new Error('Simulated transient Cloud Storage outage');
-                err.code = 'storage/retry-limit-exceeded';
-                throw err;
+                return new Uint8Array([255, 254, 253, 252, 251, 250, 249, 248]).buffer;
             }
             return actual.getBytes(storageRef, ...rest);
         },
@@ -105,8 +108,8 @@ describe('Own compaction: snapshot recovery of data the compactor was missing', 
 
     /**
      * Writer A saves one oversized (storage-backed) update — text 'big' plus
-     * a large attachment — while reader B's download of that blob fails, so
-     * B quarantines it. A then types '+more' (inline update) which B
+     * a large attachment — while reader B's download of that blob comes back
+     * corrupted, so B quarantines it. A then types '+more' (inline update) which B
      * receives but cannot integrate (it depends on the quarantined 'big').
      */
     async function setUpQuarantinedReader(path: string) {
@@ -131,7 +134,7 @@ describe('Own compaction: snapshot recovery of data the compactor was missing', 
         await waitForConditionTruthy(() => saves >= 1, { timeout: 30000, message: 'A should save the oversized update' });
         await waitForConditionTruthy(() => quarantined.length >= 1, {
             timeout: 30000,
-            message: "B should quarantine the storage-backed update after its download fails",
+            message: "B should quarantine the storage-backed update after its download comes back corrupted",
         });
         expect(storageOutage.failedDownloads).toBeGreaterThan(0);
 
@@ -141,7 +144,7 @@ describe('Own compaction: snapshot recovery of data the compactor was missing', 
         // B is missing the quarantined 'big' (and therefore cannot show '+more').
         expect(docB.getText('t').toString()).toBe('');
 
-        // The outage is over before anyone compacts.
+        // The fault is over before anyone compacts.
         storageOutage.active = false;
 
         return { docA, docB, pA, pB };

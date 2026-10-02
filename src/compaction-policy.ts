@@ -359,6 +359,30 @@ export function buildSnapshotResult(params: {
 }
 
 /**
+ * The Storage blobs a committed fold replaced, which it should then delete.
+ *
+ * These are the paths stored on the replaced main document, never names
+ * rebuilt from its version: blob names carry a per-attempt id (see
+ * foldSnapshotPath / squashSnapshotPath), and squash writes
+ * `snapshot_e{E}_v{V}_{id}.bin`, which a rebuilt `snapshot_v{n}.bin` never
+ * matched, so every squash blob would leak. The fold's transaction verified the version, and every writer of
+ * these paths bumps it, so the stored paths are exactly what the fold
+ * replaced. A path the fold itself just wrote is never returned: deleting
+ * it would destroy the live snapshot.
+ *
+ * @param previous - The main document state read before the fold.
+ * @param written - The Storage paths the fold committed.
+ * @returns The paths to delete.
+ */
+export function blobsReplacedByFold(
+    previous: Pick<MainDocState, 'baseStoragePath' | 'baseDeleteSetStoragePath'>,
+    written: (string | null)[],
+): string[] {
+    return [previous.baseStoragePath, previous.baseDeleteSetStoragePath]
+        .filter((p): p is string => p !== null && !written.includes(p));
+}
+
+/**
  * The next snapshot version.
  *
  * @param currentVersion - The version read before the transaction.

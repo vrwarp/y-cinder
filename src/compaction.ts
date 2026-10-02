@@ -53,6 +53,7 @@ import {
 import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import { toBase64 } from "lib0/buffer";
 import {
+    blobsReplacedByFold,
     buildDeltaSegmentDoc,
     buildSnapshotResult,
     deleteSetFitsInline,
@@ -212,7 +213,7 @@ export async function compact(
         const mainSnap = await getDoc(mainRef);
 
         const mainState = readMainDocState(mainSnap.exists() ? mainSnap.data() : null);
-        const { hasBase, baseStoragePath, baseDeleteSetStoragePath, currentVersion, currentEpoch } = mainState;
+        const { hasBase, baseStoragePath, currentVersion, currentEpoch } = mainState;
         const baseInline = mainState.baseInline as Bytes | null;
 
         // Epoch fence: documents written before a squash belong to an
@@ -424,24 +425,19 @@ export async function compact(
         });
 
         // Garbage Collect Old Storage Snapshot (and its delete-set blob).
-        // Use the paths the replaced main document stored: blob names are
-        // attempt-unique, so they cannot be rebuilt from the version. The
-        // transaction verified the version is unchanged, and every writer
-        // of these fields bumps it, so they still describe what we replaced.
+        // Delete the paths the replaced main document stored: blob names are
+        // attempt-unique (and a squash snapshot is named
+        // snapshot_e{E}_v{V}_{id}.bin), so they cannot be rebuilt from the
+        // version. The transaction verified the version is unchanged, and
+        // every writer of these fields bumps it, so they still describe what
+        // we replaced.
         if (result.success && result.type === 'snapshot') {
-            if (baseStoragePath) {
+            for (const oldPath of blobsReplacedByFold(mainState, [storagePath, deleteSetStoragePath])) {
                 try {
-                    await deleteObject(ref(storage, baseStoragePath));
-                    console.log(`Garbage collected old snapshot: ${baseStoragePath}`);
+                    await deleteObject(ref(storage, oldPath));
+                    console.log(`Garbage collected old blob: ${oldPath}`);
                 } catch (err) {
-                    console.warn(`Failed to garbage collect old snapshot for ${path}`, err);
-                }
-            }
-            if (baseDeleteSetStoragePath) {
-                try {
-                    await deleteObject(ref(storage, baseDeleteSetStoragePath));
-                } catch (err) {
-                    console.warn(`Failed to garbage collect old delete-set for ${path}`, err);
+                    console.warn(`Failed to garbage collect old blob ${oldPath} for ${path}`, err);
                 }
             }
         }

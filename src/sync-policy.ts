@@ -99,6 +99,39 @@ export function isPermanentDownloadError(error: any): boolean {
     return error?.code === 'storage/object-not-found';
 }
 
+/** Error code initial sync fails with when the client is offline */
+export const CLIENT_OFFLINE = 'client-offline';
+
+/**
+ * Whether a read was answered from the local cache instead of the server.
+ *
+ * The SDK serves getDocs/getDoc from its cache only once it considers the
+ * client offline. Initial sync must not complete on such a read: it would
+ * report 'sync' while offline, and its Updates → History → Snapshot read
+ * order only rules out missed data when each tier reflects the server at
+ * the time it is read.
+ *
+ * @param snapshot - A query or document snapshot. Test doubles of the SDK
+ *   may omit its metadata.
+ * @returns true when the read did not reach the server.
+ */
+export function isServedFromCache(snapshot: { metadata?: { fromCache?: boolean } }): boolean {
+    return snapshot.metadata?.fromCache === true;
+}
+
+/**
+ * Whether initial sync failed only because the client is offline.
+ *
+ * The provider then waits for the connection without spending its retry
+ * budget. Thrown errors, 'unavailable' included, remain failures.
+ *
+ * @param error - The error initial sync failed with.
+ * @returns true for the CLIENT_OFFLINE error.
+ */
+export function isClientOfflineError(error: any): boolean {
+    return error?.code === CLIENT_OFFLINE;
+}
+
 /**
  * Whether this snapshot delivery should trigger a compaction.
  *

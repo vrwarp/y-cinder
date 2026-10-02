@@ -286,8 +286,12 @@ per object. Two fixed costs were removed:
 - **Clock-skew measurement is now shared.** Skew is a property of the
   client, not the document, but each subdoc provider used to measure it
   independently — 3 Firestore ops (write + read + delete) per subdoc at
-  startup, i.e. 1,500 wasted ops for a 500-object board. Subdoc providers
-  now inherit the parent's measured offset.
+  startup, i.e. 1,500 wasted ops for a 500-object board. Inheriting the
+  parent's offset only covered subdocs added after the parent's probe
+  resolved: subdocs already in the doc at construction still probed
+  (11 probes for a parent with 10). One measurement is now shared per
+  Firestore instance, taken on the first lock need (see "Clock-skew probe
+  off the startup path" below).
 - **`gcCompaction` and `maxAggregationTime` are now inherited** by subdoc
   providers along with the other settings (they previously silently reset
   to defaults).
@@ -306,6 +310,35 @@ Saves are now additionally capped by `maxAggregationTime` (default
 waited that long, the save fires even mid-burst. Normal debouncing is
 unchanged when edits pause before the cap. Covered by
 `tests/integration/debounce_cap.test.ts`.
+
+## Clock-skew probe off the startup path
+
+`sync()` awaited `measureClockSkew` before initial sync read anything: a
+`setDoc` waiting for the server ack, a `getDoc`, then a fire-and-forget
+`deleteDoc`. That is 2 serial round trips on every launch, plus 3 billed
+ops per root provider and per subdoc present at construction, for an
+offset only the distributed lock (compaction, squash) uses. versicle's
+4 root docs ran 4 probes: 12 of the 24 one-shot ops to reach synced.
+
+The offset is now measured once per Firestore instance
+(`sharedClockOffset`) on the first lock need: compaction and squash await
+it before building their lock context, so `acquireLock` still always gets
+a measured offset (never `undefined`, which re-measures on every lock).
+The awaited probe write had also been the only thing making an offline
+launch wait for connectivity. Initial sync now rejects reads the SDK
+answered from its cache (`metadata.fromCache`, i.e. offline) and retries
+them outside the `MAX_RETRIES` budget: first once the probe write is
+acknowledged, then with backoff capped at `OFFLINE_SYNC_RETRY_MAX_MS`. It
+neither gives up offline nor completes against cached state.
+
+Measured (`tests/integration/clock_skew_probe_startup.test.ts`, emulator,
+injected per-op latency, medians of 5 interleaved A/B runs): construction
+→ synced 564 → **338 ms** at 100 ms/op (4 roots: 577 → 362 ms) and
+246 → **148 ms** at 40 ms/op, matching the probe-free control arm. Ops to
+synced per root 6 → **3**, a versicle launch 24 → **12** (probes 4 → 0),
+a parent with 10 pre-existing subdocs 11 probes (33 ops) → **0**. The
+first lock of the session pays the one probe instead. Offline launches
+are covered by `tests/integration/offline_launch.test.ts`.
 
 ## Configuration added
 

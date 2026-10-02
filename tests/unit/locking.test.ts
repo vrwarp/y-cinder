@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { checkLockStatus, LockConfig } from '../../src/locking';
+import { checkLockStatus, LockConfig, sharedClockOffset } from '../../src/locking';
 import * as firestore from '@firebase/firestore';
 
 vi.mock('@firebase/firestore', () => ({
@@ -161,5 +161,57 @@ describe('locking - checkLockStatus', () => {
         // ageMs = (now + 5000) - (now - 30000) = 35000
         expect(status.ageMs).toBe(35000);
         expect(firestore.setDoc).toHaveBeenCalled();
+    });
+});
+
+describe('locking - sharedClockOffset', () => {
+    const now = 1_000_000;
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        vi.useFakeTimers();
+        vi.setSystemTime(now);
+        vi.mocked(firestore.collection).mockReturnValue({ path: 'maint' } as any);
+        vi.mocked(firestore.doc).mockImplementation(((...args: any[]) => {
+            if (args.length === 1) return { id: 'auto-id', path: 'maint/auto-id' };
+            return { path: args.join('/') };
+        }) as any);
+        vi.mocked(firestore.getDoc).mockResolvedValue({
+            exists: () => true,
+            data: () => ({ t: { toMillis: () => now + 5000 } }), // server 5s ahead
+        } as any);
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('measures once per Firestore instance, whatever the provider path', async () => {
+        const db = {} as any;
+        vi.mocked(firestore.setDoc).mockResolvedValue(undefined);
+
+        const offsets = await Promise.all([
+            sharedClockOffset(db, 'docs/library', 'a'),
+            sharedClockOffset(db, 'docs/progress', 'b'),
+        ]);
+        expect(await sharedClockOffset(db, 'docs/library/subdocs/x', 'c')).toBe(5000);
+
+        expect(offsets).toEqual([5000, 5000]);
+        expect(firestore.setDoc).toHaveBeenCalledTimes(1);
+
+        // Another Firestore instance is another client
+        expect(await sharedClockOffset({} as any, 'docs/library', 'd')).toBe(5000);
+        expect(firestore.setDoc).toHaveBeenCalledTimes(2);
+    });
+
+    it('resolves a failed measurement to 0 without sharing it', async () => {
+        const db = {} as any;
+        vi.mocked(firestore.setDoc).mockRejectedValueOnce(new Error('permission-denied'));
+
+        expect(await sharedClockOffset(db, 'docs/library', 'a')).toBe(0);
+
+        vi.mocked(firestore.setDoc).mockResolvedValue(undefined);
+        expect(await sharedClockOffset(db, 'docs/library', 'b')).toBe(5000);
+        expect(firestore.setDoc).toHaveBeenCalledTimes(2);
     });
 });

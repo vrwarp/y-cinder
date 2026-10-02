@@ -8,11 +8,14 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+    CLIENT_OFFLINE,
     diffHasPayload,
     diffNeedsStorage,
     epochTag,
     hasMorePages,
+    isClientOfflineError,
     isPermanentDownloadError,
+    isServedFromCache,
     largeUpdatePath,
     orderByApplyPriority,
     serverCoversLocalStructs,
@@ -138,6 +141,41 @@ describe('isPermanentDownloadError', () => {
     it('retries an error without a code', () => {
         expect(isPermanentDownloadError(new Error('fetch failed'))).toBe(false);
         expect(isPermanentDownloadError(undefined)).toBe(false);
+    });
+});
+
+/**
+ * Initial sync must not complete on reads the SDK answered from its cache
+ * (it does so only offline); such a failure waits for the connection
+ * instead of spending the retry budget, unlike every thrown error.
+ */
+describe('isServedFromCache', () => {
+    it('flags a read answered from the local cache', () => {
+        expect(isServedFromCache({ metadata: { fromCache: true } })).toBe(true);
+    });
+
+    it('accepts a read that reached the server', () => {
+        expect(isServedFromCache({ metadata: { fromCache: false } })).toBe(false);
+    });
+
+    it('accepts a snapshot without metadata (SDK test doubles)', () => {
+        expect(isServedFromCache({})).toBe(false);
+    });
+});
+
+describe('isClientOfflineError', () => {
+    it('recognizes the offline failure', () => {
+        expect(isClientOfflineError(Object.assign(new Error('offline'), { code: CLIENT_OFFLINE }))).toBe(true);
+    });
+
+    it.each(['unavailable', 'deadline-exceeded', 'permission-denied'])(
+        'keeps a thrown %s error on the retry budget', (code) => {
+            expect(isClientOfflineError(Object.assign(new Error(code), { code }))).toBe(false);
+        });
+
+    it('keeps an error without a code on the retry budget', () => {
+        expect(isClientOfflineError(new Error('Initial sync failed'))).toBe(false);
+        expect(isClientOfflineError(undefined)).toBe(false);
     });
 });
 

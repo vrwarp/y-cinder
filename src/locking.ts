@@ -74,6 +74,23 @@ export async function measureClockSkew(
     path: string,
     uid: string
 ): Promise<number> {
+    try {
+        return await probeClockSkew(db, path, uid);
+    } catch (e) {
+        // If we can't write/read, assume 0 skew (best effort)
+        console.warn("Failed to measure clock skew:", e);
+        return 0;
+    }
+}
+
+/**
+ * One clock-skew probe (see measureClockSkew); rejects when it fails.
+ */
+async function probeClockSkew(
+    db: Firestore,
+    path: string,
+    uid: string
+): Promise<number> {
     const maintCollection = collection(db, path, FIRESTORE_PATHS.MAINTENANCE);
     const tempRef = doc(maintCollection); // let firestore generate secure id
     const tempId = `skew_${uid}_${tempRef.id}`;
@@ -86,16 +103,48 @@ export async function measureClockSkew(
 
         // P1.6 FIX: Cleanup in finally ensures doc removed even on errors
         return offsetFromProbe(readProbeServerTime(data), Date.now());
-    } catch (e) {
-        // If we can't write/read, assume 0 skew (best effort)
-        console.warn("Failed to measure clock skew:", e);
-        return 0;
     } finally {
         // P1.6 FIX: Always attempt cleanup to prevent orphaned docs
         deleteDoc(ref).catch((e) => {
             console.warn("Failed to clean up clock skew document:", e);
         });
     }
+}
+
+/** Clock-skew measurements shared per Firestore instance (see sharedClockOffset) */
+const sharedClockOffsets = new WeakMap<Firestore, Promise<number>>();
+
+/**
+ * Measures clock skew once per Firestore instance and shares the result.
+ *
+ * Skew is a property of the client, not of a document: every provider on
+ * the same Firestore instance (root providers and subdocument providers
+ * alike) reuses one measurement instead of spending its own 3 Firestore
+ * ops. The first caller's path hosts the probe document.
+ *
+ * Like measureClockSkew, a failed measurement resolves to 0, but it is not
+ * shared: the next caller measures again.
+ *
+ * @param db - Firestore instance
+ * @param path - Base document path of the caller
+ * @param uid - Unique client ID of the caller
+ * @returns The offset in milliseconds (ServerTime - ClientTime).
+ */
+export function sharedClockOffset(
+    db: Firestore,
+    path: string,
+    uid: string
+): Promise<number> {
+    let offset = sharedClockOffsets.get(db);
+    if (!offset) {
+        offset = probeClockSkew(db, path, uid).catch((e) => {
+            sharedClockOffsets.delete(db);
+            console.warn("Failed to measure clock skew:", e);
+            return 0;
+        });
+        sharedClockOffsets.set(db, offset);
+    }
+    return offset;
 }
 
 /**

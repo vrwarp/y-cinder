@@ -38,9 +38,10 @@ import {
 import { generateSessionId, calculateBackoff } from "./utils";
 import { extractClockEnds, aggregateClockEnds } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext, SyncResult } from "./sync";
+import { isClientOfflineError } from "./sync-policy";
 import { compact as performTieredCompaction, CompactionContext } from "./compaction";
 import { squashDocument, readDocEpoch, SquashResult } from "./squash";
-import { measureClockSkew } from "./locking";
+import { sharedClockOffset } from "./locking";
 import {
   handleSubdocs as handleSubdocsEvent,
   destroyAllSubdocs,
@@ -148,7 +149,10 @@ export class FireProvider extends ObservableV2<any> {
   private _isDestroyed = false;
   /** Whether initial sync has completed and listeners are attached */
   private _synced = false;
-  /** P0.3 FIX: Cached clock offset to avoid measuring on every lock attempt */
+  /**
+   * P0.3 FIX: Cached clock offset to avoid measuring on every lock attempt.
+   * Measured on the first lock need (see _clockOffset), not before sync.
+   */
   private _cachedClockOffset: number | undefined = undefined;
   /**
    * P0.5 FIX: The in-flight save operation, if any. Prevents concurrent
@@ -160,6 +164,8 @@ export class FireProvider extends ObservableV2<any> {
   private _saveRetryCount = 0;
   /** P1.4 FIX: Sync retry counter for exponential backoff */
   private _syncRetryCount = 0;
+  /** Consecutive initial syncs that found the client offline */
+  private _offlineRetryCount = 0;
   /** Consecutive listener errors, for re-sync backoff */
   private _listenerRetryCount = 0;
   /** When the current real-time listeners were attached */
@@ -339,7 +345,30 @@ export class FireProvider extends ObservableV2<any> {
     return this._inflightCompaction;
   }
 
+  /**
+   * The clock offset lock decisions use (serverTime - clientTime).
+   *
+   * Measured on the first lock need rather than before initial sync, which
+   * never uses it: the probe's write ack and read used to add 2 round trips
+   * to every launch. The measurement is shared by every provider on the
+   * same Firestore instance (see sharedClockOffset).
+   */
+  private async _clockOffset(): Promise<number> {
+    if (this._cachedClockOffset === undefined) {
+      this._cachedClockOffset = await sharedClockOffset(this.db, this.path, this.uid);
+    }
+    return this._cachedClockOffset;
+  }
+
   private async _executeCompaction(attempt: number): Promise<void> {
+    // acquireLock needs the measured offset: given none, it would measure
+    // again on every call. Only the first compaction waits for it, before
+    // the history listener is paused.
+    if (this._cachedClockOffset === undefined) {
+      await this._clockOffset();
+      if (this._isDestroyed || this._epochFenced) return;
+    }
+
     const ctx: CompactionContext = {
       db: this.db,
       path: this.path,
@@ -457,6 +486,13 @@ export class FireProvider extends ObservableV2<any> {
     }
     if (this._pendingUpdates.length > 0) {
       await this.saveToFirestore();
+    }
+
+    // The lock needs the measured offset (normally measured by the
+    // compaction above). Awaited before the wait below, so no compaction
+    // can start between that wait and squashDocument.
+    if (this._cachedClockOffset === undefined) {
+      await this._clockOffset();
     }
 
     // compact() returns at once while a compaction (or another squash) is
@@ -680,18 +716,6 @@ export class FireProvider extends ObservableV2<any> {
    * though we may occasionally apply duplicates (Yjs handles this safely).
    */
   private async sync(): Promise<void> {
-    // P0.3 FIX: Measure clock offset once per session and cache it
-    // This avoids 3 Firestore ops on every lock attempt
-    if (this._cachedClockOffset === undefined) {
-      try {
-        this._cachedClockOffset = await measureClockSkew(this.db, this.path, this.uid);
-        console.log(`Clock offset measured: ${this._cachedClockOffset}ms`);
-      } catch (e) {
-        console.warn("Failed to measure clock skew, using 0:", e);
-        this._cachedClockOffset = 0;
-      }
-    }
-
     let captured: SyncCapture | null = null;
     const syncCtx: SyncContext = {
       db: this.db,
@@ -762,6 +786,7 @@ export class FireProvider extends ObservableV2<any> {
 
       // Reset retry count on successful sync
       this._syncRetryCount = 0;
+      this._offlineRetryCount = 0;
 
       // Cleanup any previous listeners
       this._unsubscribers.forEach(unsub => unsub());
@@ -794,6 +819,11 @@ export class FireProvider extends ObservableV2<any> {
       this.emit('sync', [true]);
 
     } catch (err) {
+      if (isClientOfflineError(err)) {
+        if (!this._isDestroyed) this._retrySyncWhenOnline();
+        return;
+      }
+
       console.error("Sync failed", err);
 
       // Circuit breaker - stop retrying after MAX_RETRIES
@@ -852,6 +882,41 @@ export class FireProvider extends ObservableV2<any> {
 
     // They are committed now: report them like a committed save
     this.emit('saved', [Date.now()]);
+  }
+
+  /**
+   * Retries an initial sync that found the client offline (its reads were
+   * served from the local cache), without spending the MAX_RETRIES budget:
+   * being offline is not a failure, and an app launched offline must sync
+   * once the connection returns.
+   *
+   * While the clock offset is still unmeasured, the retry waits for the
+   * clock-skew probe: its write resolves only once the server acknowledges
+   * it, so the retry runs as soon as the client is back online (this was
+   * initial sync's only connectivity gate when it measured up front), and
+   * the first lock needs the offset anyway. Afterwards, retries back off,
+   * capped at OFFLINE_SYNC_RETRY_MAX_MS.
+   */
+  private _retrySyncWhenOnline(): void {
+    if (this._cachedClockOffset === undefined) {
+      this._clockOffset().then(() => {
+        if (!this._isDestroyed && !this._epochFenced) this.sync();
+      });
+      return;
+    }
+
+    this._offlineRetryCount++;
+    const backoffMs = Math.min(calculateBackoff(this._offlineRetryCount), DEFAULTS.OFFLINE_SYNC_RETRY_MAX_MS);
+    console.log(`Client offline, retrying sync in ${Math.round(backoffMs)}ms...`);
+
+    if (this._syncRetryTimerId) {
+      clearTimeout(this._syncRetryTimerId);
+    }
+
+    this._syncRetryTimerId = setTimeout(() => {
+      this._syncRetryTimerId = null;
+      if (!this._isDestroyed) this.sync();
+    }, backoffMs);
   }
 
   /**
@@ -940,8 +1005,8 @@ export class FireProvider extends ObservableV2<any> {
       lockTTL: this.lockTTL,
       compactionLimit: this.compactionLimit,
       persistence: this.persistence,
-      // May still be undefined if a subdoc is added before the parent's
-      // initial sync measures skew — the child then measures it itself.
+      // Undefined until the parent's first lock need: the child then
+      // awaits the measurement shared per Firestore instance itself.
       cachedClockOffset: this._cachedClockOffset,
       subdocLoadingMode: this.subdocLoadingMode,
       createProvider: (config) => new FireProvider(config),

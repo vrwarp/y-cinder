@@ -75,11 +75,14 @@ import {
     diffSnapshotForLocal,
 } from "./sync-helpers";
 import {
+    CLIENT_OFFLINE,
     diffHasPayload,
     diffNeedsStorage,
     epochTag as buildEpochTag,
     hasMorePages,
+    isClientOfflineError,
     isPermanentDownloadError,
+    isServedFromCache,
     largeUpdatePath,
     orderByApplyPriority,
     serverCoversLocalStructs,
@@ -198,6 +201,22 @@ export interface SyncResult {
 }
 
 /**
+ * Fails initial sync when a read was answered from the local cache (see
+ * isServedFromCache): the client is offline.
+ *
+ * @param snapshot - The query or document snapshot just read.
+ * @throws An error isClientOfflineError recognizes.
+ */
+function requireServerRead(snapshot: { metadata?: { fromCache?: boolean } }): void {
+    if (isServedFromCache(snapshot)) {
+        throw Object.assign(
+            new Error('Initial sync read was served from the local cache: client is offline'),
+            { code: CLIENT_OFFLINE }
+        );
+    }
+}
+
+/**
  * Pending update item during sync.
  */
 
@@ -266,6 +285,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const updatesSnap = await getDocs(updatesQ);
+            requireServerRead(updatesSnap);
             if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
             if (updatesSnap.empty) {
@@ -330,6 +350,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const historySnap = await getDocs(historyQ);
+            requireServerRead(historySnap);
             if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
             if (historySnap.empty) {
@@ -360,6 +381,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // 3. Fetch Base Snapshot (Tier 1) - single document, no pagination needed
         const mainRef = doc(db, path);
         const mainSnap = await getDoc(mainRef);
+        requireServerRead(mainSnap);
         if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
         let snapshotVersion: number | null = null;
@@ -602,7 +624,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             epoch: serverEpoch
         };
     } catch (err) {
-        console.error("Sync failed", err);
+        if (!isClientOfflineError(err)) {
+            console.error("Sync failed", err);
+        }
         return {
             success: false,
             error: err instanceof Error ? err : new Error(String(err)),

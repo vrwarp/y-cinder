@@ -189,6 +189,11 @@ export const DEFAULTS = {
      * MAX_RETRIES.
      */
     LISTENER_HEALTHY_MS: 30_000,
+    /**
+     * Longest wait between initial-sync attempts while the client is
+     * offline (these attempts do not count toward MAX_RETRIES).
+     */
+    OFFLINE_SYNC_RETRY_MAX_MS: 10_000,
     /** Maximum docs to fetch per batch during initial sync (P0.1 fix) */
     SYNC_BATCH_SIZE: 100,
     /** Pending-update count that forces a compaction trigger, bypassing the trigger cooldown */

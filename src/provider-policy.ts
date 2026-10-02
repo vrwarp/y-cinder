@@ -101,7 +101,9 @@ export type SquashBlock =
  * Each block exists for a different reason: a destroyed provider has no
  * connection, an unsynced or epoch-fenced one would squash a document it
  * does not fully hold (silently dropping other clients' data), and
- * subdocuments would be orphaned in the old epoch.
+ * subdocuments would be orphaned in the old epoch. A subdocument counts
+ * whether or not a provider was started for it (lazy mode leaves
+ * unloaded subdocuments without one).
  *
  * @param state - The provider's current lifecycle flags.
  * @returns The blocking reason, or null when a squash may proceed.
@@ -111,6 +113,7 @@ export function squashBlockedBy(state: {
     synced: boolean;
     epochFenced: boolean;
     subProviderCount: number;
+    subdocCount: number;
     depth: number;
 }): SquashBlock {
     if (state.isDestroyed) {
@@ -122,7 +125,7 @@ export function squashBlockedBy(state: {
     if (state.epochFenced) {
         return { kind: 'local-behind' };
     }
-    if (state.subProviderCount > 0 || state.depth > 0) {
+    if (state.subProviderCount > 0 || state.subdocCount > 0 || state.depth > 0) {
         return { kind: 'subdocs-unsupported' };
     }
 

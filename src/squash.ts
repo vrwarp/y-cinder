@@ -96,6 +96,8 @@ export function docHasContent(ydoc: Y.Doc): boolean {
 /**
  * Deep-clones the CONTENT of `source` into a fresh Y.Doc with a brand-new
  * id space, and stamps the target epoch into the provider metadata map.
+ * `source` is only read: its subdocuments and embedded types are copied,
+ * never moved, so destroying the result leaves `source` intact.
  *
  * Throws when a root shared type was never concretely typed on this client
  * (its constructor is still AbstractType) — squashing such a document
@@ -142,10 +144,10 @@ export function buildSquashedDoc(source: Y.Doc, epoch: number): Y.Doc {
                     t.insert(0, type.toArray().map(cloneValue));
                 } else if (type instanceof Y.XmlFragment && !(type instanceof Y.XmlElement)) {
                     const t = target.getXmlFragment(name);
-                    t.insert(0, (type.toArray() as any[]).map((c) => c.clone()));
+                    t.insert(0, type.toArray().map(cloneValue) as any[]);
                 } else if (type instanceof Y.Text) {
                     const t = target.getText(name);
-                    t.applyDelta(type.toDelta());
+                    t.applyDelta(cloneDelta(type.toDelta()));
                 } else {
                     throw new Error(
                         `Cannot squash: root share '${name}' has unsupported type ${type.constructor?.name}`
@@ -161,8 +163,53 @@ export function buildSquashedDoc(source: Y.Doc, epoch: number): Y.Doc {
     return target;
 }
 
+/**
+ * Deep-clones a value for the squashed document.
+ *
+ * Nothing integrated in the live doc may reach the clone: Yjs re-parents
+ * an integrated type or subdocument into whichever document it is
+ * inserted into, detaching it from the live doc — and destroying the
+ * clone then destroys a live subdocument. Yjs's own clone() passes
+ * subdocuments, Y.Text embeds and Y.XmlHook values through as the live
+ * instances, so the recursion is done here for every built-in type.
+ */
 function cloneValue(v: unknown): unknown {
+    if (v instanceof Y.Doc) {
+        // A subdocument is a guid reference; its content syncs on its own
+        return new Y.Doc({ guid: v.guid, gc: v.gc, autoLoad: v.autoLoad, meta: v.meta, shouldLoad: false });
+    }
+    if (v instanceof Y.Map) {
+        const m: Y.Map<unknown> = v instanceof Y.XmlHook ? new Y.XmlHook(v.hookName) : new Y.Map();
+        v.forEach((x: unknown, k: string) => m.set(k, cloneValue(x)));
+        return m;
+    }
+    if (v instanceof Y.Array) {
+        const a = new Y.Array();
+        a.insert(0, v.toArray().map(cloneValue));
+        return a;
+    }
+    if (v instanceof Y.Text) {
+        const t = v instanceof Y.XmlText ? new Y.XmlText() : new Y.Text();
+        t.applyDelta(cloneDelta(v.toDelta()));
+        return t;
+    }
+    if (v instanceof Y.XmlElement) {
+        const el = new Y.XmlElement(v.nodeName);
+        Object.entries(v.getAttributes()).forEach(([k, x]) => el.setAttribute(k, cloneValue(x) as any));
+        el.insert(0, v.toArray().map(cloneValue) as any[]);
+        return el;
+    }
+    if (v instanceof Y.XmlFragment) {
+        const f = new Y.XmlFragment();
+        f.insert(0, v.toArray().map(cloneValue) as any[]);
+        return f;
+    }
     return v instanceof Y.AbstractType ? (v as any).clone() : v;
+}
+
+/** Clones the embedded values of a Y.Text delta (strings stay as-is). */
+function cloneDelta(delta: any[]): any[] {
+    return delta.map((op) => ({ ...op, insert: cloneValue(op.insert) }));
 }
 
 /**

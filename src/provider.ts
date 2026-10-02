@@ -402,9 +402,10 @@ export class FireProvider extends ObservableV2<any> {
    * state and must rebuild (see event docs). Use for single-user /
    * few-device documents; do not use for high-concurrency collaboration.
    *
-   * Preconditions enforced here: initial sync completed, no subdocument
-   * providers, provider not destroyed. The server-side backlog must fit
-   * one transaction — a normal compaction is run first to fold it.
+   * Preconditions enforced here: initial sync completed, no subdocuments
+   * (loaded or not), provider not destroyed. The server-side backlog
+   * must fit one transaction — a normal compaction is run first to fold
+   * it.
    *
    * @returns The squash outcome; `skippedReason` distinguishes benign
    *          skips (lock contention, backlog, stale local doc, local
@@ -416,6 +417,7 @@ export class FireProvider extends ObservableV2<any> {
       synced: this._synced,
       epochFenced: this._epochFenced,
       subProviderCount: this.subProviders.size,
+      subdocCount: this.doc.subdocs.size,
       depth: this.depth,
     });
 

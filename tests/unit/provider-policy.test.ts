@@ -129,7 +129,7 @@ describe('computeSaveDelay', () => {
 });
 
 describe('squashBlockedBy', () => {
-    const ready = { isDestroyed: false, synced: true, epochFenced: false, subProviderCount: 0, depth: 0 };
+    const ready = { isDestroyed: false, synced: true, epochFenced: false, subProviderCount: 0, subdocCount: 0, depth: 0 };
 
     it('allows a squash when everything is ready', () => {
         expect(squashBlockedBy(ready)).toBeNull();
@@ -154,6 +154,16 @@ describe('squashBlockedBy', () => {
 
     it('blocks a provider that owns subdocuments', () => {
         expect(squashBlockedBy({ ...ready, subProviderCount: 1 }))
+            .toEqual({ kind: 'subdocs-unsupported' });
+    });
+
+    /*
+     * Lazy mode starts no provider for an unloaded subdocument, so the
+     * provider count alone let squash reach buildSquashedDoc with
+     * subdocuments in the document.
+     */
+    it('blocks a document holding subdocuments that have no provider', () => {
+        expect(squashBlockedBy({ ...ready, subdocCount: 1 }))
             .toEqual({ kind: 'subdocs-unsupported' });
     });
 

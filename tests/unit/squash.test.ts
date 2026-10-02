@@ -140,6 +140,41 @@ describe('buildSquashedDoc', () => {
         squashed.destroy();
     });
 
+    it('round-trips XML content and subdocument references', () => {
+        const src = new Y.Doc();
+        const frag = src.getXmlFragment('x');
+        const p = new Y.XmlElement('p');
+        frag.insert(0, [p]);
+        p.setAttribute('class', 'lead');
+        const xt = new Y.XmlText('hello');
+        p.insert(0, [xt]);
+        xt.format(0, 2, { bold: true });
+        const hook = new Y.XmlHook('h');
+        frag.insert(1, [hook]);
+        hook.set('k', 'v');
+        const sub = new Y.Doc({ guid: 'sub-guid', gc: false, autoLoad: true, meta: { m: 1 } });
+        src.getMap('subs').set('s', sub);
+
+        const squashed = buildSquashedDoc(src, 1);
+        const cfrag = squashed.getXmlFragment('x');
+        expect(cfrag.toString()).toBe(frag.toString());
+        expect((cfrag.get(0) as Y.XmlElement).getAttributes()).toEqual({ class: 'lead' });
+        expect(((cfrag.get(0) as Y.XmlElement).get(0) as Y.XmlText).toDelta()).toEqual(xt.toDelta());
+        const chook = cfrag.get(1) as Y.XmlHook;
+        expect(chook).toBeInstanceOf(Y.XmlHook);
+        expect(chook.hookName).toBe('h');
+        expect(chook.get('k')).toBe('v');
+
+        // A subdocument is a fresh instance carrying the same reference
+        const csub = squashed.getMap('subs').get('s') as Y.Doc;
+        expect(csub).not.toBe(sub);
+        expect({ guid: csub.guid, gc: csub.gc, autoLoad: csub.autoLoad, meta: csub.meta })
+            .toEqual({ guid: 'sub-guid', gc: false, autoLoad: true, meta: { m: 1 } });
+
+        src.destroy();
+        squashed.destroy();
+    });
+
     it('converges when the squashed state is exchanged between fresh clients', () => {
         const aged = buildAgedDoc(10, 40);
         const squashed = buildSquashedDoc(aged, 1);

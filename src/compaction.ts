@@ -244,8 +244,15 @@ export async function compact(
                         createdAt: data.createdAt,
                     };
                 } catch (e) {
-                    console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
-                    return null;
+                    // Cannot safely compact around a missing payload: the
+                    // same client's later updates (and anything built on
+                    // them) would merge past a clock gap, and the result's
+                    // state vector (clock ends) would claim the skipped
+                    // range — clients would then drop the update document
+                    // still holding it as redundant. Abort; a later cycle
+                    // retries once the download succeeds.
+                    console.error(`Compaction failed to download storage-backed update ${uDoc.id}`, e);
+                    throw e;
                 }
             }
             if (plan.kind === 'inline') {

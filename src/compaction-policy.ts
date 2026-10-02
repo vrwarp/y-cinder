@@ -167,6 +167,35 @@ export function isLockLostError(error: any): boolean {
 }
 
 /**
+ * Whether a failed compaction will fail the same way next time, so that
+ * automatic triggers should back off instead of retrying it.
+ *
+ * compact() has given up by the time this is asked; its own retries
+ * already covered contention and transport errors. What is left is usually
+ * a property of the document or the project: an undecodable update, a
+ * Storage blob that is gone, Storage rules or quota rejecting the fold
+ * upload, a permission or size rejection. Each fails identically on every
+ * attempt until something outside this client changes, and every attempt
+ * re-reads the whole backlog first. These do not count:
+ *  - a lost lock or a version race with a concurrent fold or squash:
+ *    another client is compacting, which is progress, not a broken
+ *    document;
+ *  - a transport error that outlasted the retries (offline, deadline,
+ *    `storage/retry-limit-exceeded`): the next attempt may well succeed.
+ *
+ * @param error - The error the failed compaction reported.
+ * @returns true when the failure should escalate the backoff.
+ */
+export function isPersistentCompactionFailure(error: any): boolean {
+    const versionRace = typeof error?.message === 'string' && error.message.includes('Document version changed');
+
+    return !isRetryableCompactionError(error)
+        && !isLockLostError(error)
+        && !versionRace
+        && error?.code !== 'storage/retry-limit-exceeded';
+}
+
+/**
  * The full retry decision for a failed compaction attempt.
  *
  * @param params - The error, the 1-based attempt number, and whether the

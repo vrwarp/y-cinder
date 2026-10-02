@@ -218,6 +218,30 @@ describe('shouldTriggerCompaction', () => {
     it('still respects the cooldown just below the hard cap', () => {
         expect(shouldTriggerCompaction({ ...base, size: 499, lastTriggerAt: 99_999 })).toBe(false);
     });
+
+    /*
+     * A document compaction cannot get past never drains, so it sits at
+     * the hard cap: without this, every delivery re-reads the whole backlog
+     * just to fail the same way.
+     */
+    it('triggers nothing while a failure backoff runs, not even at the hard cap', () => {
+        expect(shouldTriggerCompaction({ ...base, backoffUntil: 100_001 })).toBe(false);
+        expect(shouldTriggerCompaction({ ...base, size: 500, lastTriggerAt: 99_999, backoffUntil: 100_001 })).toBe(false);
+    });
+
+    it('triggers again once the backoff has ended', () => {
+        expect(shouldTriggerCompaction({ ...base, backoffUntil: 100_000 })).toBe(true);
+        expect(shouldTriggerCompaction({ ...base, size: 500, lastTriggerAt: 99_999, backoffUntil: 100_000 })).toBe(true);
+    });
+
+    it('treats no backoff (0) as none', () => {
+        expect(shouldTriggerCompaction({ ...base, backoffUntil: 0 })).toBe(true);
+    });
+
+    it('still respects the threshold and cooldown after a backoff ends', () => {
+        expect(shouldTriggerCompaction({ ...base, size: 50, backoffUntil: 1 })).toBe(false);
+        expect(shouldTriggerCompaction({ ...base, lastTriggerAt: 95_000, backoffUntil: 1 })).toBe(false);
+    });
 });
 
 describe('survivesEpochFence', () => {

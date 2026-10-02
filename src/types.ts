@@ -212,6 +212,12 @@ export const DEFAULTS = {
     REALTIME_LIMIT: 200,
     /** Minimum time between compaction triggers from a single client's listener */
     COMPACTION_TRIGGER_COOLDOWN_MS: 10_000,
+    /**
+     * Cap on the automatic-compaction backoff after failures that retrying
+     * cannot fix. The first delay is COMPACTION_TRIGGER_COOLDOWN_MS and it
+     * doubles per consecutive failure up to this cap (plus jitter).
+     */
+    COMPACTION_FAILURE_BACKOFF_MAX_MS: 30 * 60_000,
     /** Firestore maximum document size in bytes (1MB) */
     FIRESTORE_DOC_LIMIT: 1_048_576,
     /**

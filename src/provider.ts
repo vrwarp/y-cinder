@@ -39,7 +39,8 @@ import { generateSessionId, calculateBackoff } from "./utils";
 import { extractClockEnds, aggregateClockEnds } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext, SyncResult } from "./sync";
 import { isClientOfflineError, largeUpdatePath } from "./sync-policy";
-import { compact as performTieredCompaction, CompactionContext } from "./compaction";
+import { compact as performTieredCompaction, CompactionContext, CompactionResult } from "./compaction";
+import { isPersistentCompactionFailure } from "./compaction-policy";
 import { squashDocument, readDocEpoch, SquashResult } from "./squash";
 import { sharedClockOffset } from "./locking";
 import {
@@ -49,6 +50,7 @@ import {
   SubProviderMap,
 } from "./subdocs";
 import {
+  compactionBackoffMs,
   computeSaveDelay,
   initialSyncSaveHold,
   isRemoteOrigin,
@@ -114,6 +116,16 @@ export class FireProvider extends ObservableV2<any> {
   private _inflightCompaction: Promise<void> | null = null;
   /** The in-flight squash, if any (see _inflightCompaction) */
   private _inflightSquash: Promise<SquashResult> | null = null;
+  /**
+   * Consecutive compaction failures that retrying cannot fix, and when
+   * automatic triggers may resume. Without this memory, a document no
+   * compaction can get past (an undecodable update, a missing Storage
+   * blob, Storage rejecting the fold upload) re-ran the same failing
+   * attempt, re-reading the whole backlog, on every trigger: at the
+   * realtime hard cap that is every listener delivery.
+   */
+  private _compactionFailures = 0;
+  private _compactionBackoffUntil = 0;
 
   /**
    * Buffered local updates awaiting the debounced save.
@@ -341,6 +353,8 @@ export class FireProvider extends ObservableV2<any> {
   /**
    * Manually trigger compaction.
    * Normally handled automatically when update threshold is exceeded.
+   * Runs even while automatic compaction is backing off after a failure
+   * (see the 'compaction-failed' event).
    * 
    * @param attempt - Internal retry counter (do not set manually)
    * @throws {Error} If locking fails or Firestore operations error
@@ -404,7 +418,7 @@ export class FireProvider extends ObservableV2<any> {
     }
 
     try {
-      await performTieredCompaction(ctx, attempt);
+      this._recordCompactionResult(await performTieredCompaction(ctx, attempt));
     } finally {
       // FIX: Resume history listener — unless the provider was epoch-fenced
       // meanwhile (see _stopSyncing): a resumed listener would keep reading
@@ -420,6 +434,8 @@ export class FireProvider extends ObservableV2<any> {
           uid: this.uid,
           maxUpdatesThreshold: this.maxUpdatesThreshold,
           onCompactionNeeded: () => this.compact(),
+          getCompactionBackoffUntil: () => this._compactionBackoffUntil,
+          onCompactionProgress: () => this._endCompactionBackoff(),
           isDestroyed: () => this._isDestroyed,
           onListenerError: (error) => this._handleListenerError(error),
           storage: this.storage,
@@ -437,6 +453,47 @@ export class FireProvider extends ObservableV2<any> {
         this._unsubscribeHistory = createHistoryListener(syncCtx, this._lastHistoryDoc);
       }
     }
+  }
+
+  /**
+   * Updates the automatic-compaction backoff from a finished compaction.
+   *
+   * Progress (anything compacted) ends the backoff. A failure counts only
+   * when it will repeat (see isPersistentCompactionFailure); a lost lock,
+   * a version race or a transport error leaves the backoff as it was. A
+   * counted failure is surfaced: the document's backlog now grows until
+   * its cause is fixed, and nothing else would tell the application.
+   */
+  private _recordCompactionResult(result: CompactionResult): void {
+    if (result.success) {
+      if (result.updatesCompacted > 0 || result.historySegmentsMerged > 0) {
+        this._endCompactionBackoff();
+      }
+      return;
+    }
+    if (this._isDestroyed || !isPersistentCompactionFailure(result.error)) return;
+
+    this._compactionFailures++;
+    const retryInMs = compactionBackoffMs({
+      failures: this._compactionFailures,
+      baseMs: DEFAULTS.COMPACTION_TRIGGER_COOLDOWN_MS,
+      maxMs: DEFAULTS.COMPACTION_FAILURE_BACKOFF_MAX_MS,
+      random: Math.random(),
+    });
+    this._compactionBackoffUntil = Date.now() + retryInMs;
+    console.warn(`Compaction failed ${this._compactionFailures} time(s) in a row; automatic compaction paused for ${Math.round(retryInMs / 1000)}s.`);
+
+    this.emit('compaction-failed', [{
+      error: result.error,
+      consecutiveFailures: this._compactionFailures,
+      retryInMs,
+    }]);
+  }
+
+  /** Ends the compaction failure backoff (see _compactionFailures). */
+  private _endCompactionBackoff(): void {
+    this._compactionFailures = 0;
+    this._compactionBackoffUntil = 0;
   }
 
   /**
@@ -766,6 +823,8 @@ export class FireProvider extends ObservableV2<any> {
       uid: this.uid,
       maxUpdatesThreshold: this.maxUpdatesThreshold,
       onCompactionNeeded: () => this.compact(),
+      getCompactionBackoffUntil: () => this._compactionBackoffUntil,
+      onCompactionProgress: () => this._endCompactionBackoff(),
       isDestroyed: () => this._isDestroyed,
       // FIX: Wire listener error to event emitter and re-sync
       onListenerError: (error) => this._handleListenerError(error),

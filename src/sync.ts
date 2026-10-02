@@ -111,6 +111,21 @@ export interface SyncContext {
     maxUpdatesThreshold: number;
     /** Callback to trigger compaction */
     onCompactionNeeded?: () => void;
+    /**
+     * When automatic compaction triggers may resume (epoch ms, 0 = now).
+     * The provider backs off after a compaction failure that retrying
+     * cannot fix; until then the update listener triggers nothing, not
+     * even at the realtime hard cap.
+     */
+    getCompactionBackoffUntil?: () => number;
+    /**
+     * Fired when this client sees compaction progress made by any client:
+     * update documents leaving the collection, or a new snapshot version.
+     * The provider ends its failure backoff, so recovery after another
+     * client succeeds (or an operator fixes the cause) is not delayed by up
+     * to the backoff cap.
+     */
+    onCompactionProgress?: () => void;
     /** P1.7 FIX: Callback when listener encounters an error */
     onListenerError?: (error: Error) => void;
     /** Flag to check if provider is destroyed */
@@ -731,6 +746,17 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
     let backlog = syncedUpdateCount;
 
     const unsubscribe = onSnapshot(liveUpdatesQ, (snapshot) => {
+        const changes = snapshot.docChanges();
+
+        // Committed update documents leave the collection only when a
+        // compaction (or a squash) deletes them; a document that still had
+        // pending writes was this client's own write, rejected by the
+        // server. Reported before the trigger decision so a backoff it ends
+        // no longer suppresses this delivery.
+        if (changes.some(change => change.type === 'removed' && !change.doc.metadata.hasPendingWrites)) {
+            ctx.onCompactionProgress?.();
+        }
+
         if (onCompactionNeeded) {
             const now = Date.now();
 
@@ -741,6 +767,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 lastTriggerAt: lastCompactionTrigger,
                 cooldownMs: DEFAULTS.COMPACTION_TRIGGER_COOLDOWN_MS,
                 hardCap: DEFAULTS.REALTIME_LIMIT,
+                backoffUntil: ctx.getCompactionBackoffUntil?.() ?? 0,
             })) {
                 lastCompactionTrigger = now;
                 backlog = 0;
@@ -755,7 +782,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
         // an observer flush + 'update' event (editor re-render) per doc.
         const inlineBatch: { docId: string; data: any }[] = [];
 
-        snapshot.docChanges().forEach((change) => {
+        changes.forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
                 const docId = change.doc.id;
@@ -915,6 +942,9 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
         if (typeof data.version === 'number' && data.version === lastProcessedVersion) {
             return;
         }
+
+        // A new version means a fold committed (ours or another client's).
+        ctx.onCompactionProgress?.();
 
         // Redundancy check: if the local doc already covers the snapshot's
         // state vector, downloading it would be a no-op. The delete-set

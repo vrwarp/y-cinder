@@ -23,6 +23,7 @@ import {
     foldTailPath,
     nextSnapshotVersion,
     isLockLostError,
+    isPersistentCompactionFailure,
     isRetryableCompactionError,
     planHistoryDoc,
     planUpdateDoc,
@@ -241,6 +242,56 @@ describe('isLockLostError', () => {
         expect(isLockLostError({})).toBe(false);
         expect(isLockLostError({ message: 42 })).toBe(false);
         expect(isLockLostError(null)).toBe(false);
+    });
+});
+
+describe('isPersistentCompactionFailure', () => {
+    /*
+     * Each of these fails identically on every attempt until something
+     * outside the client changes, and every attempt re-reads the backlog.
+     */
+    it.each([
+        ['an undecodable update (merge validation)', new Error('Compaction candidate failed validation: Error: Unexpected end of array')],
+        ['a raw decode error from the delta merge', new Error('Integer out of Range')],
+        ['a storage-backed update whose blob is gone', { code: 'storage/object-not-found' }],
+        ['Storage rules rejecting the fold upload', { code: 'storage/unauthorized' }],
+        ['a Storage quota', { code: 'storage/quota-exceeded' }],
+        ['Firestore rules', { code: 'permission-denied' }],
+        ['an oversized write', { code: 'invalid-argument' }],
+        ['a Firestore quota', { code: 'resource-exhausted' }],
+    ])('counts %s', (_label, error) => {
+        expect(isPersistentCompactionFailure(error)).toBe(true);
+    });
+
+    it.each(['aborted', 'unavailable', 'deadline-exceeded', 'storage/retry-limit-exceeded'])(
+        'does not count the transport error %s: the next attempt may succeed',
+        (code) => {
+            expect(isPersistentCompactionFailure({ code })).toBe(false);
+        },
+    );
+
+    it('does not count the SDK being offline', () => {
+        expect(isPersistentCompactionFailure(Object.assign(
+            new Error('Failed to get document because the client is offline.'),
+            { code: 'unavailable' },
+        ))).toBe(false);
+    });
+
+    /*
+     * Another client holds the lock or folded first: that is progress, not
+     * a broken document.
+     */
+    it('does not count a lost lock', () => {
+        expect(isPersistentCompactionFailure(new Error('Lock lost or expired during compaction phase - Aborting write.'))).toBe(false);
+    });
+
+    it('does not count a version race with a concurrent fold or squash', () => {
+        expect(isPersistentCompactionFailure(new Error('Document version changed during compaction upload. Aborting to retry.'))).toBe(false);
+    });
+
+    it('counts an error it cannot classify', () => {
+        expect(isPersistentCompactionFailure(undefined)).toBe(true);
+        expect(isPersistentCompactionFailure({ message: 42 })).toBe(true);
     });
 });
 

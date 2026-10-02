@@ -697,6 +697,54 @@ interleaved runs each):
 
 Pinned by that file and `tests/integration/listener_blob_reclaim_race.test.ts`.
 
+## Fix 10: a compaction that keeps failing backs off
+
+Compaction merges every pending update document, so a document holding
+one it can never merge fails every attempt the same way: an undecodable
+inline payload (the poison pill the sync layer already quarantines for
+*applying*), a storage-backed update whose blob is gone, or Storage rules
+or quota rejecting the fold upload. `handleCompactionError` gave up on
+these, but nothing remembered the failure. Every trigger took the lock,
+re-read min(backlog, `compactionLimit`) update documents plus history and
+the main document (the fold path also downloaded and merged the snapshot
+and had its upload rejected), and failed again. Nothing ever drained, so
+the updates collection stayed at `REALTIME_LIMIT`, where the listener
+skips its 10 s cooldown and triggers on **every delivery**.
+
+The provider now counts consecutive failures that will repeat
+(`isPersistentCompactionFailure`: anything but a lost lock, a version race
+with a concurrent fold, or a transport error that outlasted compact()'s
+own retries) and pauses the automatic trigger, overriding the hard cap:
+10 s (one trigger cooldown, so a single failure costs nothing extra),
+doubling per failure to 30 min, plus up to 25% jitter. Progress ends the
+pause: a compaction of ours that compacts anything, or update documents
+deleted or a new snapshot version seen from another client. Manual
+`compact()` is never gated. The failure surfaces as a `compaction-failed`
+event; before, it was invisible to the application.
+
+Measured in `tests/integration/poison_doc_compaction_storm.test.ts`
+(emulator, SDK calls counted at the module boundary). Hard-cap regime, one
+permanent failure, then 8 single remote writes (identical in every run):
+
+| failure | lock-holding attempts | update-doc reads | other |
+| --- | ---: | ---: | --- |
+| undecodable inline update | 9 → **1** | 1,800 → **200** | lock transactions 18 → 2 |
+| storage blob gone | 9 → **1** | 1,800 → **200** | failed downloads 9 → 1 |
+| fold upload rejected | 9 → **1** | 1,800 → **200** | snapshot downloaded 576 → 64 KB, upload rejected 748 → 83 KB |
+
+Two devices on a poisoned document, 260 edits over ~30 s (medians of 10
+interleaved runs each; attempt counts are timing-dependent): lock-holding
+attempts 26 → **4**, compaction update-doc reads 4,904 → **428**, billed
+compaction reads per edit 19.4 → **1.7** (healthy document: 1.6),
+lock/commit transactions 69 → 9. Over a long session the pause bounds a
+client to at most 9 attempts in the first hour and 2 per hour after,
+instead of one per cooldown (360 per hour) or one per delivery.
+
+What this does not fix: provider state is per session, so every app
+launch still pays one failed attempt, and the backlog still never drains —
+every cold start reads all of it (261 documents, before and after). Only
+removing the cause unblocks compaction.
+
 ## The remaining floor: epoch squash
 
 Everything above bounds the *per-cycle* costs, but the floor itself —

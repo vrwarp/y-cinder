@@ -9,6 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+    compactionBackoffMs,
     computeSaveDelay,
     initialSyncSaveHold,
     isRemoteOrigin,
@@ -199,6 +200,40 @@ describe('planListenerRecovery', () => {
     it('still counts listeners that failed just short of healthyMs', () => {
         expect(planListenerRecovery({ ...base, retryCount: 4, now: base.attachedAt + 29_999 }))
             .toEqual({ retryCount: 5, giveUp: true });
+    });
+});
+
+describe('compactionBackoffMs', () => {
+    const base = { failures: 1, baseMs: 10_000, maxMs: 1_800_000, random: 0 };
+
+    /*
+     * One failure must cost no more triggers than a healthy document: the
+     * first delay is the trigger cooldown itself.
+     */
+    it('waits one base delay after the first failure', () => {
+        expect(compactionBackoffMs(base)).toBe(10_000);
+    });
+
+    it('doubles per consecutive failure', () => {
+        expect(compactionBackoffMs({ ...base, failures: 2 })).toBe(20_000);
+        expect(compactionBackoffMs({ ...base, failures: 3 })).toBe(40_000);
+        expect(compactionBackoffMs({ ...base, failures: 8 })).toBe(1_280_000);
+    });
+
+    it('stops growing at the cap', () => {
+        expect(compactionBackoffMs({ ...base, failures: 9 })).toBe(1_800_000);
+        expect(compactionBackoffMs({ ...base, failures: 5_000 })).toBe(1_800_000);
+    });
+
+    it('adds up to a quarter of jitter, never less than the step', () => {
+        expect(compactionBackoffMs({ ...base, random: 0.5 })).toBe(11_250);
+        expect(compactionBackoffMs({ ...base, random: 0.999 })).toBeLessThan(12_500);
+        expect(compactionBackoffMs({ ...base, failures: 20, random: 0.999 })).toBeLessThan(2_250_000);
+        expect(compactionBackoffMs({ ...base, failures: 20, random: 0.999 })).toBeGreaterThan(1_800_000);
+    });
+
+    it('treats a zero failure count like the first failure', () => {
+        expect(compactionBackoffMs({ ...base, failures: 0 })).toBe(10_000);
     });
 });
 

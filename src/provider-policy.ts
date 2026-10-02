@@ -148,6 +148,34 @@ export function planListenerRecovery(state: {
     return { retryCount, giveUp: retryCount >= state.maxRetries };
 }
 
+/**
+ * How long automatic compaction waits after a failure that retrying cannot
+ * fix (see isPersistentCompactionFailure).
+ *
+ * Every attempt on such a document takes the lock and re-reads the whole
+ * backlog before failing the same way again, and at the realtime hard cap
+ * the update listener would start one on every delivery. The first delay
+ * is one trigger cooldown, so a single failure costs no more triggers than
+ * a healthy document does; it doubles per consecutive failure up to
+ * `maxMs`. Up to a quarter of jitter is added on top so clients that failed
+ * together do not retry together.
+ *
+ * @param params - Consecutive failures (at least 1), the first delay, the
+ * cap, and a random number in [0, 1).
+ * @returns The delay in milliseconds.
+ */
+export function compactionBackoffMs(params: {
+    failures: number;
+    baseMs: number;
+    maxMs: number;
+    random: number;
+}): number {
+    const { failures, baseMs, maxMs, random } = params;
+    const step = Math.min(maxMs, baseMs * 2 ** Math.max(0, failures - 1));
+
+    return step + step * random / 4;
+}
+
 /** Why a squash cannot run right now. */
 export type SquashBlock =
     | { kind: 'destroyed' }

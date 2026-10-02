@@ -141,7 +141,14 @@ export function isClientOfflineError(error: any): boolean {
  * collection has reached the realtime hard cap, where falling further
  * behind is worse than the wasted contention.
  *
- * @param params - Delivery size, threshold, clock and cooldown state.
+ * A backoff after a compaction failure that retrying cannot fix overrides
+ * even the hard cap. A document compaction cannot get past (e.g. an
+ * undecodable update) never drains, so it stays at the hard cap, and
+ * every delivery would start another attempt that re-reads the whole
+ * backlog and fails the same way.
+ *
+ * @param params - Delivery size, threshold, clock, cooldown state, and
+ * when the provider's failure backoff ends (0 when none is running).
  * @returns true to trigger a compaction now.
  */
 export function shouldTriggerCompaction(params: {
@@ -151,10 +158,11 @@ export function shouldTriggerCompaction(params: {
     lastTriggerAt: number;
     cooldownMs: number;
     hardCap: number;
+    backoffUntil?: number;
 }): boolean {
-    const { size, maxUpdatesThreshold, now, lastTriggerAt, cooldownMs, hardCap } = params;
+    const { size, maxUpdatesThreshold, now, lastTriggerAt, cooldownMs, hardCap, backoffUntil = 0 } = params;
 
-    if (size <= maxUpdatesThreshold) {
+    if (size <= maxUpdatesThreshold || now < backoffUntil) {
         return false;
     }
 

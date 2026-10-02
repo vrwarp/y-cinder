@@ -85,6 +85,54 @@ export function localCoversPendingDoc(
 }
 
 /**
+ * Whether the local document has applied every deletion one server blob
+ * carries.
+ *
+ * State vectors do not advance on deletion, so the checks above cannot see
+ * a deletion the squasher never received: a delete-only fold leaves the
+ * snapshot state vector unchanged, and a delete-only delta segment's state
+ * vector is empty. Squashing anyway clones the deleted content into the
+ * new epoch. Only deletions of structs the local document holds matter —
+ * the clone cannot resurrect anything else, and holding fewer structs than
+ * the server is what the state-vector checks catch. An unparseable blob
+ * counts as NOT covered.
+ *
+ * @param ydoc - The local document.
+ * @param blob - A pending update/segment, or the snapshot's delete-set
+ *               fingerprint (a structs-empty update).
+ * @returns true when every deletion of a locally held struct is applied.
+ */
+export function localCoversDeletions(ydoc: Y.Doc, blob: Uint8Array): boolean {
+    try {
+        const { ds } = Y.decodeUpdate(blob);
+
+        for (const [client, deletions] of ds.clients) {
+            const structs = ydoc.store.clients.get(client);
+            if (!structs) {
+                continue;
+            }
+            const held = Y.getState(ydoc.store, client);
+
+            for (const { clock, len } of deletions) {
+                const end = Math.min(clock + len, held);
+                if (clock >= end) {
+                    continue;
+                }
+                for (let i = Y.findIndexSS(structs, clock); i < structs.length && structs[i].id.clock < end; i += 1) {
+                    if (!structs[i].deleted) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Whether the server holds more pending work than one transaction can
  * fold, meaning a normal compaction must run first.
  *

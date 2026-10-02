@@ -13,6 +13,7 @@ import { toBase64 } from 'lib0/buffer';
 import {
     isNotQuiescent,
     isSquashPreempted,
+    localCoversDeletions,
     localCoversPendingDoc,
     readVersionEpoch,
     squashSnapshotPath,
@@ -107,6 +108,101 @@ describe('localCoversPendingDoc', () => {
     it('covers an empty document that carries nothing at all', () => {
         expect(localCoversPendingDoc(local, {})).toBe(true);
         expect(localCoversPendingDoc(local, null)).toBe(true);
+    });
+});
+
+/*
+ * State vectors do not advance on deletion, so a squasher that missed a
+ * server-side deletion passes every state-vector check. This is the check
+ * that keeps the squashed epoch from resurrecting that content.
+ */
+describe('localCoversDeletions', () => {
+    /** Writer with 'abcdefghij' as one struct; returns the doc and its insert. */
+    const writer = () => {
+        const doc = new Y.Doc();
+        doc.clientID = 1;
+        doc.getText('t').insert(0, 'abcdefghij');
+        return { doc, insert: Y.encodeStateAsUpdate(doc) };
+    };
+    const replica = (...updates: Uint8Array[]) => {
+        const doc = new Y.Doc();
+        doc.clientID = 2;
+        updates.forEach(u => Y.applyUpdate(doc, u));
+        return doc;
+    };
+    /** Applies `edit` to `doc` and returns just that change as an update. */
+    const change = (doc: Y.Doc, edit: () => void) => {
+        const before = Y.encodeStateVector(doc);
+        edit();
+        return Y.encodeStateAsUpdate(doc, before);
+    };
+
+    it('covers a blob whose deletions are all applied locally', () => {
+        const { doc, insert } = writer();
+        const deletion = change(doc, () => doc.getText('t').delete(0, 6));
+
+        expect(localCoversDeletions(replica(insert, deletion), deletion)).toBe(true);
+    });
+
+    it('does not cover a delete-only update the local doc never applied', () => {
+        const { doc, insert } = writer();
+        const deletion = change(doc, () => doc.getText('t').delete(0, 6));
+
+        expect(localCoversDeletions(replica(insert), deletion)).toBe(false);
+    });
+
+    it('reads deletions from a structs-empty delete-set fingerprint', () => {
+        const { doc, insert } = writer();
+        doc.getText('t').delete(0, 6);
+        const fingerprint = Y.encodeStateAsUpdate(doc, Y.encodeStateVector(doc));
+        expect(Y.decodeUpdate(fingerprint).structs).toHaveLength(0);
+
+        expect(localCoversDeletions(replica(insert), fingerprint)).toBe(false);
+        expect(localCoversDeletions(replica(Y.encodeStateAsUpdate(doc)), fingerprint)).toBe(true);
+    });
+
+    it('checks every local struct a deleted range spans', () => {
+        const { doc, insert } = writer();
+        const first = change(doc, () => doc.getText('t').delete(0, 3));
+        const second = change(doc, () => doc.getText('t').delete(0, 3));
+        const both = Y.mergeUpdates([first, second]);
+
+        // Locally 'abc' is a deleted struct and 'def…' a live one
+        expect(localCoversDeletions(replica(insert, first), both)).toBe(false);
+        expect(localCoversDeletions(replica(insert, first, second), both)).toBe(true);
+    });
+
+    /*
+     * The clone cannot resurrect a struct it does not hold, and holding
+     * fewer structs than the server is the state-vector checks' job.
+     */
+    it('ignores deletions of structs the local doc does not hold', () => {
+        const doc = new Y.Doc();
+        doc.clientID = 1;
+        const first = change(doc, () => doc.getText('t').insert(0, 'abcde'));
+        change(doc, () => doc.getText('t').insert(5, 'fghij'));
+        const tail = change(doc, () => doc.getText('t').delete(5, 5));
+        const deletion = Y.mergeUpdates([tail, change(doc, () => doc.getText('t').delete(0, 5))]);
+
+        // Never saw client 1 at all
+        expect(localCoversDeletions(replica(), deletion)).toBe(true);
+        // Holds only 'abcde': 'fghij' is beyond its state...
+        expect(localCoversDeletions(replica(first), tail)).toBe(true);
+        // ...but a live 'abcde' is still caught
+        expect(localCoversDeletions(replica(first), deletion)).toBe(false);
+        const partial = replica(first);
+        partial.getText('t').delete(0, 5);
+        expect(localCoversDeletions(partial, deletion)).toBe(true);
+    });
+
+    it('covers a blob that carries no deletions', () => {
+        const { insert } = writer();
+
+        expect(localCoversDeletions(replica(insert), insert)).toBe(true);
+    });
+
+    it('refuses to claim coverage of an unparseable blob', () => {
+        expect(localCoversDeletions(replica(), new Uint8Array([255, 255, 255]))).toBe(false);
     });
 });
 

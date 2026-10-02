@@ -53,7 +53,7 @@ import {
     deleteField,
     limit,
 } from "@firebase/firestore";
-import { ref, uploadBytes, deleteObject, FirebaseStorage } from "@firebase/storage";
+import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import { toBase64, fromBase64 } from "lib0/buffer";
 import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
@@ -62,6 +62,7 @@ import { generateSessionId } from "./utils";
 import {
     isNotQuiescent,
     isSquashPreempted,
+    localCoversDeletions,
     localCoversPendingDoc,
     readVersionEpoch,
     squashSnapshotPath,
@@ -213,7 +214,9 @@ export interface SquashResult {
  * Preconditions (validated here):
  *  - caller is fully synced (local state vector covers everything stored
  *    server-side, checked against the snapshot state vector and pending
- *    update/segment metadata);
+ *    update/segment metadata, and every server-side deletion of a struct
+ *    it holds is applied locally, checked against the snapshot's
+ *    delete-set fingerprint and the pending updates/segments);
  *  - pending updates + history fit one Firestore transaction — run a
  *    normal compaction first to fold the backlog.
  *
@@ -265,8 +268,25 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         if (!stateVectorCovers(localSV, mainData?.stateVector)) {
             return { success: false, skippedReason: 'local-behind' };
         }
-        for (const snap of [...updatesSnap.docs, ...historySnap.docs]) {
-            if (!localCoversPendingDoc(localSV, snap.data())) {
+        const pendingDocs = [...updatesSnap.docs, ...historySnap.docs].map(snap => snap.data());
+        for (const data of pendingDocs) {
+            if (!localCoversPendingDoc(localSV, data)) {
+                return { success: false, skippedReason: 'local-behind' };
+            }
+        }
+
+        // State vectors do not move on deletion, so the squasher must also
+        // have applied every deletion the server holds: the snapshot's
+        // delete-set fingerprint (or, predating fingerprints, the snapshot
+        // itself) and each pending update/segment.
+        const deletionBlobs = await Promise.all([
+            mainData?.deleteSet || mainData?.deleteSetStoragePath
+                ? readBlob(storage, mainData.deleteSet, mainData.deleteSetStoragePath)
+                : readBlob(storage, mainData?.content, mainData?.snapshotStoragePath),
+            ...pendingDocs.map(data => readBlob(storage, data.update ?? data.segment, data.updateStoragePath)),
+        ]);
+        for (const blob of deletionBlobs) {
+            if (blob && !localCoversDeletions(ydoc, blob)) {
                 return { success: false, skippedReason: 'local-behind' };
             }
         }
@@ -346,4 +366,20 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
     } finally {
         await releaseLock({ db, path, uid });
     }
+}
+
+/**
+ * Reads a blob a document stores either inline (Firestore Bytes) or in
+ * Cloud Storage.
+ *
+ * @returns The bytes, or null when the document carries neither.
+ */
+async function readBlob(storage: FirebaseStorage, inline: unknown, storagePath: unknown): Promise<Uint8Array | null> {
+    if (inline) {
+        return (inline as Bytes).toUint8Array();
+    }
+    if (typeof storagePath === 'string') {
+        return new Uint8Array(await getBytes(ref(storage, storagePath)));
+    }
+    return null;
 }

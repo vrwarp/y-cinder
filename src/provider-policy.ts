@@ -94,6 +94,35 @@ export function computeSaveDelay(params: {
 }
 
 /**
+ * How much longer a due save should wait for the initial sync in flight.
+ *
+ * Initial sync's push covers every update buffered before it reads the
+ * local doc. On a cold start that includes local persistence's hydration
+ * (the whole document), so saving the buffer meanwhile would upload it a
+ * second time. The save still goes out at `maxAggregationTime` from the
+ * first buffered update, the same ceiling as for continuous typing: the
+ * sync can stall (offline, its push is never acknowledged), and buffered
+ * edits must not wait on it indefinitely.
+ *
+ * @param params - Whether initial sync is running, the ceiling, buffer start and now.
+ * @returns 0 to save now, else the delay until the ceiling.
+ */
+export function initialSyncSaveHold(params: {
+    syncInFlight: boolean;
+    maxAggregationTime: number;
+    pendingSince: number | null;
+    now: number;
+}): number {
+    const { syncInFlight, maxAggregationTime, pendingSince, now } = params;
+
+    if (!syncInFlight || pendingSince === null) {
+        return 0;
+    }
+
+    return Math.max(0, pendingSince + maxAggregationTime - now);
+}
+
+/**
  * How to recover from a real-time listener error.
  *
  * Firestore ends a listener for good once its error callback fires, so the

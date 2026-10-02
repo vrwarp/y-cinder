@@ -37,7 +37,7 @@ import {
 } from "./types";
 import { generateSessionId, calculateBackoff } from "./utils";
 import { extractClockEnds, aggregateClockEnds } from "./update-metadata";
-import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext } from "./sync";
+import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext, SyncResult } from "./sync";
 import { compact as performTieredCompaction, CompactionContext } from "./compaction";
 import { squashDocument, readDocEpoch, SquashResult } from "./squash";
 import { measureClockSkew } from "./locking";
@@ -49,6 +49,7 @@ import {
 } from "./subdocs";
 import {
   computeSaveDelay,
+  initialSyncSaveHold,
   isRemoteOrigin,
   planListenerRecovery,
   squashBlockedBy,
@@ -57,6 +58,9 @@ import {
 
 // Re-export types for external consumers
 export type { FireProviderConfig } from "./types";
+
+/** The update buffer, and how many entries it held, when initial sync read the local doc */
+type SyncCapture = { buffer: Uint8Array[]; count: number };
 
 /**
  * Yjs persistence provider for Firebase Firestore.
@@ -183,6 +187,12 @@ export class FireProvider extends ObservableV2<any> {
    * (see the 'epoch-changed' event).
    */
   private _epochFenced = false;
+  /**
+   * An initial sync (performInitialSync) is running. Its push covers what
+   * is buffered when it reads the local doc, so due saves wait for it
+   * (see initialSyncSaveHold).
+   */
+  private _initialSyncInFlight = false;
 
   /**
    * Creates a new FireProvider instance.
@@ -682,6 +692,7 @@ export class FireProvider extends ObservableV2<any> {
       }
     }
 
+    let captured: SyncCapture | null = null;
     const syncCtx: SyncContext = {
       db: this.db,
       path: this.path,
@@ -708,11 +719,30 @@ export class FireProvider extends ObservableV2<any> {
       onEpochAdopted: (serverEpoch) => {
         this._epoch = serverEpoch;
       },
+      // Everything buffered so far is in the doc the push is computed from
+      onLocalStateCaptured: () => {
+        captured = { buffer: this._pendingUpdates, count: this._pendingUpdates.length };
+      },
     };
 
     try {
-      // Perform initial sync
-      const result = await performInitialSync(syncCtx);
+      // Perform initial sync; due saves wait for it meanwhile
+      this._initialSyncInFlight = true;
+      let result: SyncResult;
+      try {
+        result = await performInitialSync(syncCtx);
+      } finally {
+        this._initialSyncInFlight = false;
+      }
+      if (result.success) {
+        this._retireSyncedUpdates(captured);
+      }
+      // The listeners below keep syncCtx alive: do not pin the buffer
+      captured = null;
+      // Whatever the outcome, saves held back meanwhile resume
+      if (this._pendingUpdates.length > 0) {
+        this._scheduleSave();
+      }
       if (this._isDestroyed) return;
 
       // The server was squashed past this document's history — do not
@@ -789,6 +819,39 @@ export class FireProvider extends ObservableV2<any> {
         }, backoffMs);
       }
     }
+  }
+
+  /**
+   * Drops the buffered local updates a successful initial sync covered.
+   *
+   * handleUpdate only buffers updates the doc already holds, so every
+   * entry buffered when initial sync read the local doc is on the server
+   * once the sync succeeds: already, or inside its push. Saving them again
+   * would upload them twice; on a cold start where local persistence
+   * hydrated after construction, that is the whole document. Entries
+   * buffered later stay queued.
+   *
+   * A save that started since then took the buffer with it (the array was
+   * replaced), so nothing is dropped and the worst case is that save's
+   * duplicate. A save that started before may fail and put its batch back
+   * at the front, but that batch was buffered before the capture as well.
+   *
+   * @param captured - The buffer and its length when the doc was read
+   */
+  private _retireSyncedUpdates(captured: SyncCapture | null): void {
+    if (!captured || captured.count === 0 || captured.buffer !== this._pendingUpdates) return;
+
+    this._pendingUpdates.splice(0, captured.count);
+    if (this._pendingUpdates.length === 0) {
+      this._pendingSince = null;
+      if (this._debounceTimerId) {
+        clearTimeout(this._debounceTimerId);
+        this._debounceTimerId = null;
+      }
+    }
+
+    // They are committed now: report them like a committed save
+    this.emit('saved', [Date.now()]);
   }
 
   /**
@@ -936,9 +999,14 @@ export class FireProvider extends ObservableV2<any> {
    * the update buffer grows without bound. Once the oldest buffered update
    * has waited maxAggregationTime, the save fires even mid-burst.
    *
+   * While initial sync runs, a due save waits for it, up to that same cap:
+   * its push covers what is buffered, and it is rescheduled when the sync
+   * settles (see initialSyncSaveHold).
+   *
    * @param delayMs - Explicit delay before saving (used by failure retries
    *                  with exponential backoff, exempt from the aggregation
-   *                  cap). When omitted, the debounce window applies.
+   *                  cap, and by the initial-sync hold, which ends at it).
+   *                  When omitted, the debounce window applies.
    */
   private _scheduleSave(delayMs?: number): void {
     if (this._isDestroyed) return;
@@ -956,9 +1024,19 @@ export class FireProvider extends ObservableV2<any> {
     }
     this._debounceTimerId = setTimeout(() => {
       this._debounceTimerId = null;
-      if (!this._isDestroyed) {
-        this.saveToFirestore();
+      if (this._isDestroyed) return;
+
+      const holdMs = initialSyncSaveHold({
+        syncInFlight: this._initialSyncInFlight,
+        maxAggregationTime: this.maxAggregationTime,
+        pendingSince: this._pendingSince,
+        now: Date.now(),
+      });
+      if (holdMs > 0) {
+        this._scheduleSave(holdMs);
+        return;
       }
+      this.saveToFirestore();
     }, delay);
   }
 

@@ -145,6 +145,14 @@ export interface SyncContext {
      * belongs to the same epoch as the push.
      */
     onEpochAdopted?: (serverEpoch: number) => void;
+    /**
+     * Fired synchronously right before the push decision reads the local
+     * doc. Once performInitialSync then reports success, the server holds
+     * everything the doc held at this point (already, or inside the push),
+     * so the provider retires the local updates it had buffered by then
+     * instead of saving them a second time.
+     */
+    onLocalStateCaptured?: () => void;
 }
 
 /**
@@ -507,6 +515,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         const serverSV = writeStateVector(serverSVMap);
         let localUpdatesPushed = false;
 
+        // No await from here to the diff: the push covers exactly what the
+        // doc holds now (see SyncContext.onLocalStateCaptured).
+        ctx.onLocalStateCaptured?.();
         const exactLocalSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
         const serverCoversStructs = serverCoversLocalStructs(exactLocalSV, serverSVMap);
 

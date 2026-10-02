@@ -111,7 +111,7 @@ The `FireProvider` constructor accepts the following configuration options:
 | `path` | `string` | Yes | - | Firestore document path (e.g., `users/alice/notes/note-1`). |
 | `maxUpdatesThreshold` | `number` | No | `50` | Number of updates before triggering compaction. |
 | `maxWaitTime` | `number` | No | `500` | Debounce time (ms) for writing updates to Firestore. |
-| `maxAggregationTime` | `number` | No | `maxWaitTime * 10` | Hard cap (ms) on how long the sliding debounce may defer a save during continuous editing. |
+| `maxAggregationTime` | `number` | No | `maxWaitTime * 10` | Hard cap (ms) on how long the sliding debounce may defer a save during continuous editing, or while initial sync runs. |
 | `gcCompaction` | `boolean` | No | `true` | Garbage-collect deleted content when compacting snapshots. Keeps long-lived documents proportional to live content instead of total historical churn. See [docs/performance.md](docs/performance.md). |
 | `historyFoldThreshold` | `number` | No | `8` | History segments accumulated before compaction folds everything into the base snapshot. Between folds, compaction runs in cheap **delta mode** (pending updates → one history segment, `O(new data)`) instead of downloading/re-merging/re-uploading the whole snapshot every `maxUpdatesThreshold` updates. `1` restores the old always-fold behavior. Values above `100` behave like `100`: one fold merges at most 99 history segments (Firestore's 500-write transaction limit). |
 | `subdocLoadingMode` | `'eager' \| 'lazy'` | No | `'eager'` | `'lazy'` defers syncing remote subdocuments until `subdoc.load()` is called (Yjs convention), avoiding N initial syncs + 3N listeners at startup for documents with many subdocs. |
@@ -136,7 +136,7 @@ The provider extends `ObservableV2` and emits the following events:
 | Event | Payload | Description |
 | :--- | :--- | :--- |
 | `sync` | `boolean` | Emitted when initial sync completes and real-time listeners are attached, and again each time a re-sync after a listener error completes. Follows the y-fire / y-* provider convention. |
-| `saved` | `number` | Emitted after a local update batch is committed to Firestore, with the commit wall-clock time (`Date.now()`). The success counterpart to `save-rejected`. |
+| `saved` | `number` | Emitted after a local update batch is committed to Firestore, with the commit wall-clock time (`Date.now()`). The success counterpart to `save-rejected`. Updates made before initial sync read the local document (including local persistence loading into it) are committed by initial sync itself rather than saved again; `saved` is emitted for them once it succeeds. |
 | `connection-error` | `{ code: string, message: string, error: Error }` | Emitted when a Firestore listener encounters an error. Firestore ends a listener once it errors, so the provider sets `synced` to `false`, detaches its listeners and re-syncs with backoff, which re-attaches them. |
 | `sync-failure` | `Error` | Emitted when a sync (initial, or a re-sync after a listener error) fails after all retry attempts, or when listeners keep failing right after each re-sync. Remote changes are no longer received. |
 | `corrupted-document` | `{ docId: string, error: Error }` | Emitted when a corrupted Firestore document is quarantined. |

@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     computeSaveDelay,
+    initialSyncSaveHold,
     isRemoteOrigin,
     planListenerRecovery,
     squashBlockedBy,
@@ -140,6 +141,33 @@ describe('computeSaveDelay', () => {
 
     it('honours an explicit zero rather than falling back to the debounce', () => {
         expect(computeSaveDelay({ ...base, explicitDelayMs: 0 })).toBe(0);
+    });
+});
+
+describe('initialSyncSaveHold', () => {
+    const base = { syncInFlight: true, maxAggregationTime: 5_000, pendingSince: 9_000, now: 10_000 };
+
+    it('saves at once when no initial sync is running', () => {
+        expect(initialSyncSaveHold({ ...base, syncInFlight: false })).toBe(0);
+    });
+
+    it('saves at once when nothing is buffered', () => {
+        expect(initialSyncSaveHold({ ...base, pendingSince: null })).toBe(0);
+    });
+
+    /*
+     * The sync's push covers the buffer: a save now would upload it twice
+     * (on a cold start, the whole hydrated document).
+     */
+    it('waits for the sync until the aggregation ceiling', () => {
+        // Buffered at 9,000; ceiling 14,000; now 10,000 -> 4,000 left.
+        expect(initialSyncSaveHold(base)).toBe(4_000);
+    });
+
+    /* A stalled sync (offline push) must not hold edits indefinitely. */
+    it('stops holding once the ceiling has passed', () => {
+        expect(initialSyncSaveHold({ ...base, now: 14_000 })).toBe(0);
+        expect(initialSyncSaveHold({ ...base, now: 1_000_000 })).toBe(0);
     });
 });
 

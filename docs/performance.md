@@ -488,3 +488,63 @@ workload: write amplification 9.1× (growing) → **2.6× (bounded ≤ ~3×)**,
 IndexedDB bytes written 50 MB → 14.7 MB, trim latency flat instead of
 growing ~13 ms per 1k events. Hydration remains floor-dominated — that is
 what squash resets.
+
+## Cold starts no longer re-upload local persistence
+
+versicle builds a fresh `Y.Doc` and its providers on every page load, and
+y-idb hydrates that doc asynchronously, in ONE transaction whose origin is
+the persistence instance. With `FireProvider` constructed first (the
+standard Yjs idiom), that transaction's `'update'` event is the whole
+document, and the provider buffered it like a local edit: the debounced
+save wrote it as a new update document although the server already held
+every byte and the initial-sync push had just decided what (if anything)
+the server lacked. Offline edits from the previous session and edits typed
+while initial sync ran were written twice the same way: inside the push,
+then again by the save.
+
+The echo cost far more than its own write. Past `MAX_METADATA_CLIENTS`
+(50) it carries no clientIDs/clientClocks, so every online peer downloaded
+it and ran a full `Y.applyUpdate`. The next delta compaction turned it into
+an O(document) segment flagged `hasDeletions`, which fresh clients and
+history listeners never skip, or forced a full fold when it did not fit
+inline. Above 1 MB it became a Storage blob plus pointer document.
+
+Initial sync is now the single writer for what was buffered before it read
+the local doc. `performInitialSync` calls `onLocalStateCaptured`
+synchronously right before its push decision; once the attempt succeeds,
+the provider drops the entries buffered by then (the server holds all of
+them, already or inside the push) and emits `'saved'` for them. A save
+that comes due while initial sync runs waits for it, but never past
+`maxAggregationTime` from the first buffered update
+(`initialSyncSaveHold`), so a stalled sync (offline, its push never
+acknowledged) cannot keep edits out of the SDK's write queue. The
+clock-skew probe does not hold saves. Entries buffered after the capture
+are saved normally, a failed attempt drops nothing, and a save that
+started since the capture keeps its batch (a harmless duplicate at worst).
+The `destroy()`, unload and `squash()` flushes are unchanged.
+
+Measured in `tests/integration/hydration_echo_upload.test.ts` (emulator,
+versicle workload, deterministic op/byte counters, identical across 5
+interleaved runs each; hydration lands after construction):
+
+| cold start | before | after |
+| --- | ---: | ---: |
+| 20 sessions: echo written | 1 doc, 332,535 B | 0 |
+| 20 sessions: next compaction | 332,535 B `hasDeletions` segment | nothing to compact |
+| 60 sessions: echo, received by an online peer | 931,317 B without metadata | 0 |
+| 100 sessions: echo, downloaded by an online peer | 1,527,939 B Storage blob | 0 |
+| 100 sessions: next compaction | forced fold, 3.04 MB down / 1.52 MB up | nothing to compact |
+| offline edits (server lacked 22,570 B) | 2 docs, 373,117 B | 1 doc, 22,570 B |
+| edit typed during initial sync | 2 docs carry it | 1 |
+
+CPU avoided (`benchmarks/hydration-echo.bench.ts`, medians of 5 runs): a
+full apply of the metadata-less echo costs 57 / 98 / 187 ms at 60 / 120 /
+240 sessions on every online peer, every cold start, and the cold-start
+client's save-path metadata walk 22 / 45 / 75 ms.
+
+Two cases still upload the hydrated document: hydration that lands after
+initial sync has read the local doc (its update is indistinguishable from
+offline edits the server lacks, and filtering by origin would lose those),
+and a save that comes due during the clock-skew probe. Constructing the
+provider after local persistence has loaded (y-idb `whenSynced`)
+avoids both.

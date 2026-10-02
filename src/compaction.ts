@@ -63,7 +63,7 @@ import {
     DocumentReference,
     Timestamp,
 } from "@firebase/firestore";
-import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
+import { ref, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { fromBase64, toBase64 } from "lib0/buffer";
 import {
@@ -90,6 +90,7 @@ import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
 import { wait, calculateBackoff, generateSessionId, writeStateVector } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
 import { mergeUpdatesWithMetaAsync } from "./merge-utils";
+import { uploadBlob } from "./storage-blobs";
 import { updateHasDeletions } from "./update-metadata";
 
 /**
@@ -446,19 +447,20 @@ export async function compact(
         const nextVersion = currentVersion + 1;
         const attemptId = generateSessionId();
         const storagePath = foldSnapshotPath(path, nextVersion, attemptId);
-        const storageRef = ref(storage, storagePath);
 
         // Upload candidate blob to Cloud Storage first
         // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
         // The path is unique to this attempt: if we lose the lock while
         // uploading, another client may commit the same version, and a
         // version-derived name would let our late upload replace its blob.
-        await uploadBytes(storageRef, candidate);
+        // The blob is gzipped in the merge worker (about 3x smaller); the
+        // metadata above was derived from the raw candidate.
+        await uploadBlob(storage, storagePath, candidate);
 
         let deleteSetStoragePath: string | null = null;
         if (oversizedDeleteSet) {
             deleteSetStoragePath = foldDeleteSetPath(path, nextVersion, attemptId);
-            await uploadBytes(ref(storage, deleteSetStoragePath), oversizedDeleteSet);
+            await uploadBlob(storage, deleteSetStoragePath, oversizedDeleteSet);
         }
 
         // A client that held the replaced snapshot lacks only what this
@@ -650,7 +652,7 @@ async function publishFoldTail(params: {
         })) {
             return null;
         }
-        await uploadBytes(ref(storage, storagePath), tail.result);
+        await uploadBlob(storage, storagePath, tail.result);
         return { storagePath, baseClocks };
     } catch (e) {
         console.warn(`Failed to publish fold tail ${storagePath}; readers will download the snapshot`, e);

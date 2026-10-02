@@ -24,7 +24,7 @@ import {
   Bytes,
   serverTimestamp,
 } from "@firebase/firestore";
-import { getStorage, FirebaseStorage, ref, uploadBytes, deleteObject } from "@firebase/storage";
+import { getStorage, FirebaseStorage, ref, deleteObject } from "@firebase/storage";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
 
@@ -43,6 +43,7 @@ import { compact as performTieredCompaction, CompactionContext, CompactionResult
 import { isPersistentCompactionFailure } from "./compaction-policy";
 import { squashDocument, readDocEpoch, SquashResult } from "./squash";
 import { sharedClockOffset } from "./locking";
+import { uploadBlob } from "./storage-blobs";
 import {
   handleSubdocs as handleSubdocsEvent,
   destroyAllSubdocs,
@@ -1262,7 +1263,7 @@ export class FireProvider extends ObservableV2<any> {
         // Storage-backed update: upload binary to Cloud Storage and write
         // a lightweight pointer document to the updates collection
         const storagePath = largeUpdatePath(this.path, this.uid, Date.now(), generateSessionId());
-        await uploadBytes(ref(this.storage, storagePath), update);
+        await uploadBlob(this.storage, storagePath, update);
         try {
           await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), {
             ...baseData,

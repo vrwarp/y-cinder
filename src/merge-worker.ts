@@ -13,12 +13,17 @@
  * 
  * Request: { id: string, updates: Uint8Array[], diffAgainst?: Uint8Array }
  * Response: { id: string, result?: Uint8Array, error?: string }
+ *
+ * The worker also gzips Cloud Storage uploads (`gzip: true`, one blob in
+ * `updates`): the result is the gzip stream, and an error means the blob
+ * is uploaded raw.
  * 
  * @module merge-worker
  */
 
 import * as Y from 'yjs';
 import { mergeUpdatesCore, mergeUpdatesWithMeta } from './merge-core';
+import { gzipBlob } from './gzip';
 
 // Type definitions for worker messages
 interface MergeRequest {
@@ -39,6 +44,11 @@ interface MergeRequest {
      * only what it is missing on the main thread.
      */
     diffAgainst?: Uint8Array;
+    /**
+     * When true, gzip the single blob in `updates` for a Cloud Storage
+     * upload instead of merging (see gzipBlob).
+     */
+    gzip?: boolean;
 }
 
 interface MergeResponse {
@@ -56,7 +66,23 @@ const ctx: Worker = self as any;
  * Handle incoming merge requests from the main thread.
  */
 ctx.onmessage = (event: MessageEvent<MergeRequest>) => {
-    const { id, updates, gc, meta, diffAgainst } = event.data;
+    const { id, updates, gc, meta, diffAgainst, gzip } = event.data;
+
+    if (gzip) {
+        // Compression Streams are async; they run on this thread, so a
+        // multi-MB snapshot costs the main thread nothing.
+        gzipBlob(updates[0]).then(
+            (result) => {
+                const response: MergeResponse = { id, result };
+                ctx.postMessage(response, [result.buffer]);
+            },
+            (err) => {
+                const response: MergeResponse = { id, error: err instanceof Error ? err.message : String(err) };
+                ctx.postMessage(response);
+            }
+        );
+        return;
+    }
 
     try {
         if (diffAgainst) {

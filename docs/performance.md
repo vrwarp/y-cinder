@@ -745,6 +745,45 @@ launch still pays one failed attempt, and the backlog still never drains —
 every cold start reads all of it (261 documents, before and after). Only
 removing the cause unblocks compaction.
 
+## Fix 11: Storage blobs travel gzip-compressed
+
+Every Cloud Storage blob — fold and squash snapshots, offloaded large
+updates, offloaded delete-set fingerprints, fold tails (Fix 7) — was
+uploaded and downloaded as raw Yjs V1. V1 updates of map-heavy documents compress ~3× with gzip
+(repeated key strings and client ids, varint clocks), and the snapshot is
+the biggest byte stream the library moves: every cold start downloads it,
+every fold downloads and re-uploads it, and it grows ~230 KB per 1k
+events.
+
+All six writers now go through `uploadBlob` (`src/storage-blobs.ts`):
+the blob is gzipped with the Compression Streams API — inside the merge
+worker when available — checked to inflate back byte for byte, and stored
+with `Content-Encoding: gzip`. Cloud Storage serves such an object
+compressed to clients that accept gzip (browsers, Node's fetch) and the
+HTTP stack inflates it, so `getBytes` still returns raw V1: no reader
+changed, older clients read new blobs, raw blobs stay readable, and every
+piece of metadata (state vectors, fingerprints, the inline-versus-offload
+decisions) is still derived from the raw bytes. Without the API (Safari <
+16.4) or when gzip does not shrink the blob, it is uploaded raw.
+
+Measured on the aged versicle document (`storage-compression.bench.ts`,
+14.4k events) and on the emulator
+(`tests/integration/storage_blob_compression.test.ts`, which counts the
+bytes on the wire):
+
+| | raw V1 (before) | gzip (after) |
+| --- | ---: | ---: |
+| snapshot at 14.4k events (one cold start) | 3,467,787 B | 1,147,857 B (3.02×) |
+| one fold, download + upload | 6.61 MB | 2.19 MB |
+| all 37 folds over the document's life | 120.93 MB | 40.03 MB |
+| emulator: large update, 2 folds, cold start | 8,595,783 B | 2,841,348 B (0.331) |
+| emulator: fingerprint offload, squash, cold start | 5,681,180 B | ~1,839,370 B (0.324) |
+
+The price is `gzipBlob` — compress plus the round-trip check — at 206 ms
+for the 3.31 MB snapshot (median of 5 runs, 199-224 ms), in the worker,
+next to a 424-451 ms fold merge. The inline Firestore fields
+(fingerprint, history segments) stay raw V1.
+
 ## The remaining floor: epoch squash
 
 Everything above bounds the *per-cycle* costs, but the floor itself —

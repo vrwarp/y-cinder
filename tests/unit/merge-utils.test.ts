@@ -251,6 +251,23 @@ describe('worker path', () => {
         expect(meta.dsUpdate).toBeDefined();
     });
 
+    it('routes an upload gzip through the worker; a worker error means upload raw', async () => {
+        const mod = await loadModule();
+        const blob = makeUpdate(1, 1);
+        const compressed = new Uint8Array([0x1f, 0x8b, 8]);
+        const promise = mod.gzipBlobAsync(blob);
+
+        await vi.waitFor(() => { expect(FakeWorker.latest().posted).toHaveLength(1); });
+        expect(FakeWorker.latest().posted[0]).toMatchObject({ gzip: true, updates: [blob] });
+        FakeWorker.latest().respond({ result: compressed });
+        expect(await promise).toBe(compressed);
+
+        const refused = mod.gzipBlobAsync(blob);
+        await vi.waitFor(() => { expect(FakeWorker.latest().posted).toHaveLength(2); });
+        FakeWorker.latest().respond({ error: 'Compression Streams API unavailable' });
+        await expect(refused).rejects.toThrow('Compression Streams API unavailable');
+    });
+
     it('rejects the caller when the worker reports an error', async () => {
         const mod = await loadModule();
         const promise = mod.mergeUpdatesAsync([makeUpdate(1, 1)]);

@@ -53,13 +53,14 @@ import {
     deleteField,
     limit,
 } from "@firebase/firestore";
-import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
+import { ref, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import { toBase64, fromBase64 } from "lib0/buffer";
 import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";
 import { generateSessionId } from "./utils";
 import { updateBlobPath } from "./compaction-policy";
+import { uploadBlob } from "./storage-blobs";
 import {
     isNotQuiescent,
     isSquashPreempted,
@@ -365,7 +366,7 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
 
         const nextVersion = currentVersion + 1;
         const storagePath = squashSnapshotPath(path, newEpoch, nextVersion, generateSessionId());
-        await uploadBytes(ref(storage, storagePath), candidate);
+        await uploadBlob(storage, storagePath, candidate);
 
         // Blobs of the pointer documents the committed attempt deleted
         // (reset per attempt: the body re-runs on contention).

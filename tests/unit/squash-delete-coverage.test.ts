@@ -28,6 +28,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as Y from 'yjs';
+import { gunzipSync } from 'node:zlib';
 import { toBase64 } from 'lib0/buffer';
 
 // ---------------------------------------------------------------------------
@@ -50,8 +51,10 @@ const server = vi.hoisted(() => {
 
     /** Firestore documents keyed by full path, in insertion order. */
     const docs = new Map<string, Record<string, any>>();
-    /** Cloud Storage objects keyed by full path. */
+    /** Cloud Storage objects keyed by full path, as stored. */
     const blobs = new Map<string, Uint8Array>();
+    /** Paths of objects uploaded with contentEncoding 'gzip'. */
+    const gzipped = new Set<string>();
     let autoId = 0;
 
     const join = (parts: string[]) => parts.filter(Boolean).join('/');
@@ -90,6 +93,7 @@ const server = vi.hoisted(() => {
         FakeBytes,
         docs,
         blobs,
+        gzipped,
         join,
         snapshotOf,
         write,
@@ -98,6 +102,7 @@ const server = vi.hoisted(() => {
         reset() {
             docs.clear();
             blobs.clear();
+            gzipped.clear();
             autoId = 0;
         },
     };
@@ -163,21 +168,30 @@ vi.mock('@firebase/firestore', () => {
     };
 });
 
-vi.mock('@firebase/storage', () => ({
-    ref: (_storage: unknown, path: string) => ({ fullPath: path }),
-    uploadBytes: async (r: { fullPath: string }, bytes: Uint8Array) => {
-        server.blobs.set(r.fullPath, bytes.slice());
-        return {};
-    },
-    getBytes: async (r: { fullPath: string }) => {
-        const b = server.blobs.get(r.fullPath);
-        if (!b) throw new Error(`storage/object-not-found: ${r.fullPath}`);
-        return b.slice().buffer;
-    },
-    deleteObject: async (r: { fullPath: string }) => {
-        server.blobs.delete(r.fullPath);
-    },
-}));
+// Like Cloud Storage behind the HTTP stack: an object uploaded with
+// contentEncoding 'gzip' is stored compressed and getBytes returns it
+// inflated.
+vi.mock('@firebase/storage', async () => {
+    const { gunzipSync } = await import('node:zlib');
+    return {
+        ref: (_storage: unknown, path: string) => ({ fullPath: path }),
+        uploadBytes: async (r: { fullPath: string }, bytes: Uint8Array, metadata?: { contentEncoding?: string }) => {
+            server.blobs.set(r.fullPath, bytes.slice());
+            if (metadata?.contentEncoding === 'gzip') server.gzipped.add(r.fullPath);
+            else server.gzipped.delete(r.fullPath);
+            return {};
+        },
+        getBytes: async (r: { fullPath: string }) => {
+            const b = server.blobs.get(r.fullPath);
+            if (!b) throw new Error(`storage/object-not-found: ${r.fullPath}`);
+            return (server.gzipped.has(r.fullPath) ? new Uint8Array(gunzipSync(b)) : b.slice()).buffer;
+        },
+        deleteObject: async (r: { fullPath: string }) => {
+            server.blobs.delete(r.fullPath);
+            server.gzipped.delete(r.fullPath);
+        },
+    };
+});
 
 // The squasher always wins the distributed lock; the commit transaction's
 // own lock re-check reads the lock document seeded below.
@@ -286,7 +300,7 @@ function freshClientView(): { epoch: number; text: string; library: Record<strin
     if (typeof main.snapshotStoragePath === 'string') {
         const blob = server.blobs.get(main.snapshotStoragePath);
         if (!blob) throw new Error(`snapshot blob missing: ${main.snapshotStoragePath}`);
-        Y.applyUpdate(d, blob);
+        Y.applyUpdate(d, server.gzipped.has(main.snapshotStoragePath) ? gunzipSync(blob) : blob);
     } else if (main.content) {
         Y.applyUpdate(d, main.content.toUint8Array());
     }

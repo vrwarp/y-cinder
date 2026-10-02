@@ -52,7 +52,7 @@ import {
     QueryDocumentSnapshot,
     DocumentReference,
 } from "@firebase/firestore";
-import { getBytes, ref, uploadBytes, deleteObject, FirebaseStorage } from "@firebase/storage";
+import { getBytes, ref, deleteObject, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import {
@@ -94,6 +94,7 @@ import {
     survivesEpochFence,
 } from "./sync-policy";
 import { readDocEpoch, docHasContent } from "./squash";
+import { uploadBlob } from "./storage-blobs";
 
 /**
  * Context required for sync operations.
@@ -621,7 +622,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 // Storage-backed update: upload binary to Cloud Storage
                 const storagePath = largeUpdatePath(path, uid, Date.now(), generateSessionId());
                 const storageRef = ref(ctx.storage, storagePath);
-                await uploadBytes(storageRef, localDiff);
+                await uploadBlob(ctx.storage, storagePath, localDiff);
 
                 // Write lightweight pointer document to updates collection
                 const pkg: any = {

@@ -20,12 +20,16 @@
  * 
  * The async merge always works - it just uses sync merge on the main thread
  * when workers aren't available. This ensures compatibility across environments.
+ *
+ * The same worker gzips Cloud Storage uploads (`gzipBlobAsync`), so the
+ * compression of a multi-MB fold snapshot stays off the main thread too.
  * 
  * @module merge-utils
  */
 
 import * as Y from 'yjs';
 import { mergeUpdatesCore, mergeUpdatesWithMeta, MergeOptions, MergeWithMetaResult } from './merge-core';
+import { gzipBlob } from './gzip';
 import { MERGE_WORKER_CODE } from './generated/merge-worker-blob';
 
 export type { MergeOptions, MergeWithMetaResult } from './merge-core';
@@ -255,16 +259,38 @@ export async function diffUpdateAsync(update: Uint8Array, stateVector: Uint8Arra
 }
 
 /**
+ * gzip-compresses a blob for a Cloud Storage upload (see gzipBlob),
+ * inside the Web Worker when available. Compression Streams run on the
+ * calling thread: ~200 ms for a 3.3 MB snapshot, round-trip check
+ * included.
+ *
+ * @param blob - The raw blob
+ * @returns Promise resolving to the verified gzip stream
+ * @throws When the blob must be uploaded raw instead
+ */
+export async function gzipBlobAsync(blob: Uint8Array): Promise<Uint8Array> {
+    if (initWorker() && mergeWorker) {
+        const response = await postToWorker(
+            { updates: [blob], gc: false, meta: false, gzip: true },
+            async () => ({ result: await gzipBlob(blob) })
+        );
+        return response.result;
+    }
+
+    return gzipBlob(blob);
+}
+
+/**
  * Posts a request to the merge worker with a main-thread fallback.
  *
  * @param message - Request fields (id is added here)
- * @param fallback - Synchronous main-thread computation used if the worker
- *                   does not respond in time
+ * @param fallback - Main-thread computation used if the worker does not
+ *                   respond in time
  * @param timeoutMs - How long to wait for the worker (default 30 s)
  */
 function postToWorker(
-    message: { updates: Uint8Array[]; gc: boolean; meta: boolean; diffAgainst?: Uint8Array },
-    fallback: () => WorkerResponse,
+    message: { updates: Uint8Array[]; gc: boolean; meta: boolean; diffAgainst?: Uint8Array; gzip?: boolean },
+    fallback: () => WorkerResponse | Promise<WorkerResponse>,
     timeoutMs: number = MERGE_TIMEOUT_MS
 ): Promise<WorkerResponse> {
     return new Promise((resolve, reject) => {

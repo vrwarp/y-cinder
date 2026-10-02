@@ -5,6 +5,7 @@
  * - extractAllMetadata: Parses Yjs update internals to get clock ranges
  * - aggregateMetadata: Combines metadata for Firestore storage
  * - isUpdateRedundant: Determines if an update is already applied locally
+ * - updateHasDeletions: Detects deletions, which clock metadata cannot show
  *
  * These functions enable efficient sync by comparing clocks instead of content.
  *
@@ -15,7 +16,8 @@ import { describe, it, expect, vi } from 'vitest';
 import {
     extractAllMetadata,
     aggregateMetadata,
-    isUpdateRedundant
+    isUpdateRedundant,
+    updateHasDeletions
 } from '../../src/update-metadata';
 import * as Y from 'yjs';
 
@@ -242,6 +244,45 @@ describe('update-metadata', () => {
             );
 
             expect(result).toBe(false);
+        });
+    });
+
+    describe('updateHasDeletions', () => {
+        it('should be false for an insert-only update', () => {
+            const doc = new Y.Doc();
+            doc.getMap('m').set('a', 1);
+
+            expect(updateHasDeletions(Y.encodeStateAsUpdate(doc))).toBe(false);
+            doc.destroy();
+        });
+
+        it('should be true for a delete-only update, whose clock metadata is empty', () => {
+            const doc = new Y.Doc();
+            const map = doc.getMap('m');
+            map.set('a', 1);
+            const before = Y.encodeStateVector(doc);
+            map.delete('a');
+            const deleteOnly = Y.encodeStateAsUpdate(doc, before);
+
+            expect(Y.parseUpdateMeta(deleteOnly).to.size).toBe(0);
+            expect(updateHasDeletions(deleteOnly)).toBe(true);
+            doc.destroy();
+        });
+
+        it('should be false for a structs-empty update with an empty delete-set', () => {
+            const doc = new Y.Doc();
+            doc.getMap('m').set('a', 1);
+
+            expect(updateHasDeletions(Y.encodeStateAsUpdate(doc, Y.encodeStateVector(doc)))).toBe(false);
+            doc.destroy();
+        });
+
+        it('should claim deletions for an unparseable blob (never skipped)', () => {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+            expect(updateHasDeletions(new Uint8Array([0xff, 0xff, 0xff]))).toBe(true);
+            expect(warn).toHaveBeenCalled();
+            warn.mockRestore();
         });
     });
 });

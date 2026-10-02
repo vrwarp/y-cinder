@@ -502,6 +502,29 @@ describe('isItemRedundant', () => {
         )).toBe(false);
     });
 
+    /*
+     * A state vector only spans structs; deletions add none. A segment that
+     * mixes structs the client holds with deletions it lacks must still be
+     * applied, or the deleted content comes back.
+     */
+    it('is false for a covered history segment flagged as carrying deletions', () => {
+        const doc = makeDoc(1, 3);
+
+        expect(isItemRedundant(
+            { type: 'history', priority: 2, data: { stateVector: svBase64(doc), hasDeletions: true } },
+            local,
+        )).toBe(false);
+    });
+
+    it('is false for a history segment with an empty stateVector (deletions only)', () => {
+        // What a delete-only segment carried before the hasDeletions flag:
+        // an empty vector, which every local state "covers" vacuously.
+        expect(isItemRedundant(
+            { type: 'history', priority: 2, data: { stateVector: svBase64(new Y.Doc()) } },
+            local,
+        )).toBe(false);
+    });
+
     it('is false — never skip — when a history stateVector fails to parse', () => {
         expect(isItemRedundant(
             { type: 'history', priority: 2, data: { stateVector: 'garbage!!' } },

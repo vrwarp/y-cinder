@@ -70,6 +70,7 @@ import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
 import { wait, calculateBackoff, generateSessionId } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
 import { mergeUpdatesWithMetaAsync } from "./merge-utils";
+import { updateHasDeletions } from "./update-metadata";
 
 /**
  * Context required for compaction operations.
@@ -471,6 +472,9 @@ async function tryDeltaCompaction(params: {
     }
 
     const segmentB64Sv = toBase64(merged.stateVector);
+    // The state vector cannot show deletions; flag them so readers never
+    // skip this segment as covered (see buildDeltaSegmentDoc).
+    const hasDeletions = updateHasDeletions(merged.dsUpdate);
 
     return await runTransaction(db, async (transaction) => {
         // Kill switch: bail if the lock was lost (another client may be
@@ -490,7 +494,7 @@ async function tryDeltaCompaction(params: {
 
         const segmentRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY));
         transaction.set(segmentRef, {
-            ...buildDeltaSegmentDoc({ stateVectorB64: segmentB64Sv, uid, epoch }),
+            ...buildDeltaSegmentDoc({ stateVectorB64: segmentB64Sv, hasDeletions, uid, epoch }),
             segment: Bytes.fromUint8Array(merged.result),
             startTime: serverTimestamp(),
         });

@@ -241,20 +241,28 @@ export function deltaSegmentFitsInline(byteLength: number, inlineLimit: number):
  *
  * `epoch` is omitted entirely at epoch 0 rather than written as 0, so
  * documents from a never-squashed database stay byte-identical to what
- * older clients produced.
+ * older clients produced; `hasDeletions` is likewise omitted when false.
  *
- * @param params - Segment bytes, its state vector, author and epoch.
+ * `hasDeletions` lets readers apply a segment whose state vector they
+ * already cover: the vector only spans structs and a deletion adds none
+ * (a delete-only segment's vector is empty), so without the flag every
+ * redundancy check would skip the segment and resurrect what it deleted.
+ *
+ * @param params - Segment bytes, its state vector, whether it carries
+ * deletions, author and epoch.
  * @returns The document fields, minus server-generated timestamps.
  */
 export function buildDeltaSegmentDoc(params: {
     stateVectorB64: string;
+    hasDeletions: boolean;
     uid: string;
     epoch: number;
 }): Record<string, unknown> {
-    const { stateVectorB64, uid, epoch } = params;
+    const { stateVectorB64, hasDeletions, uid, epoch } = params;
 
     return {
         stateVector: stateVectorB64,
+        ...(hasDeletions ? { hasDeletions: true } : {}),
         createdBy: uid,
         ...(epoch > 0 ? { epoch } : {}),
     };

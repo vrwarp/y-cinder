@@ -368,7 +368,11 @@ and bandwidth, the base snapshot is not touched. FOLD: the legacy
 everything-into-the-snapshot merge, run once history reaches
 `historyFoldThreshold` (default 8) segments. Initial sync and the history
 listener already consumed the history tier; segments carry a `stateVector`
-of true clock ends so every redundancy check works unchanged.
+of true clock ends so every redundancy check works unchanged. A state
+vector cannot show deletions, though (they add no structs), so a segment
+that carries any is also flagged `hasDeletions` and always applied rather
+than skipped as covered — otherwise deleted content would reappear on
+fresh and returning clients until the next fold.
 
 Measured (240 sessions, identical workload): steady-state cycle cost
 631 ms → **0.6 ms**; per-cycle transfer ~6.6 MB → **~6 KB**; total

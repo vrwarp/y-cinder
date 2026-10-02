@@ -306,7 +306,7 @@ describe('deltaSegmentFitsInline', () => {
 
 describe('buildDeltaSegmentDoc', () => {
     it('carries the state vector and author', () => {
-        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', uid: 'me', epoch: 0 }))
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 0 }))
             .toEqual({ stateVector: 'sv', createdBy: 'me' });
     });
 
@@ -315,12 +315,25 @@ describe('buildDeltaSegmentDoc', () => {
      * producing documents identical to what older clients wrote.
      */
     it('omits the epoch field entirely at epoch 0', () => {
-        expect('epoch' in buildDeltaSegmentDoc({ stateVectorB64: 'sv', uid: 'me', epoch: 0 })).toBe(false);
+        expect('epoch' in buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 0 })).toBe(false);
     });
 
     it('writes the epoch once past 0', () => {
-        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', uid: 'me', epoch: 3 }))
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 3 }))
             .toEqual({ stateVector: 'sv', createdBy: 'me', epoch: 3 });
+    });
+
+    /*
+     * The state vector cannot show deletions, so readers rely on this flag
+     * to apply a segment whose structs they already hold.
+     */
+    it('flags a segment that carries deletions', () => {
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: true, uid: 'me', epoch: 0 }))
+            .toEqual({ stateVector: 'sv', hasDeletions: true, createdBy: 'me' });
+    });
+
+    it('omits the deletions flag entirely when there are none', () => {
+        expect('hasDeletions' in buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 3 })).toBe(false);
     });
 });
 

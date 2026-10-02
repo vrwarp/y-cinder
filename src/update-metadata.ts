@@ -144,6 +144,26 @@ export function extractClockEnds(update: Uint8Array): Map<number, number> {
 }
 
 /**
+ * Whether a Yjs update carries any deletions.
+ *
+ * Clock metadata cannot answer this: a deletion adds no struct, so it never
+ * moves a state vector. Decodes the whole blob, so it is meant for small
+ * structs-empty updates such as a merge's `dsUpdate`.
+ *
+ * @param update - The Yjs update blob to inspect
+ * @returns true when the delete-set is non-empty, or when the blob fails to
+ *          parse (claiming deletions only costs a redundant apply)
+ */
+export function updateHasDeletions(update: Uint8Array): boolean {
+    try {
+        return Y.decodeUpdate(update).ds.clients.size > 0;
+    } catch (e) {
+        console.warn("Failed to read update delete-set:", e);
+        return true;
+    }
+}
+
+/**
  * Aggregates a clock-ends map into a Firestore document payload.
  *
  * Same output shape and MAX_METADATA_CLIENTS capping as

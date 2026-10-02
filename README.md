@@ -119,7 +119,7 @@ The `FireProvider` constructor accepts the following configuration options:
 ### API Methods
 
 - **`provider.destroy()`**:
-  Stops synchronization and cleans up resources. Call this when the provider is no longer needed (e.g., component unmount) to prevent memory leaks and duplicate connections. Waits for any in-flight save and flushes pending updates.
+  Stops synchronization and cleans up resources. Call this when the provider is no longer needed (e.g., component unmount) to prevent memory leaks and duplicate connections. Waits for any in-flight save and flushes pending updates. Online, the returned promise resolves once Firestore has committed those writes; if they are not acknowledged within 5 seconds (e.g. offline) it settles anyway, leaving the writes queued in the Firestore SDK to be sent on reconnect.
 - **`provider.compact()`**:
   Manually triggers the compaction process. Usually handled automatically.
 - **`provider.squash()`**:

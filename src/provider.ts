@@ -543,7 +543,8 @@ export class FireProvider extends ObservableV2<any> {
    * This method:
    * 1. Stops listening for remote updates
    * 2. Destroys all subdocument providers
-   * 3. Flushes any pending local updates
+   * 3. Flushes any pending local updates (waiting at most
+   *    DESTROY_FLUSH_TIMEOUT_MS for Firestore to acknowledge them)
    * 4. Cleans up event handlers
    * 5. P1.5: Cancels pending debounce timer
    */
@@ -580,26 +581,50 @@ export class FireProvider extends ObservableV2<any> {
       this._boundBeforeUnload = null;
     }
 
-    // Destroy all subdocument providers
-    await destroyAllSubdocs(this.subProviders);
+    // Bound the waits below. A Firestore write resolves only when the
+    // server acknowledges it, which never happens while offline (the SDK
+    // keeps the write queued and sends it on reconnect). Online, resolving
+    // still means committed; offline, give up waiting after the deadline
+    // instead of hanging until the network returns. Subdocument providers
+    // start their own deadlines in this same tick, so a whole tree of
+    // providers settles within one timeout.
+    let deadlineTimerId: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>(resolve => {
+      deadlineTimerId = setTimeout(resolve, DEFAULTS.DESTROY_FLUSH_TIMEOUT_MS);
+    });
 
-    // Wait out any in-flight save: updates that arrived while it was
-    // running are sitting in _pendingUpdates and would otherwise be
-    // silently dropped (the in-flight save won't reschedule once
-    // _isDestroyed is set, and saveToFirestore() would have returned
-    // the in-flight promise instead of flushing).
-    if (this._inflightSave) {
-      try {
-        await this._inflightSave;
-      } catch (err) {
-        // Failure already logged and handled inside the save
+    try {
+      // Destroy all subdocument providers
+      await destroyAllSubdocs(this.subProviders);
+
+      // Wait out any in-flight save: updates that arrived while it was
+      // running are sitting in _pendingUpdates and would otherwise be
+      // silently dropped (the in-flight save won't reschedule once
+      // _isDestroyed is set, and saveToFirestore() would have returned
+      // the in-flight promise instead of flushing).
+      if (this._inflightSave) {
+        await Promise.race([
+          this._inflightSave.catch(() => {
+            // Failure already logged and handled inside the save
+          }),
+          deadline,
+        ]);
       }
-    }
 
-    // Flush pending updates (single best-effort attempt; retries are
-    // suppressed after destroy)
-    if (this._pendingUpdates.length > 0) {
-      await this.saveToFirestore();
+      // Flush pending updates (single best-effort attempt; retries are
+      // suppressed after destroy). If the in-flight save is still
+      // unacknowledged at the deadline, write them alongside it instead of
+      // behind it, so they too reach the SDK's queue before destroy()
+      // settles. The epoch fence is checked here because that path
+      // bypasses saveToFirestore().
+      if (this._pendingUpdates.length > 0 && !this._epochFenced) {
+        await Promise.race([
+          this._inflightSave ? this._executeSave() : this.saveToFirestore(),
+          deadline,
+        ]);
+      }
+    } finally {
+      clearTimeout(deadlineTimerId);
     }
 
     super.destroy();

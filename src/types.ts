@@ -197,6 +197,12 @@ export const DEFAULTS = {
     /** Maximum consecutive save failures before emitting save-rejected */
     MAX_SAVE_RETRIES: 5,
     /**
+     * How long destroy() waits for Firestore to acknowledge its final
+     * writes. Offline the ack never comes; the writes stay queued in the
+     * SDK and are sent on reconnect, so destroy() settles anyway.
+     */
+    DESTROY_FLUSH_TIMEOUT_MS: 5_000,
+    /**
      * Caps on documents deleted per compaction transaction. Firestore
      * transactions allow at most 500 writes; updates + history + 1 snapshot
      * set must stay within that budget (400 + 99 + 1 = 500).

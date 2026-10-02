@@ -225,7 +225,7 @@ describe('epoch fence: compaction must not resume the history listener', () => {
 
         const result = await provider.squash();
         expect(result.success).toBe(true);
-        expect(squashed).toHaveBeenCalledWith({ epoch: 1 });
+        expect(squashed).toHaveBeenCalledWith({ epoch: 1, localState: expect.any(Uint8Array) });
         expect(activeListeners()).toEqual([]);
         const fencedContent = JSON.stringify(ydoc.getMap('data').toJSON());
 

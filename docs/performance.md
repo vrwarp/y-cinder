@@ -511,6 +511,33 @@ had *just* processed. Deliveries now carry a version gate
 (`SyncResult.snapshotVersion` → `createSnapshotListener`), so the
 re-apply runs only when a compaction actually produced a new fold.
 
+Both paths still applied the whole fingerprint whenever they reached it:
+every start, including a fully synced client's warm start, and every new
+fold, including a fold of edits the client already received live. A
+state vector cannot prove deletions, so `isItemRedundant` could never
+skip it, and Yjs looks up every range and walks every dead struct inside
+it only to delete nothing (12.4k ranges over 85k dead structs at 14.4k
+events). It is now applied only when a range is not already deleted
+locally (`fingerprintIsRedundant`: exact range containment against
+`Y.createDeleteSetFromStructStore`; a range past the local clock counts
+as missing, so Yjs still parks it in `pendingDs`). Initial sync keeps
+the skipped item as server evidence for the push guard, and the guard
+reuses the check's delete-set unless the apply transaction changed the
+doc. Measured with `benchmarks/fingerprint-reapply.bench.ts` (fully
+synced client, medians of 7 interleaved process runs):
+
+| events (DS ranges) | warm boot | new fold delivery |
+| --- | ---: | ---: |
+| 3.6k (3.1k) | 5.4 → 3.6 ms | 1.5 → 1.2 ms |
+| 7.2k (6.2k) | 11.2 → 7.8 ms | 5.4 → 2.5 ms |
+| 14.4k (12.4k) | 24.1 → 15.9 ms | 9.7 → 6.2 ms |
+
+Fingerprint applies per warm boot: 1 → 0, and the boot still builds the
+local delete-set once. A fold delivery now builds it once (2-5 ms at
+14.4k events) instead of walking the dead structs. Fresh clients gain a
+little too: right after the snapshot, the check costs 8.1 ms where the
+apply cost 11.1 ms. Pinned by `tests/unit/fingerprint-reapply.test.ts`.
+
 ### The push itself carries only the deletions the server lacks
 
 When the local doc does hold structs the server lacks (offline edits, a

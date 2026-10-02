@@ -73,7 +73,10 @@ import {
     refreshLocalClocks,
     rebaseIfPending,
     isItemRedundant,
+    fingerprintIsRedundant,
+    transactionChangedDoc,
     applyItem,
+    blobOf,
     diffSnapshotForLocal,
 } from "./sync-helpers";
 import {
@@ -456,9 +459,10 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 // The delete-set fingerprint written by compaction is a
                 // structs-empty update. Treating it as a regular update both
                 // proves delete-set coverage to the push guard below and
-                // applies any deletions the local doc may have missed.
+                // applies any deletions the local doc may have missed (only
+                // when there are some: see the apply loop).
                 if (data.deleteSet) {
-                    pendingUpdates.push({ type: 'update', data: { update: data.deleteSet, epoch: serverEpoch }, priority: 2 });
+                    pendingUpdates.push({ type: 'update', data: { update: data.deleteSet, epoch: serverEpoch }, priority: 2, fingerprint: true });
                 } else if (data.deleteSetStoragePath) {
                     // Fingerprint outgrew the inline cap and was offloaded to
                     // Cloud Storage. Download it: it is O(delete-set) and its
@@ -471,6 +475,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                             type: 'update',
                             data: { update: new Uint8Array(buffer), epoch: serverEpoch },
                             priority: 2,
+                            fingerprint: true,
                         });
                     } catch (dsErr) {
                         // Coverage falls back to the other server blobs; worst
@@ -558,9 +563,26 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // doc observers and encoding an 'update' event per blob — on a
         // long-lived document with hundreds of pending items that means
         // hundreds of editor re-renders during initial load instead of one.
-        ydoc.transact(() => {
+        //
+        // The delete-set fingerprint is applied only when it deletes
+        // something: on a client that already holds every deletion (a
+        // synced warm start) the apply is an O(delete-set) no-op. The local
+        // delete-set it is checked against is kept for the push guard.
+        let fingerprintLocalDs: ReturnType<typeof Y.createDeleteSetFromStructStore> | null = null;
+        const applyTransaction = ydoc.transact((tr) => {
             for (const item of orderedUpdates) {
                 if (isDestroyed()) break;
+
+                if (item.fingerprint) {
+                    fingerprintLocalDs = Y.createDeleteSetFromStructStore((ydoc as any).store);
+                    // blobOf: an offloaded fingerprint is the downloaded
+                    // Uint8Array, an inline one shares the push guard's copy
+                    if (fingerprintIsRedundant(blobOf(item.data.update), fingerprintLocalDs)) {
+                        // Skipped, not dropped: it stays in pendingUpdates
+                        // as server evidence for the push guard below.
+                        continue;
+                    }
+                }
 
                 if (!isItemRedundant(item, localSVMap)) {
                     const applied = applyItem(item, ydoc);
@@ -575,6 +597,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     }
                 }
             }
+            return tr;
         }, FIREBASE_ORIGINS.UPDATE);
 
         // 5. Push Missing Local Updates
@@ -608,7 +631,12 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         let shouldPush: boolean;
         let localDiff: Uint8Array | null = null;
         if (serverCoversStructs) {
-            const localDs = Y.createDeleteSetFromStructStore((ydoc as any).store);
+            // The fingerprint check's delete-set is still exact unless the
+            // apply transaction changed the doc (an item applied after the
+            // check, or an observer reacting to one applied before it).
+            const localDs = fingerprintLocalDs !== null && !transactionChangedDoc(applyTransaction)
+                ? fingerprintLocalDs
+                : Y.createDeleteSetFromStructStore((ydoc as any).store);
             shouldPush = !deleteSetCoveredByBlobs(localDs, () => collectServerBlobs(pendingUpdates));
             if (shouldPush) {
                 // Rare: local deletion-only changes the server lacks.
@@ -925,6 +953,15 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
     // provider unsubscribed the listener (e.g. at an epoch fence).
     let stopped = false;
 
+    // Each new fold carries the whole delete-set again; when the local doc
+    // already holds every deletion in it, applying it is an O(delete-set)
+    // no-op (see fingerprintIsRedundant).
+    const applyFingerprint = (fingerprint: Uint8Array): void => {
+        if (!fingerprintIsRedundant(fingerprint, Y.createDeleteSetFromStructStore((ydoc as any).store))) {
+            Y.applyUpdate(ydoc, fingerprint, FIREBASE_ORIGINS.SNAPSHOT);
+        }
+    };
+
     const unsubscribe = onSnapshot(doc(db, path), async (snapshot) => {
         if (!snapshot.exists()) return;
 
@@ -969,7 +1006,7 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
         // left for that data.
         if (data.deleteSet) {
             try {
-                Y.applyUpdate(ydoc, (data.deleteSet as Bytes).toUint8Array(), FIREBASE_ORIGINS.SNAPSHOT);
+                applyFingerprint((data.deleteSet as Bytes).toUint8Array());
             } catch (e) {
                 console.warn("Failed to apply snapshot delete-set fingerprint", e);
             }
@@ -978,7 +1015,7 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
             try {
                 const buffer = await getBytes(ref(storage, data.deleteSetStoragePath));
                 if (isDestroyed()) return;
-                Y.applyUpdate(ydoc, new Uint8Array(buffer), FIREBASE_ORIGINS.SNAPSHOT);
+                applyFingerprint(new Uint8Array(buffer));
             } catch (e) {
                 console.warn("Failed to apply storage-backed delete-set fingerprint", e);
             }

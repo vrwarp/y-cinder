@@ -511,12 +511,13 @@ function endsWith(bytes: Uint8Array, suffix: Uint8Array): boolean {
 
 /**
  * Whether every deletion in `ds` lies within one range of `canonicalDs`,
- * which must be sorted and merged the way Y.mergeDeleteSets leaves it
- * (overlapping AND adjacent ranges joined). Equivalent to
+ * which must be sorted and merged the way Y.mergeDeleteSets or
+ * Y.createDeleteSetFromStructStore leave it (overlapping AND adjacent
+ * ranges joined). Equivalent to
  * `Y.equalDeleteSets(canonicalDs, Y.mergeDeleteSets([canonicalDs, ds]))`,
  * without copying, sorting or mutating either set.
  */
-function deleteSetContains(
+export function deleteSetContains(
     canonicalDs: ReturnType<typeof Y.decodeUpdate>['ds'],
     ds: ReturnType<typeof Y.decodeUpdate>['ds']
 ): boolean {

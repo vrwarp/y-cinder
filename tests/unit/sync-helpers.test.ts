@@ -28,6 +28,7 @@ import {
     collectServerBlobs,
     ensureDecodedSV,
     foldTailMayCatchUp,
+    fingerprintIsRedundant,
     isItemRedundant,
     localCoversSnapshot,
     processHistoryMetadata,
@@ -39,6 +40,7 @@ import {
     diffSnapshotForLocal,
     SNAPSHOT_DIFF_MIN_OVERLAP,
     SNAPSHOT_DIFF_MIN_OVERLAP_MAIN_THREAD,
+    transactionChangedDoc,
     type PendingUpdate,
 } from '../../src/sync-helpers';
 
@@ -822,6 +824,138 @@ describe('isItemRedundant', () => {
     it('is false for a snapshot or history item with no stateVector', () => {
         expect(isItemRedundant({ type: 'snapshot', priority: 1, data: {} }, local)).toBe(false);
         expect(isItemRedundant({ type: 'history', priority: 2, data: {} }, local)).toBe(false);
+    });
+});
+
+/** A doc whose map overwrites leave deletions, and its delete-set fingerprint. */
+const docWithDeletions = () => {
+    const doc = new Y.Doc();
+    doc.clientID = 1;
+    const map = doc.getMap('m');
+    for (let i = 0; i < 20; i += 1) {
+        doc.transact(() => map.set(`k${i % 4}`, i));
+    }
+    // What compaction stores: structs-empty, the whole delete-set
+    const fingerprint = () => Y.encodeStateAsUpdate(doc, Y.encodeStateVector(doc));
+    return { doc, map, fingerprint };
+};
+
+const localDsOf = (doc: Y.Doc) => Y.createDeleteSetFromStructStore(doc.store);
+
+describe('fingerprintIsRedundant', () => {
+    it('is true when every deletion is already local', () => {
+        const { doc, fingerprint } = docWithDeletions();
+        const replica = new Y.Doc();
+        Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+
+        expect(Y.decodeUpdate(fingerprint()).ds.clients.size).toBe(1);
+        expect(fingerprintIsRedundant(fingerprint(), localDsOf(replica))).toBe(true);
+    });
+
+    it('is false when a deletion is missing locally (a delete-only change)', () => {
+        const { doc, map, fingerprint } = docWithDeletions();
+        const replica = new Y.Doc();
+        Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+        map.delete('k1');
+
+        expect(fingerprintIsRedundant(fingerprint(), localDsOf(replica))).toBe(false);
+        Y.applyUpdate(replica, fingerprint());
+        expect(replica.getMap('m').has('k1')).toBe(false);
+    });
+
+    it('is false for deletions past the local clock (Yjs must keep them pending)', () => {
+        const { doc, fingerprint } = docWithDeletions();
+        const behind = new Y.Doc();
+        Y.applyUpdate(behind, Y.encodeStateAsUpdate(doc));
+        const clock = Y.getState(behind.store, 1);
+        doc.getMap('m').set('new', 1);
+        doc.getMap('m').set('new', 2); // deletes a struct `behind` lacks
+
+        const pastClock = Y.decodeUpdate(fingerprint()).ds.clients.get(1)!.filter(r => r.clock >= clock);
+        expect(pastClock).toEqual([expect.objectContaining({ clock, len: 1 })]);
+        expect(fingerprintIsRedundant(fingerprint(), localDsOf(behind))).toBe(false);
+    });
+
+    it('is false for a blob carrying structs, even when its deletions are local', () => {
+        const { doc } = docWithDeletions();
+        const replica = new Y.Doc();
+        Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+        doc.getMap('other').set('x', 1); // a struct the replica lacks
+        const withStructs = Y.encodeStateAsUpdate(doc, Y.encodeStateVector(replica));
+
+        expect(Y.decodeUpdate(withStructs).structs.length).toBeGreaterThan(0);
+        expect(fingerprintIsRedundant(withStructs, localDsOf(replica))).toBe(false);
+    });
+
+    it('is false for an unparseable blob (applied, and quarantined, as before)', () => {
+        expect(fingerprintIsRedundant(new Uint8Array([0xff, 0xff, 0xff]), localDsOf(new Y.Doc()))).toBe(false);
+    });
+
+    it('does not modify the local delete-set', () => {
+        const { doc, map, fingerprint } = docWithDeletions();
+        const replica = new Y.Doc();
+        Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+        map.delete('k2');
+        const localDs = localDsOf(replica);
+        const before = Y.encodeStateAsUpdate(replica);
+
+        fingerprintIsRedundant(fingerprint(), localDs);
+
+        expect(Y.equalDeleteSets(localDs, localDsOf(replica))).toBe(true);
+        expect(Y.encodeStateAsUpdate(replica)).toEqual(before);
+    });
+});
+
+describe('transactionChangedDoc', () => {
+    /** Runs `f` in one transaction on `doc` and returns it, cleaned up. */
+    const inTransaction = (doc: Y.Doc, f: () => void) => doc.transact((tr) => { f(); return tr; });
+
+    it('is false when everything applied was already held', () => {
+        const { doc, fingerprint } = docWithDeletions();
+        const replica = new Y.Doc();
+        Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+
+        expect(transactionChangedDoc(inTransaction(replica, () => {
+            Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+            Y.applyUpdate(replica, fingerprint());
+        }))).toBe(false);
+    });
+
+    it('is false for an empty transaction', () => {
+        expect(transactionChangedDoc(inTransaction(new Y.Doc(), () => { }))).toBe(false);
+    });
+
+    it('is true when a struct was integrated', () => {
+        const { doc } = docWithDeletions();
+        const replica = new Y.Doc();
+
+        expect(transactionChangedDoc(inTransaction(replica, () => {
+            Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+        }))).toBe(true);
+    });
+
+    it('is true for a delete-only change (no struct, state vector unchanged)', () => {
+        const { doc, map, fingerprint } = docWithDeletions();
+        const replica = new Y.Doc();
+        Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+        map.delete('k3');
+
+        const tr = inTransaction(replica, () => Y.applyUpdate(replica, fingerprint()));
+
+        expect(tr.afterState).toEqual(tr.beforeState);
+        expect(transactionChangedDoc(tr)).toBe(true);
+    });
+
+    it('is true when the only change adds a client', () => {
+        const replica = new Y.Doc();
+        replica.getMap('m').set('a', 1);
+        const other = new Y.Doc();
+        other.clientID = replica.clientID + 1;
+        other.getMap('n').set('b', 2);
+
+        expect(transactionChangedDoc(inTransaction(replica, () => {
+            Y.applyUpdate(replica, Y.encodeStateAsUpdate(other));
+        }))).toBe(true);
     });
 });
 

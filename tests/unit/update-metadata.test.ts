@@ -6,6 +6,7 @@
  * - aggregateMetadata: Combines metadata for Firestore storage
  * - isUpdateRedundant: Determines if an update is already applied locally
  * - updateHasDeletions: Detects deletions, which clock metadata cannot show
+ * - deleteSetContains: Exact delete-set range containment
  *
  * These functions enable efficient sync by comparing clocks instead of content.
  *
@@ -17,7 +18,8 @@ import {
     extractAllMetadata,
     aggregateMetadata,
     isUpdateRedundant,
-    updateHasDeletions
+    updateHasDeletions,
+    deleteSetContains
 } from '../../src/update-metadata';
 import * as Y from 'yjs';
 
@@ -283,6 +285,78 @@ describe('update-metadata', () => {
             expect(updateHasDeletions(new Uint8Array([0xff, 0xff, 0xff]))).toBe(true);
             expect(warn).toHaveBeenCalled();
             warn.mockRestore();
+        });
+    });
+
+    describe('deleteSetContains', () => {
+        /** A delete-set from client -> [clock, len] ranges, in the order given. */
+        const dsOf = (ranges: Record<number, [number, number][]>) => {
+            const ds = Y.createDeleteSet();
+            for (const [client, items] of Object.entries(ranges)) {
+                ds.clients.set(Number(client), items.map(([clock, len]) => ({ clock, len })) as any);
+            }
+            return ds;
+        };
+        // Canonical: sorted, overlapping and adjacent ranges joined.
+        const canonical = () => dsOf({ 1: [[0, 5], [10, 5], [20, 1]], 2: [[3, 4]] });
+
+        it('should be true for ranges inside, or exactly matching, canonical ranges', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[0, 5], [11, 2], [14, 1], [20, 1]], 2: [[3, 4]] }))).toBe(true);
+        });
+
+        it('should be true for an empty delete-set', () => {
+            expect(deleteSetContains(canonical(), Y.createDeleteSet())).toBe(true);
+            expect(deleteSetContains(Y.createDeleteSet(), Y.createDeleteSet())).toBe(true);
+        });
+
+        it('should be false for a range one clock past either end of a canonical range', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[10, 6]] }))).toBe(false);
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[9, 2]] }))).toBe(false);
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[21, 1]] }))).toBe(false);
+        });
+
+        it('should be false for a range bridging the gap between two canonical ranges', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[3, 9]] }))).toBe(false);
+        });
+
+        it('should be false for a range before every canonical range of its client', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 2: [[0, 1]] }))).toBe(false);
+        });
+
+        it('should be false for a client the canonical set lacks', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 3: [[0, 1]] }))).toBe(false);
+        });
+
+        it('should judge every range, in any order, not just the first or last', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[20, 1], [5, 1], [0, 1]] }))).toBe(false);
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[20, 1], [12, 1], [0, 1]] }))).toBe(true);
+        });
+
+        it('should modify neither set', () => {
+            const sup = canonical();
+            const sub = dsOf({ 1: [[1, 2], [12, 8]] });
+            const copy = (ds: ReturnType<typeof dsOf>) => [...ds.clients].map(([c, items]) => [c, items.map(i => [i.clock, i.len])]);
+            const [supBefore, subBefore] = [copy(sup), copy(sub)];
+
+            deleteSetContains(sup, sub);
+
+            expect(copy(sup)).toEqual(supBefore);
+            expect(copy(sub)).toEqual(subBefore);
+        });
+
+        it('should judge real delete-sets against one built from the struct store', () => {
+            const doc = new Y.Doc();
+            const map = doc.getMap('m');
+            for (let i = 0; i < 30; i++) map.set(`k${i % 7}`, i);
+            const local = Y.createDeleteSetFromStructStore(doc.store);
+            const held = Y.decodeUpdate(Y.encodeStateAsUpdate(doc)).ds;
+            map.delete('k3');
+            const ahead = Y.createDeleteSetFromStructStore(doc.store);
+
+            expect(deleteSetContains(local, held)).toBe(true);
+            expect(deleteSetContains(local, ahead)).toBe(false);
+            expect(deleteSetContains(ahead, local)).toBe(true);
+            doc.destroy();
         });
     });
 });

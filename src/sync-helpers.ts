@@ -12,7 +12,7 @@ import { Bytes } from "@firebase/firestore";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import { FIREBASE_ORIGINS } from "./types";
-import { extractClockEnds, isUpdateRedundant } from "./update-metadata";
+import { extractClockEnds, isUpdateRedundant, deleteSetContains } from "./update-metadata";
 import { diffUpdateAsync, isWorkerMergeAvailable } from "./merge-utils";
 
 /**
@@ -26,6 +26,11 @@ export interface PendingUpdate {
     type: 'snapshot' | 'history' | 'update';
     data: any;
     priority: number;
+    /**
+     * Marks the main document's delete-set fingerprint, an 'update' item
+     * that only carries deletions (see `fingerprintIsRedundant`).
+     */
+    fingerprint?: boolean;
 }
 
 /**
@@ -500,6 +505,58 @@ export function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, num
         }
     }
 
+    return false;
+}
+
+/**
+ * Whether applying the main document's delete-set fingerprint would change
+ * nothing: it carries no structs, and every range it deletes is already
+ * deleted locally.
+ *
+ * The fingerprint is the snapshot's WHOLE delete-set, so applying it costs
+ * O(delete-set) even when it deletes nothing — Yjs looks up every range and
+ * walks every dead struct inside it, which on a document used for years is
+ * tens of thousands of structs. A state vector cannot prove deletions (they
+ * add no structs), so `isItemRedundant` can never skip it; this proves it
+ * against the local delete-set instead. A range at or past the local clock
+ * is absent from `localDs`, so the fingerprint is then applied and Yjs
+ * keeps that range pending.
+ *
+ * @param fingerprint - The fingerprint update blob
+ * @param localDs - The local delete-set, as built by
+ *                  `Y.createDeleteSetFromStructStore` (not modified)
+ * @returns true only when the apply is provably a no-op; false when the
+ *          blob fails to parse (applying it is the safe direction)
+ */
+export function fingerprintIsRedundant(
+    fingerprint: Uint8Array,
+    localDs: ReturnType<typeof Y.decodeUpdate>['ds']
+): boolean {
+    try {
+        const { structs, ds } = Y.decodeUpdate(fingerprint);
+        return structs.length === 0 && deleteSetContains(localDs, ds);
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
+ * Whether a finished transaction changed the document, i.e. integrated or
+ * deleted any struct. One that did neither left the state vector and the
+ * delete-set as they were and called no type observers, so a delete-set
+ * read from the struct store during it is still exact afterwards.
+ *
+ * @param tr - A transaction whose cleanup has run (`afterState` is set)
+ */
+export function transactionChangedDoc(tr: Y.Transaction): boolean {
+    if (tr.deleteSet.clients.size > 0) {
+        return true;
+    }
+    for (const [client, clock] of tr.afterState) {
+        if (tr.beforeState.get(client) !== clock) {
+            return true;
+        }
+    }
     return false;
 }
 

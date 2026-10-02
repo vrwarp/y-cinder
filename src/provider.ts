@@ -692,6 +692,15 @@ export class FireProvider extends ObservableV2<any> {
       },
       getEpoch: () => this._epoch,
       onEpochChanged: (serverEpoch) => this._handleEpochChanged(serverEpoch),
+      // Adopt the server epoch as soon as initial sync knows it (an empty
+      // local doc bootstraps straight into whatever epoch the server is
+      // at; the marker itself arrives inside the snapshot content). The
+      // constructor's value can be stale — local persistence may hydrate
+      // an epoch-N doc after construction — and saves that start while
+      // the initial-sync push is in flight must carry the push's epoch.
+      onEpochAdopted: (serverEpoch) => {
+        this._epoch = serverEpoch;
+      },
     };
 
     try {
@@ -713,11 +722,6 @@ export class FireProvider extends ObservableV2<any> {
       if (!result.success) {
         throw result.error ?? new Error("Initial sync failed");
       }
-
-      // Adopt the server epoch (an empty local doc bootstraps straight
-      // into whatever epoch the server is at; the marker itself arrived
-      // inside the snapshot content).
-      this._epoch = result.epoch;
 
       // Reset retry count on successful sync
       this._syncRetryCount = 0;

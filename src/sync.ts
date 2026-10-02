@@ -136,6 +136,15 @@ export interface SyncContext {
      * this so the application can rebuild from the new epoch.
      */
     onEpochChanged?: (serverEpoch: number) => void;
+    /**
+     * Fired during initial sync once the server's epoch is known and does
+     * not conflict with the local document, before any local data is
+     * pushed. The provider must tag its saves with this epoch from then
+     * on: a save that starts while the initial-sync push is in flight
+     * carries edits made after the diff, and peers drop it unless it
+     * belongs to the same epoch as the push.
+     */
+    onEpochAdopted?: (serverEpoch: number) => void;
 }
 
 /**
@@ -419,6 +428,10 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 }
             }
         }
+
+        // The server epoch is final for this sync: adopt it before the
+        // push below computes its diff (see SyncContext.onEpochAdopted).
+        ctx.onEpochAdopted?.(serverEpoch);
 
         // 3b. Epoch filter + server state vector. Update/history documents
         // from foreign epochs are dropped: their structs belong to an

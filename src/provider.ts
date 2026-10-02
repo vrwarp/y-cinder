@@ -736,10 +736,12 @@ export class FireProvider extends ObservableV2<any> {
       }
 
       // Setup real-time listeners (Updates, Snapshot, and History)
-      // Pass cursor to prevent sync gaps; pass the processed snapshot
-      // version so the listener's attach-delivery is skipped instead of
-      // re-applying the delete-set fingerprint on every (re)connect.
-      this._unsubscribers.push(createUpdateListener(syncCtx, result.lastSyncedDoc));
+      // Pass cursor to prevent sync gaps, plus the number of update
+      // documents behind it so they still count toward compaction; pass
+      // the processed snapshot version so the listener's attach-delivery
+      // is skipped instead of re-applying the delete-set fingerprint on
+      // every (re)connect.
+      this._unsubscribers.push(createUpdateListener(syncCtx, result.lastSyncedDoc, result.syncedUpdateCount));
       this._unsubscribers.push(createSnapshotListener(syncCtx, result.snapshotVersion));
 
       // Store history listener separately so it can be paused during compaction

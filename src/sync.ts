@@ -161,6 +161,12 @@ export interface SyncResult {
     localUpdatesPushed: boolean;
     /** The last document observed during sync, used as a cursor for the listener */
     lastSyncedDoc: QueryDocumentSnapshot | null;
+    /**
+     * Number of update documents up to and including lastSyncedDoc. The
+     * listener's query starts after that cursor, so these are passed to it
+     * separately: they still count toward the compaction threshold.
+     */
+    syncedUpdateCount: number;
     /** The last history document observed during sync, used as a cursor for history listener */
     lastHistoryDoc: QueryDocumentSnapshot | null;
     /**
@@ -232,6 +238,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
 
         // 1. Fetch Updates (Tier 3) with pagination (P0.1 fix)
         let lastUpdateDoc: QueryDocumentSnapshot | null = null;
+        let syncedUpdateCount = 0;
         let hasMoreUpdates = true;
 
         while (hasMoreUpdates) {
@@ -249,7 +256,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const updatesSnap = await getDocs(updatesQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
             if (updatesSnap.empty) {
                 hasMoreUpdates = false;
@@ -287,6 +294,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
 
                 if (cursorIndex >= 0) {
                     lastUpdateDoc = updatesSnap.docs[cursorIndex];
+                    syncedUpdateCount += cursorIndex + 1;
                 }
 
                 hasMoreUpdates = hasMorePages(updatesSnap.docs.length, BATCH_SIZE);
@@ -312,7 +320,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const historySnap = await getDocs(historyQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
             if (historySnap.empty) {
                 hasMoreHistory = false;
@@ -342,7 +350,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // 3. Fetch Base Snapshot (Tier 1) - single document, no pagination needed
         const mainRef = doc(db, path);
         const mainSnap = await getDoc(mainRef);
-        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
         let snapshotVersion: number | null = null;
         let serverEpoch = 0;
@@ -368,6 +376,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         updatesApplied: 0,
                         localUpdatesPushed: false,
                         lastSyncedDoc: null,
+                        syncedUpdateCount: 0,
                         lastHistoryDoc: null,
                         snapshotVersion,
                         epoch: serverEpoch,
@@ -555,6 +564,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             updatesApplied,
             localUpdatesPushed,
             lastSyncedDoc: lastUpdateDoc,
+            syncedUpdateCount,
             lastHistoryDoc,
             snapshotVersion,
             epoch: serverEpoch
@@ -567,6 +577,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             updatesApplied: 0,
             localUpdatesPushed: false,
             lastSyncedDoc: null,
+            syncedUpdateCount: 0,
             lastHistoryDoc: null,
             snapshotVersion: null,
             epoch: 0
@@ -583,9 +594,12 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
  * 
  * @param ctx - Sync context
  * @param startAfterDoc - Optional cursor to start listening from (prevents gaps)
+ * @param syncedUpdateCount - Update documents up to and including the
+ * cursor (see SyncResult.syncedUpdateCount), counted toward the compaction
+ * threshold alongside the documents this listener delivers
  * @returns Unsubscribe function
  */
-export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocumentSnapshot | null = null): Unsubscribe {
+export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocumentSnapshot | null = null, syncedUpdateCount: number = 0): Unsubscribe {
     const { db, path, doc: ydoc, uid, maxUpdatesThreshold, onCompactionNeeded, onListenerError, isDestroyed } = ctx;
 
     let liveUpdatesQ;
@@ -623,12 +637,19 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
     let stopped = false;
     const isStopped = () => stopped || isDestroyed();
 
+    // Update documents initial sync read up to the cursor are outside this
+    // query but still in the updates collection, so they count toward the
+    // threshold too; otherwise only sessions that write more than the
+    // threshold themselves would ever compact. They leave the count once a
+    // trigger hands them to compaction, which drains oldest-first.
+    let backlog = syncedUpdateCount;
+
     const unsubscribe = onSnapshot(liveUpdatesQ, (snapshot) => {
         if (onCompactionNeeded) {
             const now = Date.now();
 
             if (shouldTriggerCompaction({
-                size: snapshot.size,
+                size: backlog + snapshot.size,
                 maxUpdatesThreshold,
                 now,
                 lastTriggerAt: lastCompactionTrigger,
@@ -636,6 +657,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 hardCap: DEFAULTS.REALTIME_LIMIT,
             })) {
                 lastCompactionTrigger = now;
+                backlog = 0;
                 onCompactionNeeded();
             }
         }

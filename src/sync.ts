@@ -61,7 +61,7 @@ import {
     DEFAULTS,
 } from "./types";
 import { writeStateVector, wait, calculateBackoff, generateSessionId } from "./utils";
-import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, diffCarriesNewData, deleteSetCoveredByBlobs } from "./update-metadata";
+import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, deleteSetCoveredByBlobs, withoutServerDeletions } from "./update-metadata";
 import {
     PendingUpdate,
     collectServerBlobs,
@@ -587,6 +587,11 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // be structs-empty anyway, and pushability is decided purely by
         // delete-set coverage — provable straight from the struct store
         // and the snapshot's fingerprint without encoding anything.
+        //
+        // When a diff is pushed, it carries only the deletions the server
+        // blobs do not already prove (withoutServerDeletions): otherwise a
+        // one-character offline edit is written as an O(delete-set) update
+        // that every peer integrates and the next segment inherits.
         const serverSV = writeStateVector(serverSVMap);
         let localUpdatesPushed = false;
 
@@ -595,6 +600,10 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         ctx.onLocalStateCaptured?.();
         const exactLocalSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
         const serverCoversStructs = serverCoversLocalStructs(exactLocalSV, serverSVMap);
+        // The fingerprint stands in for the snapshot, whose content is
+        // O(document) and never decoded just to trim the push.
+        const deletionProofBlobs = () =>
+            collectServerBlobs(pendingUpdates.filter(item => item.type !== 'snapshot'));
 
         let shouldPush: boolean;
         let localDiff: Uint8Array | null = null;
@@ -603,14 +612,17 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             shouldPush = !deleteSetCoveredByBlobs(localDs, () => collectServerBlobs(pendingUpdates));
             if (shouldPush) {
                 // Rare: local deletion-only changes the server lacks.
-                localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
+                localDiff = withoutServerDeletions(Y.encodeStateAsUpdate(ydoc, serverSV), deletionProofBlobs);
             }
         } else {
-            localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
+            localDiff = withoutServerDeletions(Y.encodeStateAsUpdate(ydoc, serverSV), deletionProofBlobs);
             // The diff has structs by construction (a local clock exceeds
-            // the server's), so it always carries new data.
-            shouldPush = diffHasPayload(localDiff.byteLength) &&
-                diffCarriesNewData(localDiff, () => collectServerBlobs(pendingUpdates));
+            // the server's), so it always carries new data. It is not
+            // decoded again to check (diffCarriesNewData): stripping
+            // already decoded it, and a second pass doubles the cost of a
+            // large first push. A diff left with neither structs nor
+            // missing deletions would be the bare two-byte header anyway.
+            shouldPush = diffHasPayload(localDiff.byteLength);
         }
 
         if (shouldPush && localDiff !== null) {

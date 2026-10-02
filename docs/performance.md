@@ -511,6 +511,40 @@ had *just* processed. Deliveries now carry a version gate
 (`SyncResult.snapshotVersion` → `createSnapshotListener`), so the
 re-apply runs only when a compaction actually produced a new fold.
 
+### The push itself carries only the deletions the server lacks
+
+When the local doc does hold structs the server lacks (offline edits, a
+save lost when the previous session ended, an app write during the
+initial-sync window), the push was that full diff: one offline keystroke
+uploaded the document's whole delete-set, every online peer integrated
+it, and the next delta compaction copied it into a history segment that
+fresh and returning clients always apply.
+
+`withoutServerDeletions` keeps the diff's structs section byte for byte
+and replaces its trailing delete-set with the ranges that no range of the
+server blobs' merged delete-set contains (fingerprint, segments and update
+documents read in this sync; never the snapshot content). The delete-set
+is read from the diff itself and must re-encode to the diff's exact
+trailing bytes: on a mismatch or any error the full diff is pushed as
+before. The deletions-only push is trimmed the same way. Measured in
+`benchmarks/reconnect-push.bench.ts` (one offline insert, versicle
+workload, medians of 5 interleaved runs):
+
+| sessions | delete-set ranges | pushed | peer apply |
+| ---: | ---: | ---: | ---: |
+| 60  | 3,138  | 8.9 KB → **34 B**  | 2.5 ms → 0.11 ms  |
+| 120 | 6,240  | 17.7 KB → **34 B** | 6.2 ms → 0.15 ms  |
+| 240 | 12,397 | 35.2 KB → **34 B** | 11.8 ms → 0.24 ms |
+
+The push is now exactly the offline edit's own update (an offline page
+turn: 83 B, carrying its one new deletion), flat with age instead of 3.9×
+from 60 to 240 sessions, and the next delta segment at 240 sessions
+shrinks from 48.9 KB / 12,397 ranges to 13.8 KB / 40. The pushing client
+decodes the server blobs' delete-sets once: step 5 takes about 4 ms more
+at 240 sessions (6.8 → 10.7 ms), against ~11 ms saved by each peer that
+applies the push. The diff is decoded once, as before: the structs branch
+no longer re-decodes it in `diffCarriesNewData` (always true there).
+
 ## Fix 4 (latent correctness bug): partial-update metadata was empty
 
 `extractClockEnds` — the save-path metadata extractor introduced in the

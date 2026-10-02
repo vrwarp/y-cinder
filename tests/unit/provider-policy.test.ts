@@ -18,7 +18,7 @@ import {
 import { FIREBASE_ORIGINS } from '../../src/types';
 
 describe('validateProviderConfig', () => {
-    const valid = { path: 'docs/a', maxUpdatesThreshold: 10, maxAggregationTime: 1_000, depth: 0 };
+    const valid = { path: 'docs/a', maxUpdatesThreshold: 10, maxWaitTime: 100, maxAggregationTime: 1_000, depth: 0 };
 
     it('accepts a valid configuration', () => {
         expect(() => validateProviderConfig(valid)).not.toThrow();
@@ -48,6 +48,20 @@ describe('validateProviderConfig', () => {
         expect(() => validateProviderConfig({ ...valid, maxUpdatesThreshold: 1 })).not.toThrow();
     });
 
+    it('rejects a negative wait time', () => {
+        expect(() => validateProviderConfig({ ...valid, maxWaitTime: -1 }))
+            .toThrow(/Invalid maxWaitTime/);
+    });
+
+    it('accepts a zero wait time (save immediately)', () => {
+        expect(() => validateProviderConfig({ ...valid, maxWaitTime: 0 })).not.toThrow();
+    });
+
+    it('blames a negative wait time before the aggregation time derived from it', () => {
+        expect(() => validateProviderConfig({ ...valid, maxWaitTime: -1, maxAggregationTime: -10 }))
+            .toThrow(/Invalid maxWaitTime/);
+    });
+
     it('rejects a non-positive aggregation time', () => {
         expect(() => validateProviderConfig({ ...valid, maxAggregationTime: 0 }))
             .toThrow(/Invalid maxAggregationTime/);
@@ -64,7 +78,7 @@ describe('validateProviderConfig', () => {
     });
 
     it('reports the path problem first when several are wrong', () => {
-        expect(() => validateProviderConfig({ path: '', maxUpdatesThreshold: 0, maxAggregationTime: 0, depth: -5 }))
+        expect(() => validateProviderConfig({ path: '', maxUpdatesThreshold: 0, maxWaitTime: -1, maxAggregationTime: 0, depth: -5 }))
             .toThrow(/Invalid Firestore path/);
     });
 });

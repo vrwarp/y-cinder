@@ -188,7 +188,7 @@ export class FireProvider extends ObservableV2<any> {
    * Creates a new FireProvider instance.
    * 
    * @param config - Configuration options
-   * @throws {Error} If config parameters (path, depth, maxUpdatesThreshold) are invalid.
+   * @throws {Error} If config parameters (path, depth, maxUpdatesThreshold, maxWaitTime) are invalid.
    */
   constructor(config: FireProviderConfig) {
     super();
@@ -200,7 +200,10 @@ export class FireProvider extends ObservableV2<any> {
       path,
       maxUpdatesThreshold = DEFAULTS.MAX_UPDATES_THRESHOLD,
       maxWaitTime = DEFAULTS.MAX_WAIT_TIME,
-      maxAggregationTime = maxWaitTime * DEFAULTS.MAX_AGGREGATION_MULTIPLIER,
+      // Floored at 1ms: maxWaitTime 0 (save immediately) never defers a
+      // save, so its cap is moot, but deriving 0 would fail validation
+      // with an error about an option the caller never set.
+      maxAggregationTime = Math.max(1, maxWaitTime * DEFAULTS.MAX_AGGREGATION_MULTIPLIER),
       gcCompaction = true,
       historyFoldThreshold = DEFAULTS.HISTORY_FOLD_THRESHOLD,
       subdocLoadingMode = 'eager',
@@ -213,7 +216,7 @@ export class FireProvider extends ObservableV2<any> {
     // P1.8 / P2.20 FIX: Validate path and config BEFORE any Firebase SDK calls
     // This ensures validation errors are thrown with clear messages before
     // getFirestore() which could fail with cryptic errors on invalid app.
-    validateProviderConfig({ path, maxUpdatesThreshold, maxAggregationTime, depth });
+    validateProviderConfig({ path, maxUpdatesThreshold, maxWaitTime, maxAggregationTime, depth });
 
     this.firebaseApp = firebaseApp;
     this.storage = getStorage(firebaseApp);

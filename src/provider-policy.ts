@@ -22,16 +22,21 @@ import { FIREBASE_ORIGINS } from './types';
 export function validateProviderConfig(config: {
     path: string;
     maxUpdatesThreshold: number;
+    maxWaitTime: number;
     maxAggregationTime: number;
     depth: number;
 }): void {
-    const { path, maxUpdatesThreshold, maxAggregationTime, depth } = config;
+    const { path, maxUpdatesThreshold, maxWaitTime, maxAggregationTime, depth } = config;
 
     if (!path || path.includes('//') || path.startsWith('/') || path.endsWith('/')) {
         throw new Error(`Invalid Firestore path: '${path}'. Path must not be empty, start/end with '/', or contain '//'`);
     }
     if (maxUpdatesThreshold <= 0) {
         throw new Error(`Invalid maxUpdatesThreshold: ${maxUpdatesThreshold}. Must be positive.`);
+    }
+    // Checked before maxAggregationTime, whose default derives from it.
+    if (maxWaitTime < 0) {
+        throw new Error(`Invalid maxWaitTime: ${maxWaitTime}. Must not be negative.`);
     }
     if (maxAggregationTime <= 0) {
         throw new Error(`Invalid maxAggregationTime: ${maxAggregationTime}. Must be positive.`);

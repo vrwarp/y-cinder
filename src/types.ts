@@ -52,7 +52,8 @@ export interface FireProviderConfig {
      */
     maxUpdatesThreshold?: number;
     /**
-     * Debounce wait time in milliseconds before saving updates.
+     * Debounce wait time in milliseconds before saving updates. 0 saves
+     * without debouncing; negative values are rejected.
      * @default 500
      */
     maxWaitTime?: number;

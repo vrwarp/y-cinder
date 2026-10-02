@@ -8,8 +8,10 @@
  * and multi_client_mini_compactions.test.ts for the race itself). This
  * file pins the wiring around that skip:
  *
- *  - manual compact() passes no minimum: with zero updates it still folds
- *    history into the snapshot;
+ *  - manual compact() passes no minimum: it compacts a backlog the
+ *    trigger's minimum would leave for the next crossing (with nothing
+ *    pending and no fold due, both end without merging; see
+ *    zero_update_compaction.test.ts);
  *  - the minimum counts every update document read, stale-epoch ones
  *    included, so a stale-only backlog the trigger counted gets cleaned;
  *  - the minimum is clamped to what one cycle reads, so a threshold far
@@ -99,24 +101,39 @@ describe('Triggered compaction minimum batch', () => {
 
     const count = async (sub: string) => (await getDocs(collection(db, path, sub))).size;
 
-    it('a triggered cycle with nothing pending leaves history alone; a manual one folds it', { timeout: 60000 }, async () => {
+    it('a triggered cycle leaves a small backlog and history alone; a manual one compacts it', { timeout: 60000 }, async () => {
         await seedBaseAndSegment();
+
+        const idle = await compact(ctx({ minUpdates: 5 }));
+        expect(idle.type).toBe('none');
+        expect(await count('history')).toBe(1);
+
+        const w = writer();
+        await w.push('k0');
+        await w.push('k1');
 
         const skipped = await compact(ctx({ minUpdates: 5 }));
         expect(skipped.type).toBe('none');
+        expect(skipped.updatesCompacted).toBe(0);
+        expect(await count('updates')).toBe(2);
         expect(await count('history')).toBe(1);
         expect((await getDoc(doc(db, path))).data()?.version).toBe(1);
 
         const drained = await compact(ctx());
-        expect(drained.type).toBe('snapshot');
-        expect(drained.historySegmentsMerged).toBe(1);
-        expect(await count('history')).toBe(0);
-        expect((await getDoc(doc(db, path))).data()?.version).toBe(2);
+        expect(drained.type).toBe('history');
+        expect(drained.updatesCompacted).toBe(2);
+        expect(await count('updates')).toBe(0);
+        expect(await count('history')).toBe(2);
     });
 
-    it('provider.compact() still folds history with zero pending updates', { timeout: 60000 }, async () => {
+    it('provider.compact() compacts a backlog below the trigger minimum', { timeout: 60000 }, async () => {
         await seedBaseAndSegment();
+        const w = writer();
+        await w.push('k0');
+        await w.push('k1');
         const ydoc = new Y.Doc();
+        // Threshold 10: the trigger would ask for 5 updates and never fires
+        // for these 2.
         const provider = new FireProvider({
             firebaseApp: app,
             ydoc,
@@ -126,12 +143,12 @@ describe('Triggered compaction minimum batch', () => {
         });
         try {
             await waitForConditionTruthy(() => provider.synced, { timeout: 30000, message: 'initial sync' });
-            expect(ydoc.getMap('m').toJSON()).toEqual({ base: 'base', segment: 'segment' });
+            expect(ydoc.getMap('m').toJSON()).toEqual({ base: 'base', segment: 'segment', k0: 'k0', k1: 'k1' });
 
             await provider.compact();
 
-            expect(await count('history')).toBe(0);
-            expect((await getDoc(doc(db, path))).data()?.version).toBe(2);
+            expect(await count('updates')).toBe(0);
+            expect(await count('history')).toBe(2);
         } finally {
             await provider.destroy();
         }

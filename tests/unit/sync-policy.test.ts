@@ -394,6 +394,16 @@ describe('largeUpdatePath', () => {
     it('keeps successive pushes from one client distinct', () => {
         expect(largeUpdatePath('docs/a', 'c1', 5)).not.toBe(largeUpdatePath('docs/a', 'c1', 6));
     });
+
+    it('appends the attempt id when given', () => {
+        expect(largeUpdatePath('docs/a', 'client7', 1_700_000, 'att9'))
+            .toBe('docs/a/large_updates/client7_1700000_att9.bin');
+    });
+
+    it('keeps two attempts of one client in the same millisecond distinct', () => {
+        expect(largeUpdatePath('docs/a', 'c1', 5, 'x')).not.toBe(largeUpdatePath('docs/a', 'c1', 5, 'y'));
+        expect(largeUpdatePath('docs/a', 'c1', 5, 'x')).not.toBe(largeUpdatePath('docs/a', 'c1', 5));
+    });
 });
 
 /*

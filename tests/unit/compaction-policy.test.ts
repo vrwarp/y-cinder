@@ -30,6 +30,7 @@ import {
     shouldPublishFoldTail,
     shouldRetryCompaction,
     shouldUseDelta,
+    updateBlobPath,
 } from '../../src/compaction-policy';
 import { DEFAULTS } from '../../src/types';
 
@@ -322,6 +323,32 @@ describe('planUpdateDoc', () => {
     it('skips a current-epoch document with no payload at all', () => {
         expect(planUpdateDoc({ epoch: 2 }, 2)).toEqual({ kind: 'skip' });
         expect(planUpdateDoc(null, 0)).toEqual({ kind: 'skip' });
+    });
+});
+
+describe('updateBlobPath', () => {
+    it('returns the blob of a storage-backed update', () => {
+        expect(updateBlobPath({ updateStoragePath: 'd/large_updates/u.bin' })).toBe('d/large_updates/u.bin');
+    });
+
+    /*
+     * A foreign-epoch pointer is deleted without merging, but its blob is
+     * just as unreferenced afterwards.
+     */
+    it('ignores the epoch', () => {
+        expect(updateBlobPath({ epoch: 3, updateStoragePath: 'p' })).toBe('p');
+    });
+
+    it('returns null when the payload is inline (readers never use the path)', () => {
+        expect(updateBlobPath({ update: 'bytes', updateStoragePath: 'p' })).toBeNull();
+        expect(updateBlobPath({ update: 'bytes' })).toBeNull();
+    });
+
+    it('returns null when there is no usable path', () => {
+        expect(updateBlobPath({ updateStoragePath: 42 })).toBeNull();
+        expect(updateBlobPath({})).toBeNull();
+        expect(updateBlobPath(null)).toBeNull();
+        expect(updateBlobPath(undefined)).toBeNull();
     });
 });
 

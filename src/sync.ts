@@ -44,13 +44,15 @@ import {
     orderBy,
     getDocs,
     getDoc,
+    getDocFromServer,
     serverTimestamp,
     limit,
     startAfter,
     limitToLast,
     QueryDocumentSnapshot,
+    DocumentReference,
 } from "@firebase/firestore";
-import { getBytes, ref, uploadBytes, FirebaseStorage } from "@firebase/storage";
+import { getBytes, ref, uploadBytes, deleteObject, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import {
@@ -58,7 +60,7 @@ import {
     FIRESTORE_PATHS,
     DEFAULTS,
 } from "./types";
-import { writeStateVector, wait, calculateBackoff } from "./utils";
+import { writeStateVector, wait, calculateBackoff, generateSessionId } from "./utils";
 import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, diffCarriesNewData, deleteSetCoveredByBlobs } from "./update-metadata";
 import {
     PendingUpdate,
@@ -602,7 +604,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
 
             if (diffNeedsStorage(localDiff.byteLength, DEFAULTS.INLINE_UPDATE_LIMIT)) {
                 // Storage-backed update: upload binary to Cloud Storage
-                const storagePath = largeUpdatePath(path, uid, Date.now());
+                const storagePath = largeUpdatePath(path, uid, Date.now(), generateSessionId());
                 const storageRef = ref(ctx.storage, storagePath);
                 await uploadBytes(storageRef, localDiff);
 
@@ -614,7 +616,18 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     ...epochTag,
                     ...aggregateClockEnds(clockEnds)
                 };
-                await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
+                try {
+                    await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
+                } catch (pointerErr) {
+                    // A rejected write never commits (the SDK retries
+                    // transient errors itself), and the sync retry pushes
+                    // again under a new path: delete this copy instead of
+                    // orphaning it, in the background.
+                    deleteObject(storageRef).catch(err => {
+                        console.warn(`Failed to delete unreferenced update blob ${storagePath}`, err);
+                    });
+                    throw pointerErr;
+                }
                 console.log(`Oversized initial sync diff (${localDiff.byteLength} bytes) offloaded to Cloud Storage: ${storagePath}`);
             } else {
                 // Standard inline update
@@ -779,6 +792,13 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                             refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
                             rebaseIfPending(ydoc, localSVMap);
                         } catch (e) {
+                            // Compacted away mid-download: the blob is
+                            // deleted once the pointer's deletion commits,
+                            // and the fold or segment holding the update
+                            // arrives through the other listeners.
+                            if (isPermanentDownloadError(e) && !(await updateDocExists(change.doc.ref))) {
+                                return;
+                            }
                             console.error(`Failed to apply storage-backed update ${docId} (quarantined)`, e);
                             ctx.corruptedDocIds?.add(docId);
                             ctx.onCorruptedDocument?.(docId, e instanceof Error ? e : new Error(String(e)));
@@ -1122,6 +1142,28 @@ async function applyFoldTail(
         Y.applyUpdate(ydoc, new Uint8Array(buffer), FIREBASE_ORIGINS.SNAPSHOT);
     } catch (e) {
         console.warn(`Failed to apply fold tail ${data.foldTailStoragePath}; downloading the snapshot instead`, e);
+    }
+}
+
+/**
+ * Whether an update document still exists on the server.
+ *
+ * Asked once its Storage blob turned out to be missing. Compaction and
+ * squash delete a pointer's blob right after the transaction deleting the
+ * pointer commits, so a listener download racing that cycle finds the
+ * object gone while the update itself lives on in the fold, segment or
+ * new epoch the other listeners deliver. Only a blob missing behind a
+ * pointer that still exists is lost. When the check itself fails, the
+ * document is assumed to exist.
+ *
+ * @param docRef - The update (pointer) document.
+ * @returns false when the document is gone.
+ */
+async function updateDocExists(docRef: DocumentReference): Promise<boolean> {
+    try {
+        return (await getDocFromServer(docRef)).exists();
+    } catch {
+        return true;
     }
 }
 

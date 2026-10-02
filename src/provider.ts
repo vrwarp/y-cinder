@@ -24,7 +24,7 @@ import {
   Bytes,
   serverTimestamp,
 } from "@firebase/firestore";
-import { getStorage, FirebaseStorage, ref, uploadBytes } from "@firebase/storage";
+import { getStorage, FirebaseStorage, ref, uploadBytes, deleteObject } from "@firebase/storage";
 import * as Y from "yjs";
 import { ObservableV2 } from "lib0/observable";
 
@@ -38,7 +38,7 @@ import {
 import { generateSessionId, calculateBackoff } from "./utils";
 import { extractClockEnds, aggregateClockEnds } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext, SyncResult } from "./sync";
-import { isClientOfflineError } from "./sync-policy";
+import { isClientOfflineError, largeUpdatePath } from "./sync-policy";
 import { compact as performTieredCompaction, CompactionContext } from "./compaction";
 import { squashDocument, readDocEpoch, SquashResult } from "./squash";
 import { sharedClockOffset } from "./locking";
@@ -1202,12 +1202,24 @@ export class FireProvider extends ObservableV2<any> {
       if (update.byteLength > DEFAULTS.INLINE_UPDATE_LIMIT) {
         // Storage-backed update: upload binary to Cloud Storage and write
         // a lightweight pointer document to the updates collection
-        const storagePath = `${this.path}/large_updates/${this.uid}_${Date.now()}.bin`;
+        const storagePath = largeUpdatePath(this.path, this.uid, Date.now(), generateSessionId());
         await uploadBytes(ref(this.storage, storagePath), update);
-        await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), {
-          ...baseData,
-          updateStoragePath: storagePath,
-        });
+        try {
+          await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), {
+            ...baseData,
+            updateStoragePath: storagePath,
+          });
+        } catch (pointerErr) {
+          // A rejected write never commits (the SDK retries transient
+          // errors itself), so no pointer to this blob exists or ever
+          // will, and the retry uploads the batch again under a new path.
+          // Delete this copy instead of orphaning one per failed attempt
+          // (in the background: the retry need not wait for it).
+          deleteObject(ref(this.storage, storagePath)).catch(err => {
+            console.warn(`Failed to delete unreferenced update blob ${storagePath}`, err);
+          });
+          throw pointerErr;
+        }
         console.log(`Oversized update (${update.byteLength} bytes) offloaded to Cloud Storage: ${storagePath}`);
       } else {
         await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), {

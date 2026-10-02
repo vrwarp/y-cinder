@@ -662,6 +662,41 @@ remains on the main thread is O(missing structs + delete set) instead of
 O(snapshot). y-idb hydration of the same document (~375 ms at 240
 sessions) is unaffected — that floor is what squash resets.
 
+## Fix 9: oversized-update blobs no longer outlive their pointers
+
+A save or initial-sync push larger than `INLINE_UPDATE_LIMIT` uploads the
+update to `{path}/large_updates/` and writes a pointer document. Fold,
+delta, stale-epoch cleanup and squash deleted the pointer inside their
+transactions but never the blob, so every oversized write (a local-first
+document's first push, a long offline session, a bulk import) stayed in
+billed Storage forever — not even squash reclaimed it. A save or push
+whose pointer write was rejected also re-uploaded the whole update under
+a new name on every retry, orphaning one full copy per attempt.
+
+Each compaction / squash transaction now reports the documents its
+committed attempt deleted, and the cycle deletes their blobs right after
+the commit (best effort, like snapshot GC: one Storage delete per blob).
+A rejected pointer write deletes the copy it just uploaded. Blob names
+carry a per-attempt id, so every blob has exactly one pointer. A peer
+whose update listener is mid-download when the blob goes away re-reads
+the pointer (one document read, only on that 404): if it is gone the
+update was compacted away and arrives with the fold, instead of being
+quarantined and reported as a false `corrupted-document`.
+
+Measured with `tests/integration/large_update_blob_leak.test.ts`
+(emulator; Storage ledger vs. surviving pointers; counts identical in 5
+interleaved runs each):
+
+| scenario | orphaned before | orphaned after |
+| --- | ---: | ---: |
+| 3 × 1.1 MB saves, each folded | 1 / 2 / 3 blobs (3.3 MB) | 0 |
+| squash after a 1.1 MB save | 1.1 MB | 0 |
+| stale-epoch pointer cleanup | 1.1 MB | 0 |
+| save, 3 rejected pointer writes (after save / fold) | 3.3 / 4.4 MB | 0 / 0 |
+| initial-sync push, 2 rejections (after push / fold) | 2.2 / 3.3 MB | 0 / 0 |
+
+Pinned by that file and `tests/integration/listener_blob_reclaim_race.test.ts`.
+
 ## The remaining floor: epoch squash
 
 Everything above bounds the *per-cycle* costs, but the floor itself —

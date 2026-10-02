@@ -223,6 +223,26 @@ export function planUpdateDoc(data: Record<string, any> | null | undefined, curr
     return { kind: 'skip' };
 }
 
+/**
+ * The Cloud Storage blob a storage-backed update document points to.
+ *
+ * Every such blob has exactly one pointer document (see largeUpdatePath),
+ * so once a committed transaction deletes the pointer nothing can ever
+ * read the blob again. Compaction and squash delete it right after the
+ * commit; left alone it would stay in billed Storage forever.
+ *
+ * @param data - Update document data.
+ * @returns The blob's storage path, or null when the payload is inline
+ *   or absent.
+ */
+export function updateBlobPath(data: Record<string, any> | null | undefined): string | null {
+    if (typeof data?.updateStoragePath === 'string' && !data?.update) {
+        return data.updateStoragePath;
+    }
+
+    return null;
+}
+
 /** How compaction should treat one history segment document. */
 export type HistoryDocPlan =
     | { kind: 'stale' }

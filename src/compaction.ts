@@ -84,6 +84,7 @@ import {
     shouldPublishFoldTail,
     shouldRetryCompaction,
     shouldUseDelta,
+    updateBlobPath,
 } from './compaction-policy';
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
 import { wait, calculateBackoff, generateSessionId, writeStateVector } from "./utils";
@@ -152,6 +153,15 @@ export interface CompactionResult {
     error?: Error;
     /** Version number of the snapshot that was replaced (for garbage collection) */
     previousVersion?: number;
+}
+
+/**
+ * What a committed compaction transaction did: its result, and the
+ * documents it deleted (whose Storage blobs the cycle then reclaims).
+ */
+interface CommittedCompaction {
+    result: CompactionResult;
+    deletedRefs: DocumentReference[];
 }
 
 /**
@@ -244,6 +254,10 @@ export async function compact(
         // missing dependencies, which also disables GC compaction), so
         // they are deleted without merging.
         const staleRefs: DocumentReference[] = [];
+        // The Storage blob of every pointer document read above, by
+        // document path: reclaimed once a committed transaction deletes
+        // the pointer (see reclaimUpdateBlobs).
+        const updateBlobs = new Map<string, string>();
 
         // Use the data already returned by the queries above. Update and
         // history documents are immutable (only ever created or deleted),
@@ -253,6 +267,10 @@ export async function compact(
         const updateResults = await Promise.all(updateDocs.map(async (uDoc) => {
             const data = uDoc.data() as Record<string, any>;
             const plan = planUpdateDoc(data, currentEpoch);
+            const blobPath = updateBlobPath(data);
+            if (blobPath !== null) {
+                updateBlobs.set(uDoc.ref.path, blobPath);
+            }
 
             if (plan.kind === 'stale') {
                 staleRefs.push(uDoc.ref);
@@ -311,7 +329,8 @@ export async function compact(
 
         if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
             if (staleRefs.length > 0) {
-                await deleteStaleEpochDocs(db, path, uid, staleRefs);
+                const deletedRefs = await deleteStaleEpochDocs(db, path, uid, staleRefs);
+                await reclaimUpdateBlobs(storage, updateBlobs, deletedRefs);
                 return { success: true, type: 'none' as const, updatesCompacted: staleRefs.length, historySegmentsMerged: 0 };
             }
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
@@ -336,7 +355,7 @@ export async function compact(
         });
 
         if (wantDelta) {
-            const deltaResult = await tryDeltaCompaction({
+            const delta = await tryDeltaCompaction({
                 db,
                 path,
                 uid,
@@ -344,8 +363,9 @@ export async function compact(
                 staleRefs,
                 epoch: currentEpoch,
             });
-            if (deltaResult !== null) {
-                return deltaResult;
+            if (delta !== null) {
+                await reclaimUpdateBlobs(storage, updateBlobs, delta.deletedRefs);
+                return delta.result;
             }
             // Segment would not fit inline — fall through to a full fold.
         }
@@ -457,7 +477,7 @@ export async function compact(
             : null;
 
         // === STEP 4: Transaction ===
-        const result = await performCompactionTransaction({
+        const { result, deletedRefs } = await performCompactionTransaction({
             db,
             path,
             uid,
@@ -472,6 +492,7 @@ export async function compact(
             foldTail,
             expectedVersion: currentVersion,
         });
+        await reclaimUpdateBlobs(storage, updateBlobs, deletedRefs);
 
         // Garbage Collect Old Storage Snapshot (and its delete-set and tail blobs).
         // Delete the paths the replaced main document stored: blob names are
@@ -515,7 +536,7 @@ async function tryDeltaCompaction(params: {
     updatesToProcess: { ref: DocumentReference; data: Uint8Array }[];
     staleRefs: DocumentReference[];
     epoch: number;
-}): Promise<CompactionResult | null> {
+}): Promise<CommittedCompaction | null> {
     const { db, path, uid, updatesToProcess, staleRefs, epoch } = params;
 
     // Merge + validate + derive the segment's state vector (clock ends per
@@ -560,10 +581,13 @@ async function tryDeltaCompaction(params: {
         console.log(`Delta-compacted ${updatesToProcess.length} updates into history segment (${merged.result.byteLength} bytes)`);
 
         return {
-            success: true,
-            type: 'history' as const,
-            updatesCompacted: updatesToProcess.length,
-            historySegmentsMerged: 0,
+            result: {
+                success: true,
+                type: 'history' as const,
+                updatesCompacted: updatesToProcess.length,
+                historySegmentsMerged: 0,
+            },
+            deletedRefs: [...updatesToProcess.map(u => u.ref), ...staleRefs],
         };
     });
 }
@@ -653,7 +677,7 @@ async function performCompactionTransaction(params: {
     deleteSetStoragePath: string | null;
     foldTail: FoldTail | null;
     expectedVersion: number;
-}): Promise<CompactionResult> {
+}): Promise<CommittedCompaction> {
     const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, staleRefs, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, foldTail, expectedVersion } = params;
 
     return await runTransaction(db, async (transaction) => {
@@ -688,7 +712,10 @@ async function performCompactionTransaction(params: {
         const historyToMerge = verifiedHistoryRefs.map(ref => ({ ref }));
 
         if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
-            return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
+            return {
+                result: { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 },
+                deletedRefs: [],
+            };
         }
 
         // === STEP C: Commit Pointers ===
@@ -709,7 +736,10 @@ async function performCompactionTransaction(params: {
         // Old-epoch documents ride along in the same transaction: they are
         // never merged, only removed.
         staleRefs.forEach(ref => transaction.delete(ref));
-        return result;
+        return {
+            result,
+            deletedRefs: [...updatesToProcess.map(u => u.ref), ...historyToMerge.map(h => h.ref), ...staleRefs],
+        };
     });
 }
 
@@ -717,21 +747,59 @@ async function performCompactionTransaction(params: {
  * Deletes stale-epoch update/history documents when there is nothing else
  * to compact. They are deleted without re-reading (see "Deletion" in the
  * module header).
+ *
+ * @returns The documents the committed transaction deleted.
  */
 async function deleteStaleEpochDocs(
     db: Firestore,
     path: string,
     uid: string,
     staleRefs: DocumentReference[]
-): Promise<void> {
-    await runTransaction(db, async (transaction) => {
+): Promise<DocumentReference[]> {
+    return await runTransaction(db, async (transaction) => {
         const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
         const lockSnap = await transaction.get(lockRef);
         if (!lockSnap.exists() || lockSnap.data().owner !== uid) {
             throw new Error("Lock lost or expired during compaction phase - Aborting write.");
         }
         staleRefs.forEach(ref => transaction.delete(ref));
+        return staleRefs;
     });
+}
+
+/**
+ * Deletes the Storage blobs of the pointer documents a committed
+ * transaction deleted. With its pointer gone nothing can read a blob
+ * again; left alone, every oversized save or push stayed in billed
+ * Storage forever.
+ *
+ * Must run only after the commit, and only for documents that commit
+ * deleted (the transaction body's return value, so a re-run on
+ * contention reports its own deletes). The deletes are blind (see
+ * "Deletion" in the module header), but once the commit lands each
+ * pointer is gone either way, and its payload is in what the commit
+ * wrote. Readers racing the delete are
+ * safe: initial sync skips a missing blob and reads the snapshot after
+ * the updates, and the update listener skips one whose pointer is gone,
+ * receiving the data through the fold or segment instead.
+ *
+ * Best effort, like snapshot garbage collection: a failure (including a
+ * 404 from a double delete) only leaves an orphan, never fails the cycle.
+ */
+async function reclaimUpdateBlobs(
+    storage: FirebaseStorage,
+    updateBlobs: Map<string, string>,
+    deletedRefs: DocumentReference[]
+): Promise<void> {
+    await Promise.all(deletedRefs.map(async (docRef) => {
+        const blobPath = updateBlobs.get(docRef.path);
+        if (blobPath === undefined) return;
+        try {
+            await deleteObject(ref(storage, blobPath));
+        } catch (err) {
+            console.warn(`Failed to delete update blob ${blobPath}`, err);
+        }
+    }));
 }
 
 /**

@@ -307,11 +307,22 @@ export function orderByApplyPriority<T extends { priority: number }>(items: T[])
 /**
  * The Cloud Storage path for an oversized local diff.
  *
+ * Writers pass a per-attempt id: compaction and squash delete a blob once
+ * the transaction deleting its pointer document commits, which is only
+ * safe while every blob has exactly one pointer. Millis alone can repeat
+ * (a save and the initial-sync push of the same client in the same
+ * millisecond), and a second pointer to the same object would then
+ * dangle once the first is consumed.
+ *
  * @param basePath - The document's base path.
  * @param uid - This client's id.
- * @param timestamp - Millis, to keep concurrent pushes distinct.
+ * @param timestamp - Millis (keeps names time-ordered).
+ * @param attemptId - Unique to this upload attempt; every library
+ *   writer passes one.
  * @returns The storage object path.
  */
-export function largeUpdatePath(basePath: string, uid: string, timestamp: number): string {
-    return `${basePath}/large_updates/${uid}_${timestamp}.bin`;
+export function largeUpdatePath(basePath: string, uid: string, timestamp: number, attemptId?: string): string {
+    const suffix = attemptId === undefined ? '' : `_${attemptId}`;
+
+    return `${basePath}/large_updates/${uid}_${timestamp}${suffix}.bin`;
 }

@@ -59,6 +59,7 @@ import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";
 import { generateSessionId } from "./utils";
+import { updateBlobPath } from "./compaction-policy";
 import {
     isNotQuiescent,
     isSquashPreempted,
@@ -366,7 +367,11 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         const storagePath = squashSnapshotPath(path, newEpoch, nextVersion, generateSessionId());
         await uploadBytes(ref(storage, storagePath), candidate);
 
+        // Blobs of the pointer documents the committed attempt deleted
+        // (reset per attempt: the body re-runs on contention).
+        let deletedBlobs: string[] = [];
         const result = await runTransaction(db, async (transaction) => {
+            deletedBlobs = [];
             const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
             const lockSnap = await transaction.get(lockRef);
             if (!stillHoldsLock(lockSnap.exists() ? lockSnap.data() : undefined, uid)) {
@@ -409,9 +414,22 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
             for (const d of [...updatesSnap.docs, ...historySnap.docs]) {
                 transaction.delete(d.ref);
             }
+            deletedBlobs = updatesSnap.docs
+                .map(d => updateBlobPath(d.data()))
+                .filter((p): p is string => p !== null);
 
             return { success: true as const, epoch: newEpoch };
         });
+
+        // Nothing references a deleted pointer's blob any more (see
+        // updateBlobPath)
+        if (result.success) {
+            await Promise.all(deletedBlobs.map(async (blobPath) => {
+                try {
+                    await deleteObject(ref(storage, blobPath));
+                } catch { /* orphaned blob is harmless */ }
+            }));
+        }
 
         // Best-effort cleanup of the previous epoch's blobs
         if (result.success && typeof mainData?.snapshotStoragePath === 'string') {

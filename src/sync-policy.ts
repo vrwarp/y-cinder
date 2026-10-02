@@ -182,7 +182,8 @@ export function hasMorePages(pageSize: number, batchSize: number): boolean {
  * anything.
  *
  * @param localSV - The local document's exact state vector.
- * @param serverSVMap - Clock ends the server is known to hold.
+ * @param serverSVMap - Per client, the clock up to which the server holds
+ *   every struct (not merely its highest clock — see buildServerCoverage).
  * @returns true when no local struct is missing server-side.
  */
 export function serverCoversLocalStructs(

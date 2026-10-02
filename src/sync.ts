@@ -10,7 +10,7 @@
  * ### Initial Sync (performInitialSync)
  * 1. Fetch all server data (updates, history, snapshot)
  * 2. Extract metadata (client IDs and clock values) from each item
- * 3. Build a server state vector from the metadata
+ * 3. Build a server state vector: the clocks the server holds contiguously
  * 4. Compare with local state vector
  * 5. Apply only items that contain data missing locally
  * 6. Push any local data that's missing on the server
@@ -65,9 +65,9 @@ import {
     collectServerBlobs,
     ensureDecodedSV,
     localCoversSnapshot,
-    processUpdateMetadata,
-    processHistoryMetadata,
     processSnapshotMetadata,
+    buildServerCoverage,
+    refreshLocalClocks,
     isItemRedundant,
     applyItem,
 } from "./sync-helpers";
@@ -215,7 +215,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
     const BATCH_SIZE = DEFAULTS.SYNC_BATCH_SIZE;
 
     try {
-        const serverSVMap = new Map<number, number>();
+        const snapshotSVMap = new Map<number, number>();
         const pendingUpdates: PendingUpdate[] = [];
         let updatesApplied = 0;
 
@@ -357,7 +357,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     };
                 }
 
-                processSnapshotMetadata(data, serverSVMap);
+                processSnapshotMetadata(data, snapshotSVMap);
 
                 // The delete-set fingerprint written by compaction is a
                 // structs-empty update. Treating it as a regular update both
@@ -414,9 +414,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // 3b. Epoch filter + server state vector. Update/history documents
         // from foreign epochs are dropped: their structs belong to an
         // unrelated id space (pre-squash) and would sit in pendingStructs
-        // forever, poisoning GC compaction. Metadata therefore only enters
+        // forever, poisoning GC compaction. Blobs therefore only enter
         // the server state vector for same-epoch items — and the fence
-        // must run BEFORE metadata processing so a stale update can never
+        // must run BEFORE it is built so a stale update can never
         // suppress the initial-sync push.
         for (let i = pendingUpdates.length - 1; i >= 0; i--) {
             const item = pendingUpdates[i];
@@ -424,13 +424,11 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 pendingUpdates.splice(i, 1);
             }
         }
-        for (const item of pendingUpdates) {
-            if (item.type === 'history') {
-                processHistoryMetadata(item.data, serverSVMap);
-            } else if (item.type === 'update') {
-                processUpdateMetadata(item.data, serverSVMap);
-            }
-        }
+        // Contiguous coverage, not the metadata's clock ENDs: an update
+        // written without what precedes it (e.g. a save that committed
+        // before initial sync pushed the doc's pre-existing content) ends
+        // at the client's full clock although the server lacks its start.
+        const serverSVMap = buildServerCoverage(snapshotSVMap, pendingUpdates);
 
         // 4. Apply missing data with state vector refresh (P0.4 fix)
         let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
@@ -453,13 +451,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         updatesApplied++;
                         // Incremental update of localSVMap instead of expensive re-encode/decode (P3.0 Optimization)
                         // This prevents redundant processing of history/updates already in snapshot/previous segments
-                        if (item.type === 'snapshot') {
-                            processSnapshotMetadata(item.data, localSVMap);
-                        } else if (item.type === 'history') {
-                            processHistoryMetadata(item.data, localSVMap);
-                        } else if (item.type === 'update') {
-                            processUpdateMetadata(item.data, localSVMap);
-                        }
+                        refreshLocalClocks(item, ydoc, localSVMap);
                     }
                 }
             }
@@ -637,8 +629,8 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 });
 
                 if (plan.kind === 'skip-own') {
-                    // Fold our own metadata in anyway so later checks stay accurate.
-                    processUpdateMetadata(data, localSVMap);
+                    // Refresh the clocks it touches anyway so later checks stay accurate.
+                    refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
                     return;
                 }
                 if (plan.kind !== 'download' && plan.kind !== 'apply-inline') {
@@ -656,7 +648,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                             const update = new Uint8Array(buffer);
                             Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                             // Incremental update of cached state vector (P3.0 Optimization)
-                            processUpdateMetadata(data, localSVMap);
+                            refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
                         } catch (e) {
                             console.error(`Failed to apply storage-backed update ${docId} (quarantined)`, e);
                             ctx.corruptedDocIds?.add(docId);
@@ -685,7 +677,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                         const update = (data.update as Bytes).toUint8Array();
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                         // Incremental update of cached state vector (P3.0 Optimization)
-                        processUpdateMetadata(data, localSVMap);
+                        refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
                     } catch (e) {
                         console.error(`Failed to apply update ${docId} (quarantined)`, e);
                         ctx.corruptedDocIds?.add(docId);
@@ -929,7 +921,7 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
                             // Apply it
                             Y.applyUpdate(ydoc, (data.segment as Bytes).toUint8Array(), FIREBASE_ORIGINS.HISTORY);
                             // Incremental update of cached state vector (P3.0 Optimization)
-                            processHistoryMetadata(data, localSVMap);
+                            refreshLocalClocks(item, ydoc, localSVMap);
                         }
                     } catch (err) {
                         console.error(`Failed to apply history segment ${docId} (quarantined)`, err);

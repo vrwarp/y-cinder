@@ -168,6 +168,101 @@ export function processSnapshotMetadata(data: any, serverSVMap: Map<number, numb
 }
 
 /**
+ * Builds the state vector the initial-sync push diffs against: for each
+ * client, the clock up to which the server holds EVERY struct.
+ *
+ * Unlike the local state vector, this cannot be folded from metadata.
+ * Update and history metadata record only END clocks, which cannot tell
+ * "the server holds X:[0,11)" from "the server holds X:[5,11)". Reading
+ * the end as coverage made the push guard skip X:[0,5) forever, leaving
+ * every other client with X:[5,11) parked in pendingStructs. Such gaps
+ * appear whenever an update document is written without what precedes
+ * it — e.g. a save that commits before initial sync has pushed the doc's
+ * pre-existing local content.
+ *
+ * Each update/history blob therefore contributes the [from, to) range
+ * `Y.parseUpdateMeta` reports per client (the same lazy walk as
+ * `extractClockEnds`; it never reads the delete-set), and a range only
+ * extends the coverage when it starts within it. The base snapshot counts
+ * as [0, sv) and is never parsed — it is O(document) and often not even
+ * downloaded. The update and history tiers are bounded by compaction, so
+ * this stays flat as the document ages.
+ *
+ * @param snapshotSVMap - The base snapshot's state vector (empty if none)
+ * @param items - Pending updates collected during initial sync
+ * @returns Map of clientID -> clock the server holds contiguously from 0
+ */
+export function buildServerCoverage(snapshotSVMap: Map<number, number>, items: PendingUpdate[]): Map<number, number> {
+    const ranges = new Map<number, [number, number][]>();
+    for (const item of items) {
+        const raw = item.type === 'history' ? item.data.segment
+            : item.type === 'update' ? item.data.update
+                : null;
+        if (!raw) continue;
+        let meta: { from: Map<number, number>; to: Map<number, number> };
+        try {
+            meta = Y.parseUpdateMeta((raw as Bytes).toUint8Array());
+        } catch (e) {
+            // A corrupted blob proves no coverage; worst case we push a
+            // redundant (idempotent) diff.
+            console.warn("Failed to parse server blob clock ranges", e);
+            continue;
+        }
+        for (const [client, from] of meta.from) {
+            const clientRanges = ranges.get(client) || [];
+            clientRanges.push([from, meta.to.get(client) || from]);
+            ranges.set(client, clientRanges);
+        }
+    }
+
+    const coverage = new Map(snapshotSVMap);
+    for (const [client, clientRanges] of ranges) {
+        let covered = coverage.get(client) || 0;
+        clientRanges.sort((a, b) => a[0] - b[0]);
+        for (const [from, to] of clientRanges) {
+            if (from > covered) break;
+            if (to > covered) covered = to;
+        }
+        if (covered > 0) {
+            coverage.set(client, covered);
+        }
+    }
+    return coverage;
+}
+
+/**
+ * Updates a cached local state vector after an item has been applied.
+ *
+ * The item's metadata only says which clients it touches; their clocks are
+ * re-read from the document instead of folding in the metadata's END
+ * clocks. An item that starts past the local clock (a server-side gap) is
+ * parked in pendingStructs and does not advance it — folding its end in
+ * would make the later item that fills the gap look redundant, and the gap
+ * would never close.
+ *
+ * @param item - The item just applied (or skipped as our own write)
+ * @param ydoc - The local Yjs document
+ * @param localSVMap - Cached local state vector to update
+ */
+export function refreshLocalClocks(
+    item: Pick<PendingUpdate, 'type' | 'data'>,
+    ydoc: Y.Doc,
+    localSVMap: Map<number, number>
+): void {
+    const touched = new Map<number, number>();
+    if (item.type === 'snapshot') {
+        processSnapshotMetadata(item.data, touched);
+    } else if (item.type === 'history') {
+        processHistoryMetadata(item.data, touched);
+    } else {
+        processUpdateMetadata(item.data, touched);
+    }
+    for (const client of touched.keys()) {
+        localSVMap.set(client, Y.getState(ydoc.store, client));
+    }
+}
+
+/**
  * Determines if a pending update is already contained in the local document.
  * Uses clock comparison to avoid re-applying known data.
  * 

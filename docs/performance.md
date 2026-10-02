@@ -397,6 +397,15 @@ struct: local deletions come straight from
 (and growing) → **0.04 ms (flat)**. The O(document) encode only runs when
 there is actually something to push.
 
+The server state vector the guard compares against is, per client, the
+clock up to which the server holds *every* struct: the snapshot's state
+vector extended by the `[from, to)` ranges of the update and history
+blobs (`buildServerCoverage`, a lazy `Y.parseUpdateMeta` walk of the two
+tiers compaction keeps small). It is never the highest end clock in the
+metadata: that hides a server-side gap — e.g. a save that committed
+before initial sync pushed the doc's pre-existing content — and the guard
+would never push the missing range.
+
 The snapshot listener also re-applied the fingerprint on every delivery —
 including the attach-delivery of every reconnect, whose state initial sync
 had *just* processed. Deliveries now carry a version gate

@@ -14,6 +14,7 @@ import { toBase64 } from 'lib0/buffer';
 import { FIREBASE_ORIGINS } from '../../src/types';
 import {
     applyItem,
+    buildServerCoverage,
     collectServerBlobs,
     ensureDecodedSV,
     isItemRedundant,
@@ -21,6 +22,7 @@ import {
     processHistoryMetadata,
     processSnapshotMetadata,
     processUpdateMetadata,
+    refreshLocalClocks,
     type PendingUpdate,
 } from '../../src/sync-helpers';
 
@@ -39,6 +41,21 @@ const makeDoc = (clientID: number, count: number) => {
 };
 
 const svBase64 = (doc: Y.Doc) => toBase64(Y.encodeStateVector(doc));
+
+/** Three sequential updates from client 1: [0,4), [4,8) and [8,12). */
+const sequentialUpdates = () => {
+    const doc = new Y.Doc();
+    doc.clientID = 1;
+    const updates: Uint8Array[] = [];
+    doc.on('update', (u: Uint8Array) => updates.push(u));
+    doc.getText('t').insert(0, 'aaaa');
+    doc.getText('t').insert(4, 'bbbb');
+    doc.getText('t').insert(8, 'cccc');
+    return updates;
+};
+
+const updateItem = (u: Uint8Array, extra: Record<string, any> = {}): PendingUpdate =>
+    ({ type: 'update', priority: 3, data: { update: bytes(u), ...extra } });
 
 afterEach(() => {
     vi.restoreAllMocks();
@@ -266,6 +283,128 @@ describe('processSnapshotMetadata', () => {
         processSnapshotMetadata({ content: bytes(Y.encodeStateAsUpdate(doc)) }, map);
 
         expect(map.size).toBe(0);
+    });
+});
+
+describe('buildServerCoverage', () => {
+    it('chains contiguous update ranges onto the snapshot state vector', () => {
+        const [, u2, u3] = sequentialUpdates();
+
+        expect(buildServerCoverage(new Map([[1, 4]]), [updateItem(u2), updateItem(u3)]).get(1)).toBe(12);
+    });
+
+    it('stops at a gap even though later clocks of the client are held', () => {
+        const [u1, , u3] = sequentialUpdates();
+
+        expect(buildServerCoverage(new Map(), [updateItem(u1), updateItem(u3)]).get(1)).toBe(4);
+    });
+
+    it('covers nothing when the server lacks the start of a client', () => {
+        const [, u2, u3] = sequentialUpdates();
+
+        expect(buildServerCoverage(new Map(), [updateItem(u2), updateItem(u3)]).has(1)).toBe(false);
+    });
+
+    it('never trusts the stored end clocks over the blob', () => {
+        const [, , u3] = sequentialUpdates();
+        const item = updateItem(u3, { clientIDs: [1], clientClocks: [12] });
+
+        expect(buildServerCoverage(new Map(), [item]).has(1)).toBe(false);
+    });
+
+    it('sweeps ranges in clock order, whatever order the items arrive in', () => {
+        const [u1, u2, u3] = sequentialUpdates();
+
+        expect(buildServerCoverage(new Map(), [updateItem(u3), updateItem(u2), updateItem(u1)]).get(1)).toBe(12);
+    });
+
+    it('extends through overlapping ranges', () => {
+        const [u1, u2, u3] = sequentialUpdates();
+        const items = [updateItem(Y.mergeUpdates([u1, u2])), updateItem(Y.mergeUpdates([u2, u3]))];
+
+        expect(buildServerCoverage(new Map(), items).get(1)).toBe(12);
+    });
+
+    it('reads history segments from their segment blob', () => {
+        const [u1, u2] = sequentialUpdates();
+        const item: PendingUpdate = { type: 'history', priority: 2, data: { segment: bytes(Y.mergeUpdates([u1, u2])) } };
+
+        expect(buildServerCoverage(new Map(), [item]).get(1)).toBe(8);
+    });
+
+    it('ignores snapshot items and blobs stored under the wrong field', () => {
+        const [u1] = sequentialUpdates();
+        const items: PendingUpdate[] = [
+            { type: 'snapshot', priority: 1, data: { content: bytes(u1) } },
+            { type: 'history', priority: 2, data: { update: bytes(u1) } },
+        ];
+
+        expect(buildServerCoverage(new Map(), items).size).toBe(0);
+    });
+
+    it('keeps snapshot coverage that is already past a range, and leaves its input alone', () => {
+        const [, u2] = sequentialUpdates();
+        const snapshotSV = new Map([[1, 10], [2, 3]]);
+        const coverage = buildServerCoverage(snapshotSV, [updateItem(u2)]);
+
+        expect([...coverage]).toEqual([[1, 10], [2, 3]]);
+        expect(coverage).not.toBe(snapshotSV);
+    });
+
+    it('treats a corrupt blob as covering nothing instead of throwing', () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const [u1] = sequentialUpdates();
+        const items = [updateItem(new Uint8Array([255, 255, 255, 255])), updateItem(u1)];
+
+        expect(buildServerCoverage(new Map(), items).get(1)).toBe(4);
+    });
+});
+
+describe('refreshLocalClocks', () => {
+    it('reads the clock from the doc, not the end clock of an item parked behind a gap', () => {
+        const [u1, , u3] = sequentialUpdates();
+        const target = new Y.Doc();
+        Y.applyUpdate(target, u1);
+        Y.applyUpdate(target, u3);
+        const localSVMap = new Map([[1, 4]]);
+
+        refreshLocalClocks({ type: 'update', data: { clientIDs: [1], clientClocks: [12] } }, target, localSVMap);
+
+        expect(localSVMap.get(1)).toBe(4);
+    });
+
+    it('advances to the item end once its structs are integrated', () => {
+        const [u1, u2] = sequentialUpdates();
+        const target = new Y.Doc();
+        Y.applyUpdate(target, u1);
+        Y.applyUpdate(target, u2);
+        const localSVMap = new Map([[1, 4]]);
+
+        refreshLocalClocks({ type: 'update', data: { update: bytes(u2) } }, target, localSVMap);
+
+        expect(localSVMap.get(1)).toBe(8);
+    });
+
+    it('only touches the clients the item names', () => {
+        const source = makeDoc(3, 6);
+        const target = new Y.Doc();
+        Y.applyUpdate(target, Y.encodeStateAsUpdate(source));
+        const localSVMap = new Map([[9, 5]]);
+
+        refreshLocalClocks({ type: 'history', data: { stateVector: svBase64(source) } }, target, localSVMap);
+
+        expect([...localSVMap]).toEqual([[9, 5], [3, 6]]);
+    });
+
+    it('reads a snapshot item\'s clients from its stateVector', () => {
+        const source = makeDoc(5, 2);
+        const target = new Y.Doc();
+        const localSVMap = new Map<number, number>();
+
+        refreshLocalClocks({ type: 'snapshot', data: { stateVector: svBase64(source) } }, target, localSVMap);
+
+        // Named by the snapshot, but nothing integrated locally yet.
+        expect(localSVMap.get(5)).toBe(0);
     });
 });
 

@@ -379,11 +379,6 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
                 throw new Error("Document changed during squash upload. Aborting.");
             }
 
-            const [updateChecks, historyChecks] = await Promise.all([
-                Promise.all(updatesSnap.docs.map(d => transaction.get(d.ref))),
-                Promise.all(historySnap.docs.map(d => transaction.get(d.ref))),
-            ]);
-
             // Checked last, right before the writes: a change the clone
             // lacks would be silently dropped from the new epoch. Commit
             // nothing and let the provider keep syncing it in this epoch.
@@ -404,8 +399,11 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
                 origin: uid,
             }, { merge: true });
 
-            for (const s of [...updateChecks, ...historyChecks]) {
-                if (s.exists()) transaction.delete(s.ref);
+            // Deleted without re-reading: the squashed doc covers every one
+            // of them (checked above), and only lock holders delete
+            // update/history documents (see "Deletion" in compaction.ts).
+            for (const d of [...updatesSnap.docs, ...historySnap.docs]) {
+                transaction.delete(d.ref);
             }
 
             return { success: true as const, epoch: newEpoch };

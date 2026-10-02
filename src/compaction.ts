@@ -30,6 +30,19 @@
  * - **Locking**: Distributed lock prevents concurrent compaction
  * - **Retry**: Exponential backoff handles transient failures
  * - **Chunking**: Large data is split to stay under Firestore limits
+ * - **Deletion**: Update and history documents are immutable and created
+ *   under unique auto IDs, and only a transaction that reads
+ *   LOCK_COMPACTION and finds itself the owner deletes them (delta, fold
+ *   and stale-epoch cleanup here, the squash in squash.ts). These
+ *   transactions delete the refs their queries returned WITHOUT re-reading
+ *   them: each deleted document's payload is already in what the
+ *   transaction commits (or is stale-epoch data), deleting a missing
+ *   document is a no-op, and another deleter committing in between would
+ *   have changed the lock and failed our commit. A re-read would cost a
+ *   billed read of the full payload and one RPC per document, on every
+ *   transaction attempt. A lockless deleter, or IDs that are reused or
+ *   rewritten in place, would break this (an existence re-read would not
+ *   catch those either).
  *
  * @module compaction
  */
@@ -230,9 +243,9 @@ export async function compact(
 
         // Use the data already returned by the queries above. Update and
         // history documents are immutable (only ever created or deleted),
-        // and the transaction below re-verifies existence before deleting,
-        // so re-fetching each document individually would only double the
-        // read cost. Storage-backed payloads are downloaded in parallel.
+        // so neither this step nor the commit transaction re-fetches them
+        // (see "Deletion" in the module header): that would only double
+        // the read cost. Storage-backed payloads are downloaded in parallel.
         const updateResults = await Promise.all(updateDocs.map(async (uDoc) => {
             const data = uDoc.data() as Record<string, any>;
             const plan = planUpdateDoc(data, currentEpoch);
@@ -511,28 +524,24 @@ async function tryDeltaCompaction(params: {
             throw new Error("Lock lost or expired during compaction phase - Aborting write.");
         }
 
-        // Verify updates still exist before deleting (zombie protection)
-        const updateSnaps = await Promise.all(updatesToProcess.map(u => transaction.get(u.ref)));
-        const survivors = updateSnaps.filter(snap => snap.exists());
-        if (survivors.length === 0) {
-            return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
-        }
-
         const segmentRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY));
         transaction.set(segmentRef, {
             ...buildDeltaSegmentDoc({ stateVectorB64: segmentB64Sv, hasDeletions, uid, epoch }),
             segment: Bytes.fromUint8Array(merged.result),
             startTime: serverTimestamp(),
         });
-        survivors.forEach(snap => transaction.delete(snap.ref));
+        // Deleted without re-reading: the segment holds every one of them,
+        // and only lock holders delete update documents (see "Deletion" in
+        // the module header).
+        updatesToProcess.forEach(u => transaction.delete(u.ref));
         staleRefs.forEach(ref => transaction.delete(ref));
 
-        console.log(`Delta-compacted ${survivors.length} updates into history segment (${merged.result.byteLength} bytes)`);
+        console.log(`Delta-compacted ${updatesToProcess.length} updates into history segment (${merged.result.byteLength} bytes)`);
 
         return {
             success: true,
             type: 'history' as const,
-            updatesCompacted: survivors.length,
+            updatesCompacted: updatesToProcess.length,
             historySegmentsMerged: 0,
         };
     });
@@ -584,20 +593,11 @@ async function performCompactionTransaction(params: {
             throw new Error("Document version changed during compaction upload. Aborting to retry.");
         }
 
-        // Verify updates still exist (avoid zombie bugs) before deleting
-        // P1.1 Optimization: Use parallel transaction.get to eliminate N+1 queries
-        const [updateSnaps, historySnaps] = await Promise.all([
-            Promise.all(verifiedUpdateRefs.map(ref => transaction.get(ref))),
-            Promise.all(verifiedHistoryRefs.map(ref => transaction.get(ref)))
-        ]);
-
-        const updatesToProcess = updateSnaps
-            .filter(snap => snap.exists())
-            .map(snap => ({ ref: snap.ref }));
-
-        const historyToMerge = historySnaps
-            .filter(snap => snap.exists())
-            .map(snap => ({ ref: snap.ref }));
+        // Deleted without re-reading: the candidate holds every one of
+        // them, and only lock holders delete update/history documents (see
+        // "Deletion" in the module header).
+        const updatesToProcess = verifiedUpdateRefs.map(ref => ({ ref }));
+        const historyToMerge = verifiedHistoryRefs.map(ref => ({ ref }));
 
         if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
@@ -626,7 +626,8 @@ async function performCompactionTransaction(params: {
 
 /**
  * Deletes stale-epoch update/history documents when there is nothing else
- * to compact. Existence is re-verified inside the transaction.
+ * to compact. They are deleted without re-reading (see "Deletion" in the
+ * module header).
  */
 async function deleteStaleEpochDocs(
     db: Firestore,
@@ -640,8 +641,7 @@ async function deleteStaleEpochDocs(
         if (!lockSnap.exists() || lockSnap.data().owner !== uid) {
             throw new Error("Lock lost or expired during compaction phase - Aborting write.");
         }
-        const snaps = await Promise.all(staleRefs.map(r => transaction.get(r)));
-        snaps.forEach(s => { if (s.exists()) transaction.delete(s.ref); });
+        staleRefs.forEach(ref => transaction.delete(ref));
     });
 }
 

@@ -471,6 +471,44 @@ the download itself still dominates time-to-synced. Pinned by
 `tests/unit/initial-sync-bytes.test.ts`: zero wraps, and at most one
 conversion of each inline blob.
 
+## Fix 6: compaction commits no longer re-read what they delete
+
+Every compaction already holds its pending update documents (and, for a
+fold, the history segments) from its queries. The commit transactions —
+delta, fold, squash and the stale-epoch cleanup — then called
+`transaction.get` on every one of those refs AGAIN, only to filter on
+`exists()` before deleting it. Each such get is a billed read of the full
+payload (segments can approach 1 MB) and its own `BatchGetDocuments` RPC,
+and the whole set repeats on every SDK transaction retry: one extra read
+per update ever written, about half of every compaction's reads.
+
+The re-reads protected nothing. Update and history documents are
+immutable with unique auto IDs, each deleted document's payload is
+already in what the transaction commits, deleting a missing document is
+a no-op, and every deleter checks `LOCK_COMPACTION` inside its own
+transaction. The transactions now read only the lock (plus the main
+document's version for a fold or squash) and delete the queried refs
+directly. That invariant — only in-transaction lock holders delete
+update/history documents — is documented in `src/compaction.ts` and must
+hold for any future deleter.
+
+Measured by `tests/integration/compaction_txn_reads.test.ts` (emulator,
+SDK call counts, identical in each of 5 interleaved A/B runs):
+
+| scenario | billed reads | RPCs | re-read payload |
+| --- | ---: | ---: | ---: |
+| delta, 52 updates | 109 → 57 | 61 → 9 | 20.6 KB → 0 |
+| delta, 400 updates | 805 → 405 | 409 → 9 | 147.8 KB → 0 |
+| fold, 7 segments + 50 updates | 119 → 62 | 67 → 10 | 156.1 KB → 0 |
+| squash, 7 segments + 5 updates | 29 → 17 | 22 → 10 | 106.1 KB → 0 |
+| delta, 52 updates, one SDK retry | 162 → 58 | 115 → 11 | 34.9 KB → 0 |
+
+A compaction now pays one read per document it merges (the query) instead
+of two, and its commit is a fixed handful of RPCs instead of up to ~500
+parallel lookups. End to end, a
+400-save single-client provider session: median 1222 → 824 billed reads
+(3.06 → 2.06 per save, −33%), 441 → 41 RPCs.
+
 ## The remaining floor: epoch squash
 
 Everything above bounds the *per-cycle* costs, but the floor itself —

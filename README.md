@@ -185,6 +185,10 @@ y-cinder writes to the following subcollections:
 - `metadata` (compaction lock)
 - `subdocs` (if using subdocuments)
 
+Compaction deletes `updates` and `history` documents without reading them
+first, so delete rules there should not depend on `resource.data`: such a
+rule denies deleting a document that is already gone.
+
 Cloud Storage rules must also allow read/write under the same path prefix —
 compacted snapshots (`snapshot_v*.bin`) and oversized updates
 (`large_updates/*.bin`) are stored there:

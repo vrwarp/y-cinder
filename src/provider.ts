@@ -605,6 +605,26 @@ export class FireProvider extends ObservableV2<any> {
     super.destroy();
   }
 
+  /**
+   * Emits an event without letting a listener's exception escape.
+   *
+   * lib0's emit() calls listeners bare, so a throwing consumer handler
+   * would unwind into whichever save or sync step fired the event: a
+   * 'saved' listener throwing after a committed write was treated as a
+   * failed write (re-queued and re-written forever, since each successful
+   * attempt reset the retry counter), a throwing 'sync' listener re-ran
+   * initial sync the same way, and a throwing 'save-rejected' listener
+   * skipped the reschedule of buffered updates. Listener errors are
+   * consumer bugs: log them and leave provider state alone.
+   */
+  emit(name: string, args: any[]): void {
+    try {
+      super.emit(name, args);
+    } catch (err) {
+      console.error(`Error in '${name}' event listener`, err);
+    }
+  }
+
   // --- Private Methods ---
 
   /**

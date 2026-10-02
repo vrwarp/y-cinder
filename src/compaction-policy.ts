@@ -112,8 +112,9 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
  * costs O(new data) and never downloads or re-uploads the base snapshot.
  * FOLD rebuilds the snapshot from base + history + updates and costs
  * O(document), so it must stay amortized: it runs when there is no base to
- * build on, when there is nothing new, or when history has grown to the
- * fold threshold (counting the segment this cycle would add).
+ * build on, or when history has grown to the fold threshold (counting the
+ * segment this cycle would add). With nothing new there is no delta to
+ * write; whether such a cycle folds is shouldFoldWithoutUpdates's call.
  *
  * The threshold is capped at maxHistory + 1. One fold can merge at most
  * maxHistory segments (the transaction write budget), so compaction never
@@ -148,6 +149,36 @@ export function shouldUseDelta(params: {
  */
 export function effectiveFoldThreshold(historyFoldThreshold: number, maxHistory: number = DEFAULTS.MAX_COMPACTION_HISTORY): number {
     return Math.min(historyFoldThreshold, maxHistory + 1);
+}
+
+/**
+ * Whether a cycle that found no pending updates should fold anyway.
+ *
+ * With nothing new, a fold only re-merges base + history into the content
+ * they already hold: O(document) download, GC merge and upload, plus a
+ * main-document rewrite every client's snapshot listener re-applies.
+ * Readers apply history anyway, so it is never needed for correctness and
+ * waits for the cycle that makes it due — unless there is no base to build
+ * on, history extends past what one fold can merge (the oldest-prefix fold
+ * must drain it), or history already sits at the fold threshold by
+ * shouldUseDelta's count (the fold the next cycle would run regardless).
+ *
+ * @param params - Base presence, the history count and whether it was
+ * truncated, the fold threshold and the per-cycle history cap.
+ * @returns true to FOLD, false to end the cycle without merging.
+ */
+export function shouldFoldWithoutUpdates(params: {
+    hasBase: boolean;
+    historyCount: number;
+    historyTruncated: boolean;
+    historyFoldThreshold: number;
+    maxHistory?: number;
+}): boolean {
+    const { hasBase, historyCount, historyTruncated, historyFoldThreshold, maxHistory = DEFAULTS.MAX_COMPACTION_HISTORY } = params;
+    const foldThreshold = Math.min(historyFoldThreshold, maxHistory + 1);
+
+    return historyCount > 0
+        && (!hasBase || historyTruncated || historyCount + 1 >= foldThreshold);
 }
 
 /**

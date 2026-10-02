@@ -29,6 +29,7 @@ import {
     planHistoryDoc,
     planUpdateDoc,
     readMainDocState,
+    shouldFoldWithoutUpdates,
     shouldPublishFoldTail,
     shouldRetryCompaction,
     shouldUseDelta,
@@ -261,6 +262,65 @@ describe('effectiveFoldThreshold', () => {
 
     it('takes the cap from maxHistory when given', () => {
         expect(effectiveFoldThreshold(8, 4)).toBe(5);
+    });
+});
+
+describe('shouldFoldWithoutUpdates', () => {
+    const base = { hasBase: true, historyCount: 1, historyTruncated: false, historyFoldThreshold: 8 };
+
+    /*
+     * A late lock winner, an app compact() call or squash()'s first cycle:
+     * re-merging base + history adds nothing, and readers apply history.
+     */
+    it('does not fold history below the threshold', () => {
+        expect(shouldFoldWithoutUpdates(base)).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 6 })).toBe(false);
+    });
+
+    it('has nothing to fold without history', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 0 })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 0, hasBase: false })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 0, historyTruncated: true })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 0, historyFoldThreshold: 1 })).toBe(false);
+    });
+
+    it('folds when there is no base snapshot to build on', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, hasBase: false })).toBe(true);
+    });
+
+    /* Only the oldest-prefix fold drains history past one fold's window. */
+    it('folds when history extends past what one fold can merge', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyTruncated: true })).toBe(true);
+    });
+
+    /* The count shouldUseDelta uses: a cycle with updates folds here too. */
+    it('folds once history sits where a cycle with updates would fold', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 6, historyFoldThreshold: 8 })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 7, historyFoldThreshold: 8 })).toBe(true);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 8, historyFoldThreshold: 8 })).toBe(true);
+        for (const historyFoldThreshold of [1, 2, 8, 9]) {
+            for (let historyCount = 1; historyCount <= 10; historyCount++) {
+                expect(shouldFoldWithoutUpdates({ ...base, historyCount, historyFoldThreshold }))
+                    .toBe(!shouldUseDelta({ hasBase: true, updateCount: 1, historyCount, historyFoldThreshold }));
+            }
+        }
+    });
+
+    it('always folds history when the threshold is 1', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 1, historyFoldThreshold: 1 })).toBe(true);
+    });
+
+    it('caps the threshold at what one compaction can read', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        for (const historyFoldThreshold of [max + 1, max + 2, 150]) {
+            expect(shouldFoldWithoutUpdates({ ...base, historyCount: max - 1, historyFoldThreshold })).toBe(false);
+            expect(shouldFoldWithoutUpdates({ ...base, historyCount: max, historyFoldThreshold })).toBe(true);
+        }
+    });
+
+    it('takes the cap from maxHistory when given', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 3, historyFoldThreshold: 8, maxHistory: 4 })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 4, historyFoldThreshold: 8, maxHistory: 4 })).toBe(true);
     });
 });
 

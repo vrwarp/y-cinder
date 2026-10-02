@@ -428,6 +428,29 @@ depends on how much history exists; the fold pays one extra count read.
 Raising `historyFoldThreshold` still costs cold-start initial sync, which
 downloads the ~T/2 segments history holds on average.
 
+A cycle that finds no pending update documents has no delta to write,
+and used to FOLD instead, re-merging base + history into the content
+they already held. Late lock winners (another device already drained
+the updates), app `compact()` calls and `squash()`, which compacts
+first, all reach it. It now ends without touching the base unless a
+fold is due (`shouldFoldWithoutUpdates`: no base, history past one
+fold's window, or history at the threshold). `squash()`'s preparatory
+cycle (`beforeSquash`) also skips a fold that is merely due, because the
+squash snapshot supersedes it moments later. It tolerates one segment
+past the threshold instead, and it still deletes old-epoch documents and
+drains metadata-less updates, which squash cannot verify. Measured
+(`tests/integration/zero_update_compaction.test.ts`, counted): a
+zero-update cycle at 1,440 / 5,760 / 14,400 events moved 394 KB /
+1.39 MB / 3.31 MB down and 399 KB / 1.40 MB / 3.32 MB up, ran one GC
+merge (80 / 236 / 465 ms, median of 5 runs of
+`benchmarks/zero-update-compaction.bench.ts`) and rewrote the main
+document once. It now does **none of that** (the call's median latency
+on the emulator: 308 / 485 / 698 ms → 110 / 107 / 77 ms). `squash()`
+with nothing pending, or with history at threshold − 1, no longer
+downloads the base or uploads a fold (at 1,440 events: 394 KB down and
+724 / 879 KB up → 0 down and 325 / 392 KB up) and rewrites the main
+document once instead of twice.
+
 ## Fix 2: the delete-set fingerprint no longer dies of old age
 
 The reconnect fast paths depend on the snapshot's delete-set fingerprint.

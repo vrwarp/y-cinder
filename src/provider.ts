@@ -361,13 +361,23 @@ export class FireProvider extends ObservableV2<any> {
    * @throws {Error} If locking fails or Firestore operations error
    */
   compact(attempt: number = 1): Promise<void> {
+    return this._compact(attempt, false);
+  }
+
+  /**
+   * Starts a compaction unless one (or a squash) is already in flight.
+   *
+   * @param beforeSquash - Run as squash()'s preparatory cycle (see
+   *   CompactionContext.beforeSquash)
+   */
+  private _compact(attempt: number, beforeSquash: boolean): Promise<void> {
     // Prevent concurrent compaction from same instance, and never start
     // while a squash holds the lock (see _inflightCompaction)
     if ((this._inflightCompaction || this._inflightSquash) && attempt === 1) {
       return Promise.resolve();
     }
 
-    this._inflightCompaction = this._executeCompaction(attempt).finally(() => {
+    this._inflightCompaction = this._executeCompaction(attempt, beforeSquash).finally(() => {
       this._inflightCompaction = null;
     });
     return this._inflightCompaction;
@@ -388,7 +398,7 @@ export class FireProvider extends ObservableV2<any> {
     return this._cachedClockOffset;
   }
 
-  private async _executeCompaction(attempt: number): Promise<void> {
+  private async _executeCompaction(attempt: number, beforeSquash: boolean): Promise<void> {
     // acquireLock needs the measured offset: given none, it would measure
     // again on every call. Only the first compaction waits for it, before
     // the history listener is paused.
@@ -410,6 +420,7 @@ export class FireProvider extends ObservableV2<any> {
       storage: this.storage,
       gc: this.gcCompaction,
       historyFoldThreshold: this.historyFoldThreshold,
+      beforeSquash,
     };
 
     // FIX: Pause history listener during compaction to avoid contention/deadlock in emulator
@@ -520,8 +531,8 @@ export class FireProvider extends ObservableV2<any> {
    *
    * Preconditions enforced here: initial sync completed, no subdocuments
    * (loaded or not), provider not destroyed. The server-side backlog
-   * must fit one transaction — a normal compaction is run first to fold
-   * it.
+   * must fit one transaction — a compaction is run first to shrink it,
+   * without the fold the squash snapshot would supersede.
    *
    * @returns The squash outcome; `skippedReason` distinguishes benign
    *          skips (lock contention, backlog, stale local doc, local
@@ -547,9 +558,12 @@ export class FireProvider extends ObservableV2<any> {
       return { success: false, error: new Error('squash() does not support subdocuments') };
     }
 
-    // Fold the backlog first so the squash transaction stays within
-    // Firestore's write budget.
-    await this.compact();
+    // Compact the backlog first so the squash transaction stays within
+    // Firestore's write budget. This also removes old-epoch documents and
+    // drains update documents too old to carry redundancy metadata into a
+    // segment that does — squash cannot verify either. A fold that is
+    // merely due is skipped: the squash snapshot replaces it.
+    await this._compact(1, true);
 
     // Flush our own pending updates so the clone reflects them.
     if (this._inflightSave) {

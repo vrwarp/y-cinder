@@ -83,6 +83,7 @@ import {
     planHistoryDoc,
     planUpdateDoc,
     readMainDocState,
+    shouldFoldWithoutUpdates,
     shouldPublishFoldTail,
     shouldRetryCompaction,
     shouldUseDelta,
@@ -132,6 +133,15 @@ export interface CompactionContext {
      * most MAX_COMPACTION_HISTORY segments.
      */
     historyFoldThreshold?: number;
+    /**
+     * Set for the cycle squash() runs first. That cycle only has to bring
+     * the backlog within the squash transaction's limits: the squash
+     * snapshot supersedes the base and every history segment moments
+     * later, so a fold that is merely due would be thrown away. It
+     * tolerates one segment past historyFoldThreshold instead (the squash
+     * deletes them all; should it fail, the next cycle folds).
+     */
+    beforeSquash?: boolean;
     /**
      * Test seam: inline cap for the delete-set fingerprint field.
      * Defaults to DEFAULTS.MAX_DELETE_SET_FIELD_BYTES.
@@ -198,7 +208,7 @@ export async function compact(
     attempt: number = 1
 ): Promise<CompactionResult> {
     const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, cachedClockOffset, storage } = ctx;
-    const historyFoldThreshold = ctx.historyFoldThreshold ?? DEFAULTS.HISTORY_FOLD_THRESHOLD;
+    const historyFoldThreshold = (ctx.historyFoldThreshold ?? DEFAULTS.HISTORY_FOLD_THRESHOLD) + (ctx.beforeSquash ? 1 : 0);
 
     // 1. Distributed Gate: Try to become the Leader
     // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
@@ -375,7 +385,16 @@ export async function compact(
             })
             .filter((h): h is { ref: DocumentReference; val: Uint8Array } => h !== null);
 
-        if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
+        // Nothing new to add: a fold would only re-merge base + history at
+        // O(document) cost, so unless one is due the cycle ends here (late
+        // lock winners, app compact() calls and squash() arrive with
+        // nothing pending). Old-epoch documents are still removed.
+        if (updatesToProcess.length === 0 && !shouldFoldWithoutUpdates({
+            hasBase,
+            historyCount: historyToMerge.length,
+            historyTruncated,
+            historyFoldThreshold,
+        })) {
             if (staleRefs.length > 0) {
                 const deletedRefs = await deleteStaleEpochDocs(db, path, uid, staleRefs);
                 await reclaimUpdateBlobs(storage, updateBlobs, deletedRefs);

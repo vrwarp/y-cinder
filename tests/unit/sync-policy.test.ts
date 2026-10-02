@@ -12,6 +12,7 @@ import {
     diffNeedsStorage,
     epochTag,
     hasMorePages,
+    isPermanentDownloadError,
     largeUpdatePath,
     orderByApplyPriority,
     serverCoversLocalStructs,
@@ -112,6 +113,31 @@ describe('planIncomingUpdate', () => {
     it('skips a document with no payload at all', () => {
         expect(planIncomingUpdate({ createdBy: 'other' }, ctx())).toEqual({ kind: 'skip-empty' });
         expect(planIncomingUpdate(null, ctx())).toEqual({ kind: 'skip-empty' });
+    });
+});
+
+/*
+ * A download failure classified as permanent drops the update for the
+ * session (skipped in initial sync, quarantined by the listener). Only a
+ * missing blob may be; anything that can succeed later must be retried.
+ */
+describe('isPermanentDownloadError', () => {
+    it('treats a missing blob as permanent', () => {
+        expect(isPermanentDownloadError({ code: 'storage/object-not-found' })).toBe(true);
+    });
+
+    it.each([
+        'storage/retry-limit-exceeded',
+        'storage/unknown',
+        'storage/unauthenticated',
+        'storage/quota-exceeded',
+    ])('retries %s', (code) => {
+        expect(isPermanentDownloadError({ code })).toBe(false);
+    });
+
+    it('retries an error without a code', () => {
+        expect(isPermanentDownloadError(new Error('fetch failed'))).toBe(false);
+        expect(isPermanentDownloadError(undefined)).toBe(false);
     });
 });
 

@@ -80,6 +80,26 @@ export function planIncomingUpdate(
 }
 
 /**
+ * Whether a failed download of a storage-backed update can never succeed.
+ *
+ * Update documents are immutable and are not delivered again, so giving up
+ * on one drops the update for the session — and parks every later update
+ * from the same author as pending. Only a missing object qualifies: the
+ * writer uploads the blob before the pointer document exists, so a blob
+ * missing behind a visible pointer is gone for good. Everything else —
+ * notably `storage/retry-limit-exceeded`, which is what the SDK surfaces
+ * once its own retries on network errors, 5xx and 429 run out — may
+ * succeed on a later attempt and must be retried, never skipped or
+ * quarantined.
+ *
+ * @param error - The value `getBytes` rejected with.
+ * @returns true when retrying is pointless.
+ */
+export function isPermanentDownloadError(error: any): boolean {
+    return error?.code === 'storage/object-not-found';
+}
+
+/**
  * Whether this snapshot delivery should trigger a compaction.
  *
  * Above the threshold every client would otherwise fire a mostly futile

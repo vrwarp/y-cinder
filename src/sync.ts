@@ -58,7 +58,7 @@ import {
     FIRESTORE_PATHS,
     DEFAULTS,
 } from "./types";
-import { writeStateVector } from "./utils";
+import { writeStateVector, wait, calculateBackoff } from "./utils";
 import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, diffCarriesNewData, deleteSetCoveredByBlobs } from "./update-metadata";
 import {
     PendingUpdate,
@@ -77,6 +77,7 @@ import {
     diffNeedsStorage,
     epochTag as buildEpochTag,
     hasMorePages,
+    isPermanentDownloadError,
     largeUpdatePath,
     orderByApplyPriority,
     serverCoversLocalStructs,
@@ -255,6 +256,13 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                                 data.update = Bytes.fromUint8Array(new Uint8Array(buffer));
                             } catch (storageErr) {
                                 console.error(`Failed to download storage-backed update: ${data.updateStoragePath}`, storageErr);
+                                // Skipping would still report success and move the listener
+                                // cursor past this update, so nothing would ever fetch it
+                                // again — propagate so the sync retry logic in provider.ts
+                                // handles backoff/retry. Only a blob that is gone is skipped.
+                                if (!isPermanentDownloadError(storageErr)) {
+                                    throw storageErr;
+                                }
                                 continue; // Skip this update — cannot apply without data
                             }
                         }
@@ -596,7 +604,13 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
     // are suppressed for a cooldown window unless the hard cap is reached.
     let lastCompactionTrigger = 0;
 
-    return onSnapshot(liveUpdatesQ, (snapshot) => {
+    // Storage-backed downloads are retried beyond the delivery that started
+    // them, so they must stop with the listener: on destroy, and when the
+    // provider unsubscribes it (e.g. at an epoch fence).
+    let stopped = false;
+    const isStopped = () => stopped || isDestroyed();
+
+    const unsubscribe = onSnapshot(liveUpdatesQ, (snapshot) => {
         if (onCompactionNeeded) {
             const now = Date.now();
 
@@ -648,10 +662,9 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 if (plan.kind === 'download') {
                     (async () => {
                         try {
-                            const storageRef = ref(ctx.storage, data.updateStoragePath);
-                            const buffer = await getBytes(storageRef);
-                            // Provider may have been destroyed while downloading
-                            if (isDestroyed()) return;
+                            const buffer = await downloadUpdateWithRetry(ctx.storage, data.updateStoragePath, isStopped);
+                            // Listener may have stopped (or the provider been destroyed) while downloading
+                            if (buffer === null || isStopped()) return;
                             const update = new Uint8Array(buffer);
                             Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                             // Incremental update of cached state vector (P3.0 Optimization)
@@ -707,6 +720,11 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
             onListenerError(error);
         }
     });
+
+    return () => {
+        stopped = true;
+        unsubscribe();
+    };
 }
 
 /**
@@ -953,3 +971,35 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
 
 // --- Helper Functions ---
 
+/**
+ * Downloads a storage-backed update for the update listener, retrying
+ * failures that may be transient.
+ *
+ * The update document is never delivered again, so giving up on a network
+ * error would drop the update for the rest of the session. Failures are
+ * retried for as long as the listener runs, with a backoff that stops
+ * growing after DEFAULTS.MAX_RETRIES attempts; a permanent failure is
+ * rethrown so the caller quarantines the document.
+ *
+ * @param storage - Firebase Storage instance
+ * @param storagePath - The update's blob path
+ * @param isStopped - Whether the listener has stopped
+ * @returns The blob, or null when the listener stopped first
+ */
+async function downloadUpdateWithRetry(
+    storage: FirebaseStorage,
+    storagePath: string,
+    isStopped: () => boolean
+): Promise<ArrayBuffer | null> {
+    for (let attempt = 1; !isStopped(); attempt++) {
+        try {
+            return await getBytes(ref(storage, storagePath));
+        } catch (e) {
+            if (isPermanentDownloadError(e)) throw e;
+            const backoff = calculateBackoff(Math.min(attempt, DEFAULTS.MAX_RETRIES));
+            console.warn(`Failed to download storage-backed update ${storagePath} (attempt ${attempt}). Retrying in ${Math.floor(backoff)}ms...`, e);
+            await wait(backoff);
+        }
+    }
+    return null;
+}

@@ -277,7 +277,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                             try {
                                 const storageRef = ref(ctx.storage, data.updateStoragePath);
                                 const buffer = await getBytes(storageRef);
-                                data.update = Bytes.fromUint8Array(new Uint8Array(buffer));
+                                data.update = new Uint8Array(buffer);
                             } catch (storageErr) {
                                 console.error(`Failed to download storage-backed update: ${data.updateStoragePath}`, storageErr);
                                 // Skipping would still report success and move the listener
@@ -410,7 +410,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         const buffer = await getBytes(ref(ctx.storage, data.deleteSetStoragePath));
                         pendingUpdates.push({
                             type: 'update',
-                            data: { update: Bytes.fromUint8Array(new Uint8Array(buffer)), epoch: serverEpoch },
+                            data: { update: new Uint8Array(buffer), epoch: serverEpoch },
                             priority: 2,
                         });
                     } catch (dsErr) {
@@ -429,8 +429,10 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         try {
                             const storageRef = ref(ctx.storage, data.snapshotStoragePath);
                             const buffer = await getBytes(storageRef);
-                            // Convert ArrayBuffer to Uint8Array and inject it into data.content
-                            data.content = Bytes.fromUint8Array(new Uint8Array(buffer));
+                            // Inject the bytes into data.content as a Uint8Array, not
+                            // Bytes: the readers take either (blobOf), and wrapping
+                            // an O(document) blob costs a string concat per byte.
+                            data.content = new Uint8Array(buffer);
                             pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
                         } catch (storageErr) {
                             console.error("Failed to download snapshot from Cloud Storage", storageErr);

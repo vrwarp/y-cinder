@@ -433,6 +433,44 @@ extraction now uses `Y.parseUpdateMeta(update).to`, which reports the true
 per-client clock ranges with the same lazy walker. Pinned by regression
 tests in `tests/unit/clock-ends.test.ts` and `tests/unit/merge-core.test.ts`.
 
+## Fix 5: cold starts no longer round-trip the snapshot through `Bytes`
+
+`performInitialSync` wrapped every blob it downloaded from Cloud Storage
+(the snapshot, storage-backed updates, an offloaded fingerprint) in
+Firestore `Bytes` just so it could sit in the field an inline blob uses.
+In @firebase/firestore 4.x, `Bytes.fromUint8Array` builds a binary
+string with one `String.fromCharCode` concatenation per byte, in the
+browser and node builds alike. Every reader then copied the blob back
+out with `toUint8Array()`: the snapshot twice (apply, push guard), each
+inline update or segment three times (coverage, apply, push guard), and
+a fingerprint four times. Downloads now stay the Uint8Array they arrive
+as, which is what the snapshot listener already did. Every initial-sync
+reader goes through `blobOf`, which copies an inline `Bytes` out once
+and shares that copy.
+
+Measured with `benchmarks/initial-sync-bytes.bench.ts`: a fresh client
+runs the real `performInitialSync` against aged versicle snapshots, with
+the SDK stubbed at its boundary (node, medians of 7 interleaved runs):
+
+| snapshot | before | after | inherent apply |
+| --- | ---: | ---: | ---: |
+| 1.06 MB (4.3k events) | 247 ms | 120 ms | ~100 ms |
+| 3.31 MB (14.4k events) | 843 ms | 385 ms | ~315 ms |
+
+Bytes converted per byte fetched dropped from 3.01 to 0.02, because only
+the inline blobs are converted, once each. Node overstates the cost: its
+rope is ~31x the blob. In headless Chrome on the same snapshots, the
+round trip added 55-75% on top of the inherent apply: +63 ms at 1.06 MB,
++213 ms at 3.31 MB, and ~0.6 s at 3.31 MB under 4x CPU throttling. It
+also built a transient rope of ~19x the blob, about 63 MB at 3.31 MB.
+The wrap cost steps up sharply above ~1.5 MB. All of it was main-thread
+time and heap on every cold start that downloads the snapshot: a fresh
+install, cleared storage, a rebuild after a squash, or a device whose
+last sync predates a fold of another device's edits. On a real network
+the download itself still dominates time-to-synced. Pinned by
+`tests/unit/initial-sync-bytes.test.ts`: zero wraps, and at most one
+conversion of each inline blob.
+
 ## The remaining floor: epoch squash
 
 Everything above bounds the *per-cycle* costs, but the floor itself —

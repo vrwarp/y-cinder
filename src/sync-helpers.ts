@@ -16,11 +16,46 @@ import { extractClockEnds, isUpdateRedundant } from "./update-metadata";
 
 /**
  * A server item fetched during sync, before it is applied to the local doc.
+ *
+ * Its blob (`content`, `segment` or `update`) is Firestore `Bytes` when it
+ * came inline with the document, or the Uint8Array downloaded from Cloud
+ * Storage; read it with {@link blobOf}.
  */
 export interface PendingUpdate {
     type: 'snapshot' | 'history' | 'update';
     data: any;
     priority: number;
+}
+
+/**
+ * Inline blobs already copied out of their Firestore `Bytes`, keyed by the
+ * `Bytes` value.
+ */
+const inlineBlobs = new WeakMap<Bytes, Uint8Array>();
+
+/**
+ * Returns a blob field of fetched document data as a Uint8Array.
+ *
+ * Blobs initial sync downloads from Cloud Storage stay the Uint8Array they
+ * arrive as: wrapping one in `Bytes` costs the SDK a string concatenation
+ * per byte (a transient rope ~20-30x the blob size), plus a full copy back
+ * out for every reader. Inline `Bytes` are copied out once, and coverage,
+ * apply, metadata and the push guard share that copy. The document data
+ * itself is left untouched.
+ *
+ * @param raw - Inline Firestore `Bytes` or a downloaded Uint8Array
+ * @returns The blob's bytes
+ */
+export function blobOf(raw: Bytes | Uint8Array): Uint8Array {
+    if (raw instanceof Uint8Array) {
+        return raw;
+    }
+    let blob = inlineBlobs.get(raw);
+    if (blob === undefined) {
+        blob = raw.toUint8Array();
+        inlineBlobs.set(raw, blob);
+    }
+    return blob;
 }
 
 /**
@@ -41,7 +76,7 @@ export function collectServerBlobs(items: PendingUpdate[]): Uint8Array[] {
             : item.type === 'history' ? item.data.segment
                 : item.data.update;
         if (raw) {
-            blobs.push((raw as Bytes).toUint8Array());
+            blobs.push(blobOf(raw));
         }
     }
     return blobs;
@@ -109,7 +144,7 @@ export function processUpdateMetadata(data: any, serverSVMap: Map<number, number
         // Lazy clock extraction — avoids materializing the struct tree of
         // potentially large update blobs (extractClockEnds handles parse
         // errors internally by returning an empty map).
-        const clockEnds = extractClockEnds((data.update as Bytes).toUint8Array());
+        const clockEnds = extractClockEnds(blobOf(data.update));
         for (const [clientID, clock] of clockEnds) {
             const current = serverSVMap.get(clientID) || 0;
             if (clock > current) {
@@ -138,7 +173,7 @@ export function processHistoryMetadata(data: any, serverSVMap: Map<number, numbe
     } else if (data.segment) {
         // Lazy clock extraction for history segments, which are large by
         // construction (merged batches of updates).
-        const clockEnds = extractClockEnds((data.segment as Bytes).toUint8Array());
+        const clockEnds = extractClockEnds(blobOf(data.segment));
         for (const [clientID, clock] of clockEnds) {
             const current = serverSVMap.get(clientID) || 0;
             if (clock > current) {
@@ -201,7 +236,7 @@ export function buildServerCoverage(snapshotSVMap: Map<number, number>, items: P
         if (!raw) continue;
         let meta: { from: Map<number, number>; to: Map<number, number> };
         try {
-            meta = Y.parseUpdateMeta((raw as Bytes).toUint8Array());
+            meta = Y.parseUpdateMeta(blobOf(raw));
         } catch (e) {
             // A corrupted blob proves no coverage; worst case we push a
             // redundant (idempotent) diff.
@@ -353,13 +388,13 @@ export function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, num
 export function applyItem(item: PendingUpdate, ydoc: Y.Doc): boolean {
     try {
         if (item.type === 'snapshot' && item.data.content) {
-            Y.applyUpdate(ydoc, (item.data.content as Bytes).toUint8Array(), FIREBASE_ORIGINS.SNAPSHOT);
+            Y.applyUpdate(ydoc, blobOf(item.data.content), FIREBASE_ORIGINS.SNAPSHOT);
             return true;
         } else if (item.type === 'history' && item.data.segment) {
-            Y.applyUpdate(ydoc, (item.data.segment as Bytes).toUint8Array(), FIREBASE_ORIGINS.HISTORY);
+            Y.applyUpdate(ydoc, blobOf(item.data.segment), FIREBASE_ORIGINS.HISTORY);
             return true;
         } else if (item.type === 'update' && item.data.update) {
-            Y.applyUpdate(ydoc, (item.data.update as Bytes).toUint8Array(), FIREBASE_ORIGINS.UPDATE);
+            Y.applyUpdate(ydoc, blobOf(item.data.update), FIREBASE_ORIGINS.UPDATE);
             return true;
         }
     } catch (e) {

@@ -437,6 +437,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 }
             }
         }
+        // The Storage downloads above can take seconds: a provider destroyed
+        // meanwhile must not apply anything nor push its local diff.
+        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
         // The server epoch is final for this sync: adopt it before the
         // push below computes its diff (see SyncContext.onEpochAdopted).

@@ -202,9 +202,10 @@ export interface SquashResult {
     epoch?: number;
     /**
      * Why the squash was skipped (no error): another client holds the
-     * lock, too much unfolded data, or the local doc is behind the server.
+     * lock, too much unfolded data, the local doc is behind the server,
+     * or the local doc changed while the squash was uploading/committing.
      */
-    skippedReason?: 'lock-unavailable' | 'not-quiescent' | 'local-behind';
+    skippedReason?: 'lock-unavailable' | 'not-quiescent' | 'local-behind' | 'local-changed';
     error?: Error;
 }
 
@@ -223,7 +224,9 @@ export interface SquashResult {
  * The new snapshot is uploaded to Cloud Storage; the transaction bumps
  * `epoch` and `version`, resets the delete-set fingerprint (a squashed
  * document has no deletions), and deletes the old-epoch update/history
- * documents it verified.
+ * documents it verified. It commits nothing when the live doc changed
+ * after it was cloned (skippedReason 'local-changed'): the snapshot would
+ * lack that change, and the squashing client stops syncing on success.
  */
 export async function squashDocument(ctx: SquashContext): Promise<SquashResult> {
     const { db, path, uid, lockTTL, cachedClockOffset, storage, isDestroyed, doc: ydoc } = ctx;
@@ -232,6 +235,11 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
     if (!hasLock) {
         return { success: false, skippedReason: 'lock-unavailable' };
     }
+
+    // Set by any change to the live doc after the clone below (e.g. the
+    // user editing while the snapshot uploads).
+    let changedSinceClone = false;
+    const onLiveUpdate = () => { changedSinceClone = true; };
 
     try {
         // Snapshot of what exists server-side right now
@@ -294,6 +302,7 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         // Build the new-epoch document
         const newEpoch = currentEpoch + 1;
         const squashed = buildSquashedDoc(ydoc, newEpoch);
+        ydoc.on('update', onLiveUpdate);
         let candidate: Uint8Array;
         let stateVectorB64: string;
         let dsUpdate: Uint8Array;
@@ -327,6 +336,13 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
                 Promise.all(updatesSnap.docs.map(d => transaction.get(d.ref))),
                 Promise.all(historySnap.docs.map(d => transaction.get(d.ref))),
             ]);
+
+            // Checked last, right before the writes: a change the clone
+            // lacks would be silently dropped from the new epoch. Commit
+            // nothing and let the provider keep syncing it in this epoch.
+            if (changedSinceClone) {
+                return { success: false as const, skippedReason: 'local-changed' as const };
+            }
 
             transaction.set(mainRef, {
                 snapshotStoragePath: storagePath,
@@ -364,6 +380,7 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
     } catch (e: any) {
         return { success: false, error: e instanceof Error ? e : new Error(String(e)) };
     } finally {
+        ydoc.off('update', onLiveUpdate);
         await releaseLock({ db, path, uid });
     }
 }

@@ -392,8 +392,8 @@ export class FireProvider extends ObservableV2<any> {
    * one transaction — a normal compaction is run first to fold it.
    *
    * @returns The squash outcome; `skippedReason` distinguishes benign
-   *          skips (lock contention, backlog, stale local doc) from
-   *          errors.
+   *          skips (lock contention, backlog, stale local doc, local
+   *          edits during the squash) from errors.
    */
   async squash(): Promise<SquashResult> {
     const blocked = squashBlockedBy({
@@ -444,9 +444,20 @@ export class FireProvider extends ObservableV2<any> {
       // integrate, and incoming new-epoch updates cannot apply onto the
       // old doc. The application rebuilds the doc from the new snapshot
       // (e.g. versicle's staged swap + reload) and recreates providers.
+      // A local edit that raced the commit itself is in the live doc but
+      // not in the new epoch (and is never saved now), so the full local
+      // state is surfaced exactly as 'epoch-changed' does.
       this._epoch = result.epoch;
       this._stopSyncing();
-      this.emit('squashed', [{ epoch: result.epoch }]);
+
+      let localState: Uint8Array | null = null;
+      try {
+        localState = Y.encodeStateAsUpdate(this.doc);
+      } catch (e) {
+        console.error('Failed to encode local state for squashed event', e);
+      }
+
+      this.emit('squashed', [{ epoch: result.epoch, localState }]);
     }
     return result;
   }
@@ -837,9 +848,9 @@ export class FireProvider extends ObservableV2<any> {
   private saveToFirestore(): Promise<void> {
     if (this._inflightSave) return this._inflightSave;
     if (this._pendingUpdates.length === 0) return Promise.resolve();
-    // Epoch fence: after a squash elsewhere, old-epoch updates would be
-    // ignored by every other client anyway. The buffered updates stay in
-    // memory and are surfaced through the 'epoch-changed' event payload.
+    // Epoch fence: after a squash, old-epoch updates would be ignored by
+    // every other client anyway. The buffered updates stay in memory and
+    // are surfaced through the 'epoch-changed' / 'squashed' payload.
     if (this._epochFenced) return Promise.resolve();
 
     this._inflightSave = this._executeSave().finally(() => {

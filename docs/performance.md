@@ -459,7 +459,10 @@ the history break explicit and safe:
   local doc from the new snapshot (versicle: the staged-swap + reload
   machinery) and decides whether any old-epoch local-only changes need
   semantic re-application. The squashing client fences itself the same
-  way (`squashed` event) — its live doc still has the old structure.
+  way (`squashed` event, also carrying its local state) — its live doc
+  still has the old structure. A squash whose live doc changes after the
+  clone commits nothing (`skippedReason: 'local-changed'`), so the new
+  snapshot never silently lacks the squasher's own edits.
 
 Squash trades CRDT concurrency across the boundary for the floor reset:
 edits made concurrently with the squash surface through events instead of

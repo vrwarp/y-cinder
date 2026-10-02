@@ -123,7 +123,7 @@ The `FireProvider` constructor accepts the following configuration options:
 - **`provider.compact()`**:
   Manually triggers the compaction process. Usually handled automatically.
 - **`provider.squash()`**:
-  Rebuilds the document into a brand-new **epoch**: content is cloned into a fresh Yjs id space, resetting the three things garbage-collected compaction cannot reclaim — tombstone structure, the delete-set, and the state vector (one entry per client that ever wrote). This is the floor reset for documents used for years; see [docs/performance.md](docs/performance.md) for the model, the safety fences, and the application contract (`epoch-changed` handling is required before any client calls this).
+  Rebuilds the document into a brand-new **epoch**: content is cloned into a fresh Yjs id space, resetting the three things garbage-collected compaction cannot reclaim — tombstone structure, the delete-set, and the state vector (one entry per client that ever wrote). This is the floor reset for documents used for years; see [docs/performance.md](docs/performance.md) for the model, the safety fences, and the application contract (`epoch-changed` handling is required before any client calls this). If the local document changes while the squash is uploading or committing, nothing is committed and the result's `skippedReason` is `'local-changed'`; retry once the document is idle.
 - **`provider.epoch`** (property):
   The epoch this provider is syncing (`0` for documents never squashed).
 - **`provider.synced`** (property):
@@ -141,7 +141,7 @@ The provider extends `ObservableV2` and emits the following events:
 | `sync-failure` | `Error` | Emitted when initial sync fails after all retry attempts. |
 | `corrupted-document` | `{ docId: string, error: Error }` | Emitted when a corrupted Firestore document is quarantined. |
 | `save-rejected` | See below | Emitted when a local update **cannot** be persisted to Firestore. The update is not dropped: it stays queued ahead of newer edits and is retried with the next save (or the `destroy()` flush). |
-| `squashed` | `{ epoch: number }` | Emitted on the client that successfully ran `squash()`. The provider has stopped syncing; rebuild the local document from the new epoch's snapshot and recreate providers. |
+| `squashed` | `{ epoch: number, localState: Uint8Array \| null }` | Emitted on the client that successfully ran `squash()`. The provider has stopped syncing; rebuild the local document from the new epoch's snapshot and recreate providers. `localState` is the full old-epoch local state, as for `epoch-changed`: the new snapshot holds all of it except a local edit that raced the commit itself, which the application can re-apply. |
 | `epoch-changed` | `{ previousEpoch: number, epoch: number, localState: Uint8Array \| null }` | Emitted when the server was squashed past this client's epoch. The provider has stopped syncing (nothing was applied — applying would duplicate content). `localState` is the full old-epoch local state for the application to inspect/merge; rebuild the local doc from the new snapshot and recreate providers. |
 
 **`save-rejected` payload:**

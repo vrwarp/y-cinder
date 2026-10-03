@@ -491,7 +491,10 @@ export class FireProvider extends ObservableV2<any> {
       // FIX: Resume history listener — unless the provider was epoch-fenced
       // meanwhile (see _stopSyncing): a resumed listener would keep reading
       // and, on the squasher, apply new-epoch segments onto the old doc.
-      if (!this._isDestroyed && !this._epochFenced && !this._unsubscribeHistory) {
+      // Nor while unsynced: sync() attaches every listener once it
+      // succeeds, and after 'sync-failure' none runs again, so nothing
+      // would ever replace or detach a lone history listener.
+      if (!this._isDestroyed && !this._epochFenced && this._synced && !this._unsubscribeHistory) {
         // Use SyncContext to recreate listener
         // We need to re-construct SyncContext or store it.
         // Re-constructing is cheap.

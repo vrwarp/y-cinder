@@ -43,6 +43,14 @@ export interface MainDocState {
      * by an older client is still a blob to garbage-collect.
      */
     baseFoldTailStoragePath: string | null;
+    /**
+     * Blobs a fold or squash recorded in `snapshotBlobPaths` that
+     * snapshotStoragePath and deleteSetStoragePath no longer reference. An
+     * older client's fold overwrites those two and garbage-collects by
+     * names rebuilt from the version, which attempt-unique names never
+     * match, but leaves the record alone: still blobs to garbage-collect.
+     */
+    orphanedBlobPaths: string[];
     /** The base snapshot's base64 state vector, when the document has one. */
     baseStateVector: string | null;
     /** Legacy inline snapshot content, when the base is still inline. */
@@ -69,6 +77,7 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
         baseStoragePath: null,
         baseDeleteSetStoragePath: null,
         baseFoldTailStoragePath: null,
+        orphanedBlobPaths: [],
         baseStateVector: null,
         baseInline: null,
         currentVersion: 0,
@@ -91,6 +100,10 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
     }
     if (typeof data.foldTailStoragePath === 'string') {
         state.baseFoldTailStoragePath = data.foldTailStoragePath;
+    }
+    if (Array.isArray(data.snapshotBlobPaths)) {
+        state.orphanedBlobPaths = data.snapshotBlobPaths.filter((p: unknown): p is string =>
+            typeof p === 'string' && p !== state.baseStoragePath && p !== state.baseDeleteSetStoragePath);
     }
     if (typeof data.stateVector === 'string') {
         state.baseStateVector = data.stateVector;
@@ -536,17 +549,19 @@ export function buildSnapshotResult(params: {
  *
  * The previous fold's tail goes too: the committed fold replaced (or
  * cleared) the pointer to it, and a tail only ever describes the snapshot
- * it was published with.
+ * it was published with. So do the blobs an older client's fold orphaned
+ * (see MainDocState.orphanedBlobPaths): the committed fold replaces the
+ * record of them.
  *
  * @param previous - The main document state read before the fold.
  * @param written - The Storage paths the fold committed.
  * @returns The paths to delete.
  */
 export function blobsReplacedByFold(
-    previous: Pick<MainDocState, 'baseStoragePath' | 'baseDeleteSetStoragePath' | 'baseFoldTailStoragePath'>,
+    previous: Pick<MainDocState, 'baseStoragePath' | 'baseDeleteSetStoragePath' | 'baseFoldTailStoragePath' | 'orphanedBlobPaths'>,
     written: (string | null)[],
 ): string[] {
-    return [previous.baseStoragePath, previous.baseDeleteSetStoragePath, previous.baseFoldTailStoragePath]
+    return [previous.baseStoragePath, previous.baseDeleteSetStoragePath, previous.baseFoldTailStoragePath, ...previous.orphanedBlobPaths]
         .filter((p): p is string => p !== null && !written.includes(p));
 }
 

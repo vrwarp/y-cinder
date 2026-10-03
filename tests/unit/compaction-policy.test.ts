@@ -69,6 +69,7 @@ describe('readMainDocState', () => {
             baseStoragePath: null,
             baseDeleteSetStoragePath: null,
             baseFoldTailStoragePath: null,
+            orphanedBlobPaths: [],
             baseStateVector: null,
             baseInline: null,
             currentVersion: 0,
@@ -158,6 +159,42 @@ describe('readMainDocState', () => {
 
         expect(state.baseFoldTailStoragePath).toBe('gs://tail');
         expect(readMainDocState({ snapshotStoragePath: 'gs://snap' }).baseFoldTailStoragePath).toBeNull();
+    });
+
+    /*
+     * An older client's fold overwrites the path fields and deletes
+     * snapshot_v{V}.bin / ds_v{V}.bin, never the attempt-unique blobs it
+     * replaced; the record a current fold wrote is all that still names them.
+     */
+    it('reports the recorded blobs an older client\'s fold stopped referencing', () => {
+        const state = readMainDocState({
+            snapshotStoragePath: 'docs/a/snapshot_v2.bin',
+            deleteSetStoragePath: 'docs/a/ds_v2.bin',
+            snapshotBlobPaths: ['docs/a/snapshot_v1_k9.bin', 'docs/a/ds_v1_k9.bin'],
+        });
+
+        expect(state.orphanedBlobPaths).toEqual(['docs/a/snapshot_v1_k9.bin', 'docs/a/ds_v1_k9.bin']);
+    });
+
+    /* Deleting a referenced blob would destroy the live snapshot. */
+    it('reports no orphan for a recorded blob the path fields still reference', () => {
+        expect(readMainDocState({
+            snapshotStoragePath: 'docs/a/snapshot_v1_k9.bin',
+            deleteSetStoragePath: 'docs/a/ds_v1_k9.bin',
+            snapshotBlobPaths: ['docs/a/snapshot_v1_k9.bin', 'docs/a/ds_v1_k9.bin'],
+        }).orphanedBlobPaths).toEqual([]);
+        expect(readMainDocState({
+            snapshotStoragePath: 'docs/a/snapshot_v2.bin',
+            snapshotBlobPaths: ['docs/a/snapshot_v1_k9.bin'],
+        }).orphanedBlobPaths).toEqual(['docs/a/snapshot_v1_k9.bin']);
+    });
+
+    it('ignores a malformed blob record', () => {
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap' }).orphanedBlobPaths).toEqual([]);
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap', snapshotBlobPaths: 'gs://old' }).orphanedBlobPaths)
+            .toEqual([]);
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap', snapshotBlobPaths: [null, 7, 'gs://old'] }).orphanedBlobPaths)
+            .toEqual(['gs://old']);
     });
 });
 
@@ -839,14 +876,14 @@ describe('blobsReplacedByFold', () => {
      */
     it('returns the stored squash snapshot path, not a name rebuilt from the version', () => {
         expect(blobsReplacedByFold(
-            { baseStoragePath: 'docs/a/snapshot_e1_v3_k9.bin', baseDeleteSetStoragePath: null, baseFoldTailStoragePath: null },
+            { baseStoragePath: 'docs/a/snapshot_e1_v3_k9.bin', baseDeleteSetStoragePath: null, baseFoldTailStoragePath: null, orphanedBlobPaths: [] },
             written,
         )).toEqual(['docs/a/snapshot_e1_v3_k9.bin']);
     });
 
     it('returns the stored snapshot and offloaded delete-set paths', () => {
         expect(blobsReplacedByFold(
-            { baseStoragePath: 'docs/a/snapshot_v3.bin', baseDeleteSetStoragePath: 'docs/a/ds_v3.bin', baseFoldTailStoragePath: null },
+            { baseStoragePath: 'docs/a/snapshot_v3.bin', baseDeleteSetStoragePath: 'docs/a/ds_v3.bin', baseFoldTailStoragePath: null, orphanedBlobPaths: [] },
             ['docs/a/snapshot_v4.bin', 'docs/a/ds_v4.bin'],
         )).toEqual(['docs/a/snapshot_v3.bin', 'docs/a/ds_v3.bin']);
     });
@@ -854,20 +891,33 @@ describe('blobsReplacedByFold', () => {
     /* A tail describes only the snapshot it was published with. */
     it('returns the previous fold tail', () => {
         expect(blobsReplacedByFold(
-            { baseStoragePath: 'docs/a/snapshot_v3.bin', baseDeleteSetStoragePath: null, baseFoldTailStoragePath: 'docs/a/tail_v3.bin' },
+            { baseStoragePath: 'docs/a/snapshot_v3.bin', baseDeleteSetStoragePath: null, baseFoldTailStoragePath: 'docs/a/tail_v3.bin', orphanedBlobPaths: [] },
             ['docs/a/snapshot_v4.bin', null, 'docs/a/tail_v4.bin'],
         )).toEqual(['docs/a/snapshot_v3.bin', 'docs/a/tail_v3.bin']);
     });
 
     it('returns nothing when the replaced document had no Storage blobs', () => {
-        expect(blobsReplacedByFold({ baseStoragePath: null, baseDeleteSetStoragePath: null, baseFoldTailStoragePath: null }, written))
+        expect(blobsReplacedByFold({ baseStoragePath: null, baseDeleteSetStoragePath: null, baseFoldTailStoragePath: null, orphanedBlobPaths: [] }, written))
             .toEqual([]);
+    });
+
+    /* An older client's fold replaced them without deleting them. */
+    it('returns the blobs an older client\'s fold orphaned', () => {
+        expect(blobsReplacedByFold(
+            {
+                baseStoragePath: 'docs/a/snapshot_v3.bin',
+                baseDeleteSetStoragePath: 'docs/a/ds_v3.bin',
+                baseFoldTailStoragePath: null,
+                orphanedBlobPaths: ['docs/a/snapshot_v2_k9.bin', 'docs/a/ds_v2_k9.bin'],
+            },
+            ['docs/a/snapshot_v4_m1.bin', null],
+        )).toEqual(['docs/a/snapshot_v3.bin', 'docs/a/ds_v3.bin', 'docs/a/snapshot_v2_k9.bin', 'docs/a/ds_v2_k9.bin']);
     });
 
     /* Deleting a path the fold just committed would destroy the live snapshot. */
     it('never returns a path the fold itself wrote', () => {
         expect(blobsReplacedByFold(
-            { baseStoragePath: 'docs/a/snapshot_v4.bin', baseDeleteSetStoragePath: 'docs/a/ds_v4.bin', baseFoldTailStoragePath: 'docs/a/tail_v4.bin' },
+            { baseStoragePath: 'docs/a/snapshot_v4.bin', baseDeleteSetStoragePath: 'docs/a/ds_v4.bin', baseFoldTailStoragePath: 'docs/a/tail_v4.bin', orphanedBlobPaths: [] },
             ['docs/a/snapshot_v4.bin', 'docs/a/ds_v4.bin', 'docs/a/tail_v4.bin'],
         )).toEqual([]);
     });

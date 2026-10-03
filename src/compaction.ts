@@ -592,7 +592,8 @@ export async function compact(
         });
         await reclaimUpdateBlobs(ctx, blobsOf(updateBlobs, deletedRefs, updatesToProcess));
 
-        // Garbage Collect Old Storage Snapshot (and its delete-set and tail blobs).
+        // Garbage Collect Old Storage Snapshot (and its delete-set and tail blobs,
+        // plus any an older client's fold replaced without deleting them).
         // Delete the paths the replaced main document stored: blob names are
         // attempt-unique (and a squash snapshot is named
         // snapshot_e{E}_v{V}_{id}.bin), so they cannot be rebuilt from the
@@ -1029,6 +1030,10 @@ function compactToSnapshot(params: {
         // the spurious-push slow path).
         deleteSet: deleteSetUpdate ? Bytes.fromUint8Array(deleteSetUpdate) : deleteField(),
         deleteSetStoragePath: deleteSetStoragePath ?? deleteField(),
+        // The record of the blobs above, which an older client's fold
+        // leaves alone while it replaces them without deleting them (see
+        // MainDocState.orphanedBlobPaths).
+        snapshotBlobPaths: deleteSetStoragePath ? [storagePath, deleteSetStoragePath] : [storagePath],
         // The tail is bound to the version it was folded into: a writer
         // that predates tails bumps the version without touching these
         // fields, and readers must then ignore them. No tail clears them.

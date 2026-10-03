@@ -59,7 +59,7 @@ import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";
 import { generateSessionId } from "./utils";
-import { updateBlobPath } from "./compaction-policy";
+import { readMainDocState, updateBlobPath } from "./compaction-policy";
 import { reclaimUpdateBlobs, UpdateBlobReclaim } from "./compaction";
 import { uploadBlob } from "./storage-blobs";
 import {
@@ -402,6 +402,9 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
                 // A squashed document has no deletions yet
                 deleteSet: Bytes.fromUint8Array(dsUpdate),
                 deleteSetStoragePath: deleteField(),
+                // Recorded for the same reason as a fold's (see
+                // MainDocState.orphanedBlobPaths)
+                snapshotBlobPaths: [storagePath],
                 // A fold's tail belongs to the old epoch's id space
                 foldTailStoragePath: deleteField(),
                 foldTailBaseClocks: deleteField(),
@@ -450,6 +453,15 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
             try {
                 await deleteObject(ref(storage, mainData.foldTailStoragePath));
             } catch { /* orphaned blob is harmless */ }
+        }
+        // ...and those an older client's fold replaced without deleting
+        // them: this commit replaced the record of them
+        if (result.success) {
+            for (const blobPath of readMainDocState(mainData).orphanedBlobPaths) {
+                try {
+                    await deleteObject(ref(storage, blobPath));
+                } catch { /* orphaned blob is harmless */ }
+            }
         }
 
         return result;

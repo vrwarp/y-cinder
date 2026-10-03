@@ -101,11 +101,20 @@ export type SubProviderMap = Map<string, any>;
 const providerDocs = new WeakMap<object, Y.Doc>();
 
 /**
+ * Other instances of each provider's guid that asked for a provider while
+ * it was bound to an earlier instance: a subdoc moved by inserting the copy
+ * before deleting the original, or a second reference to the same guid.
+ * One of them takes the guid over when the bound instance is removed.
+ */
+const waitingDocs = new WeakMap<object, Set<Y.Doc>>();
+
+/**
  * Handles subdocument events (added, removed, loaded).
  * 
  * This function manages the lifecycle of subdocument providers:
  * - For added/loaded subdocs: Creates a new provider
- * - For removed subdocs: Destroys the provider bound to that instance
+ * - For removed subdocs: Destroys the provider bound to that instance and
+ *   hands its guid to another instance of it waiting for a provider
  * 
  * @param event - The subdocs event from Y.Doc
  * @param ctx - Subdocument context
@@ -147,6 +156,18 @@ export function handleSubdocs(
                 console.error(`Failed to destroy subdoc provider ${guid}:`, err);
             });
             subProviders.delete(guid);
+
+            // Hand the guid to an instance that waited for it, unless that
+            // instance is removed too or the parent is being destroyed
+            // (which destroys every subdoc in turn).
+            waitingDocs.get(provider)?.forEach(other => {
+                const parent = (other._item?.parent as Y.AbstractType<any> | undefined)?.doc;
+                if (!removed.has(other) && !parent?.isDestroyed) {
+                    startSubdocProvider(other, ctx, subProviders);
+                }
+            });
+        } else if (provider) {
+            waitingDocs.get(provider)?.delete(subdoc);
         }
     });
 
@@ -204,9 +225,15 @@ export function startSubdocProvider(
         return null;
     }
 
-    // Already have a provider for this subdoc
-    if (subProviders.has(guid)) {
-        return subProviders.get(guid);
+    // Already have a provider for this guid. If it is bound to another
+    // instance, this one waits and takes over once that instance is removed.
+    const existing = subProviders.get(guid);
+    if (existing) {
+        if (providerDocs.get(existing) !== subdoc) {
+            const waiting = waitingDocs.get(existing) ?? new Set<Y.Doc>();
+            waitingDocs.set(existing, waiting.add(subdoc));
+        }
+        return existing;
     }
 
     const subPath = `${ctx.parentPath}/subdocs/${guid}`;

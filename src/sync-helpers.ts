@@ -521,6 +521,8 @@ export function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, num
 
     if (item.type === 'update') {
         const data = item.data;
+        // Same for an update document's clocks (see update-metadata)
+        if (data.hasDeletions) return false;
         if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
             return isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks);
         }

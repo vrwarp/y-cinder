@@ -36,7 +36,7 @@ import {
   FIRESTORE_PATHS,
 } from "./types";
 import { generateSessionId, calculateBackoff } from "./utils";
-import { extractClockEnds, aggregateClockEnds } from "./update-metadata";
+import { extractClockEnds, aggregateClockEnds, updateEndsWithDeletions } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext, SyncResult } from "./sync";
 import { isClientOfflineError, isLostAckCommit, largeUpdatePath } from "./sync-policy";
 import { compact as performTieredCompaction, CompactionContext, CompactionResult } from "./compaction";
@@ -1288,6 +1288,10 @@ export class FireProvider extends ObservableV2<any> {
       // never-squashed documents keep their historical schema.
       ...(this._epoch > 0 ? { epoch: this._epoch } : {}),
       ...aggregateClockEnds(clockEnds),
+      // Readers may already hold every struct (from the initial-sync push,
+      // when this batch was taken while that push was unacknowledged); the
+      // flag keeps them from skipping its deletions as redundant.
+      ...(updateEndsWithDeletions(update) ? { hasDeletions: true } : {}),
     };
 
     try {

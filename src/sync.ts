@@ -61,7 +61,7 @@ import {
     DEFAULTS,
 } from "./types";
 import { writeStateVector, wait, calculateBackoff, generateSessionId } from "./utils";
-import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, deleteSetCoveredByBlobs, withoutServerDeletions } from "./update-metadata";
+import { extractClockEnds, aggregateClockEnds, updateEndsWithDeletions, isUpdateRedundant, deleteSetCoveredByBlobs, withoutServerDeletions } from "./update-metadata";
 import {
     PendingUpdate,
     collectServerBlobs,
@@ -658,6 +658,10 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             console.log("Pushing missing local updates to Firestore.");
             const clockEnds = extractClockEnds(localDiff);
             const epochTag = buildEpochTag(serverEpoch);
+            // Readers may already hold every struct (from a save that
+            // committed after the reads above); the flag keeps them from
+            // skipping its deletions as redundant.
+            const deletionTag = updateEndsWithDeletions(localDiff) ? { hasDeletions: true } : {};
 
             if (diffNeedsStorage(localDiff.byteLength, DEFAULTS.INLINE_UPDATE_LIMIT)) {
                 // Storage-backed update: upload binary to Cloud Storage
@@ -671,7 +675,8 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     createdAt: serverTimestamp(),
                     createdBy: uid,
                     ...epochTag,
-                    ...aggregateClockEnds(clockEnds)
+                    ...aggregateClockEnds(clockEnds),
+                    ...deletionTag
                 };
                 try {
                     await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
@@ -700,7 +705,8 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     createdAt: serverTimestamp(),
                     createdBy: uid,
                     ...epochTag,
-                    ...aggregateClockEnds(clockEnds)
+                    ...aggregateClockEnds(clockEnds),
+                    ...deletionTag
                 };
                 await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
             }
@@ -894,7 +900,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 for (const { docId, data } of inlineBatch) {
                     // Re-check redundancy as the state vector evolves within
                     // the batch (preserves the sequential semantics)
-                    if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0 &&
+                    if (!data.hasDeletions && data.clientIDs?.length > 0 && data.clientClocks?.length > 0 &&
                         isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks)) {
                         continue;
                     }

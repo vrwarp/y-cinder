@@ -834,6 +834,18 @@ describe('isItemRedundant', () => {
         )).toBe(false);
     });
 
+    /*
+     * Update clocks span structs only, like a segment's state vector. A
+     * save holding structs the initial-sync push already delivered plus a
+     * later deletion must still be applied, or the deletion is lost.
+     */
+    it('is false for a covered update flagged as carrying deletions', () => {
+        expect(isItemRedundant(
+            { type: 'update', priority: 3, data: { clientIDs: [1], clientClocks: [5], hasDeletions: true } },
+            local,
+        )).toBe(false);
+    });
+
     it('is false for an update with no stored clock metadata', () => {
         // Without metadata there is nothing to compare, so it must be
         // fetched and applied rather than assumed known.

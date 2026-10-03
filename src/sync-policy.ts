@@ -20,7 +20,7 @@ export type IncomingUpdatePlan =
     | { kind: 'drop-foreign-epoch' }
     /** This client wrote it; the local doc already has it. */
     | { kind: 'skip-own' }
-    /** Already covered by the local state vector. */
+    /** Already covered by the local state vector, and not flagged hasDeletions. */
     | { kind: 'skip-redundant' }
     /** Previously failed to apply; quarantined to avoid a retry loop. */
     | { kind: 'skip-quarantined' }
@@ -62,7 +62,8 @@ export function planIncomingUpdate(
     if (data?.createdBy === uid) {
         return { kind: 'skip-own' };
     }
-    if (data?.clientIDs?.length > 0 && data?.clientClocks?.length > 0
+    // Clocks cannot prove deletions are known (see update-metadata)
+    if (!data?.hasDeletions && data?.clientIDs?.length > 0 && data?.clientClocks?.length > 0
         && isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks)) {
         return { kind: 'skip-redundant' };
     }

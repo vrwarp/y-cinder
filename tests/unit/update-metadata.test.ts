@@ -6,6 +6,7 @@
  * - aggregateMetadata: Combines metadata for Firestore storage
  * - isUpdateRedundant: Determines if an update is already applied locally
  * - updateHasDeletions: Detects deletions, which clock metadata cannot show
+ * - updateEndsWithDeletions: The same answer from an update's last byte
  * - deleteSetContains: Exact delete-set range containment
  *
  * These functions enable efficient sync by comparing clocks instead of content.
@@ -19,6 +20,7 @@ import {
     aggregateMetadata,
     isUpdateRedundant,
     updateHasDeletions,
+    updateEndsWithDeletions,
     deleteSetContains
 } from '../../src/update-metadata';
 import * as Y from 'yjs';
@@ -285,6 +287,56 @@ describe('update-metadata', () => {
             expect(updateHasDeletions(new Uint8Array([0xff, 0xff, 0xff]))).toBe(true);
             expect(warn).toHaveBeenCalled();
             warn.mockRestore();
+        });
+    });
+
+    /*
+     * The save and push paths flag update documents from the last byte
+     * alone; it must agree with a full decode on every update shape they
+     * write: transaction updates, merged batches and state diffs.
+     */
+    describe('updateEndsWithDeletions', () => {
+        const updatesOf = () => {
+            const doc = new Y.Doc();
+            doc.clientID = 7;
+            const peer = new Y.Doc();
+            peer.clientID = 2 ** 31 + 5;
+            const events: Uint8Array[] = [];
+            doc.on('update', (u: Uint8Array) => events.push(u));
+            const text = doc.getText('t');
+            const map = doc.getMap('m');
+            text.insert(0, 'x'.repeat(400));
+            map.set('k', 1);
+            Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+            const beforeEdits = Y.encodeStateVector(doc);
+            map.set('k', 2); // an overwrite deletes the old value
+            text.delete(10, 300); // a range length past one varUint byte
+            text.insert(0, 'y');
+            map.delete('k');
+            peer.getText('t').delete(0, 1);
+            Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer, Y.encodeStateVector(doc)));
+            text.insert(0, 'z');
+            const updates = [
+                ...events,
+                Y.mergeUpdates(events),
+                Y.mergeUpdates(events.slice(0, 2)),
+                Y.encodeStateAsUpdate(doc),
+                Y.encodeStateAsUpdate(doc, beforeEdits),
+                Y.encodeStateAsUpdate(doc, Y.encodeStateVector(doc)),
+                Y.encodeStateAsUpdate(new Y.Doc()),
+            ];
+            doc.destroy();
+            peer.destroy();
+            return updates;
+        };
+
+        it('should agree with updateHasDeletions on every update', () => {
+            const updates = updatesOf();
+            const decoded = updates.map(updateHasDeletions);
+
+            expect(decoded).toContain(true);
+            expect(decoded).toContain(false);
+            expect(updates.map(updateEndsWithDeletions)).toEqual(decoded);
         });
     });
 

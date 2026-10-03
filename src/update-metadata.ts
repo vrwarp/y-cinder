@@ -21,8 +21,13 @@
  * {
  *   clientIDs: number[],    // All client IDs in the update
  *   clientClocks: number[], // Per-client clockEnd values (paired with clientIDs)
+ *   hasDeletions?: true,    // The update deletes something (omitted when not)
  * }
  * ```
+ *
+ * Clocks only cover structs, so they can never prove a reader already
+ * holds an update's deletions: a document flagged `hasDeletions` is
+ * applied even when its clocks are covered (applying is idempotent).
  *
  * @module update-metadata
  */
@@ -161,6 +166,23 @@ export function updateHasDeletions(update: Uint8Array): boolean {
         console.warn("Failed to read update delete-set:", e);
         return true;
     }
+}
+
+/**
+ * Whether a V1 update carries any deletions, read from its last byte.
+ *
+ * The delete-set trails a V1 update (see encodeDeleteSet). An empty one is
+ * the single byte 0 (no clients); a non-empty one ends with its last
+ * range's length, a varUint of at least 1 whose final byte is never 0
+ * (Yjs writes no client without ranges and no empty range). Unlike
+ * `updateHasDeletions` it costs nothing on a large blob, so the save and
+ * push paths can flag every update document they write.
+ *
+ * @param update - A V1 update as Yjs encodes it
+ * @returns true when the delete-set is non-empty
+ */
+export function updateEndsWithDeletions(update: Uint8Array): boolean {
+    return update.byteLength > 0 && update[update.byteLength - 1] !== 0;
 }
 
 /**

@@ -84,6 +84,16 @@ describe('planIncomingUpdate', () => {
         expect(plan).toEqual({ kind: 'skip-redundant' });
     });
 
+    it('applies a covered update flagged as carrying deletions', () => {
+        // Clocks span structs only: they cannot show the deletions are known
+        const plan = planIncomingUpdate(
+            { createdBy: 'other', clientIDs: [1], clientClocks: [5], hasDeletions: true, update: 'b' },
+            ctx({ localSVMap: new Map([[1, 10]]) }),
+        );
+
+        expect(plan).toEqual({ kind: 'apply-inline' });
+    });
+
     it('applies an update carrying a clock beyond the local one', () => {
         const plan = planIncomingUpdate(
             { createdBy: 'other', clientIDs: [1], clientClocks: [50], update: 'b' },

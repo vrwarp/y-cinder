@@ -13,6 +13,8 @@ import * as Y from 'yjs';
 import { gunzipSync } from 'node:zlib';
 
 const uploads = vi.hoisted(() => [] as Array<{ path: string; bytes: Uint8Array; metadata?: Record<string, unknown> }>);
+/** What getMetadata answers: the error it rejects with, or null for an existing object. */
+const metadataError = vi.hoisted(() => ({ current: null as unknown }));
 
 vi.mock('@firebase/storage', () => ({
     ref: (_storage: unknown, path: string) => ({ fullPath: path }),
@@ -20,9 +22,13 @@ vi.mock('@firebase/storage', () => ({
         uploads.push({ path: r.fullPath, bytes: bytes.slice(), metadata });
         return {};
     },
+    getMetadata: async (r: { fullPath: string }) => {
+        if (metadataError.current !== null) throw metadataError.current;
+        return { fullPath: r.fullPath };
+    },
 }));
 
-import { uploadBlob } from '../../src/storage-blobs';
+import { uploadBlob, restoreMissingBlob } from '../../src/storage-blobs';
 import { gzipBlob } from '../../src/gzip';
 
 /** A map-heavy snapshot: repeated keys and client ids, like versicle's stores. */
@@ -103,5 +109,47 @@ describe('uploadBlob', () => {
         expect(uploads).toHaveLength(1);
         expect(uploads[0].metadata).toBeUndefined();
         expect(uploads[0].bytes).toEqual(raw);
+    });
+});
+
+/**
+ * A writer whose pointer write was re-sent after a lost ack puts its blob
+ * back when a compaction reclaimed it in between; the emulator round trip
+ * is covered by tests/integration/lost_ack_large_update_pointer.test.ts.
+ */
+describe('restoreMissingBlob', () => {
+    beforeEach(() => {
+        uploads.length = 0;
+        metadataError.current = null;
+        vi.spyOn(console, 'debug').mockImplementation(() => { });
+        vi.spyOn(console, 'warn').mockImplementation(() => { });
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it('leaves a blob that still exists alone', async () => {
+        await restoreMissingBlob({} as any, 'docs/a/large_updates/u.bin', mapHeavySnapshot());
+
+        expect(uploads).toHaveLength(0);
+    });
+
+    it('uploads a reclaimed blob again under the same path', async () => {
+        metadataError.current = Object.assign(new Error('not found'), { code: 'storage/object-not-found' });
+        const raw = mapHeavySnapshot();
+        await restoreMissingBlob({} as any, 'docs/a/large_updates/u.bin', raw);
+
+        expect(uploads).toHaveLength(1);
+        expect(uploads[0].path).toBe('docs/a/large_updates/u.bin');
+        expect(new Uint8Array(gunzipSync(uploads[0].bytes))).toEqual(raw);
+    });
+
+    it('rethrows when the check itself fails, without uploading', async () => {
+        const err = Object.assign(new Error('retry limit'), { code: 'storage/retry-limit-exceeded' });
+        metadataError.current = err;
+
+        await expect(restoreMissingBlob({} as any, 'docs/a/large_updates/u.bin', mapHeavySnapshot())).rejects.toBe(err);
+        expect(uploads).toHaveLength(0);
     });
 });

@@ -423,7 +423,9 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         });
 
         // Nothing references a deleted pointer's blob any more (see
-        // updateBlobPath)
+        // updateBlobPath). A re-sent pointer write may re-create one, but
+        // tagged with the old epoch: listeners drop it, initial sync skips
+        // a missing blob, and compaction deletes it unread.
         if (result.success) {
             await Promise.all(deletedBlobs.map(async (blobPath) => {
                 try {

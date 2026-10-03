@@ -14,6 +14,7 @@ import {
     epochTag,
     hasMorePages,
     isClientOfflineError,
+    isLostAckCommit,
     isPermanentDownloadError,
     isServedFromCache,
     largeUpdatePath,
@@ -141,6 +142,27 @@ describe('isPermanentDownloadError', () => {
     it('retries an error without a code', () => {
         expect(isPermanentDownloadError(new Error('fetch failed'))).toBe(false);
         expect(isPermanentDownloadError(undefined)).toBe(false);
+    });
+});
+
+/**
+ * A pointer write the SDK re-sent after a lost ack is rejected
+ * ALREADY_EXISTS although it committed: its blob must stay. Every other
+ * rejection never committed, and the writer reclaims the blob.
+ */
+describe('isLostAckCommit', () => {
+    it('recognizes a re-sent create that had already committed', () => {
+        expect(isLostAckCommit(Object.assign(new Error('6 ALREADY_EXISTS'), { code: 'already-exists' }))).toBe(true);
+    });
+
+    it.each(['unavailable', 'permission-denied', 'failed-precondition', 'aborted'])(
+        'treats a %s rejection as never committed', (code) => {
+            expect(isLostAckCommit(Object.assign(new Error(code), { code }))).toBe(false);
+        });
+
+    it('treats an error without a code as never committed', () => {
+        expect(isLostAckCommit(new Error('Simulated failure'))).toBe(false);
+        expect(isLostAckCommit(undefined)).toBe(false);
     });
 });
 

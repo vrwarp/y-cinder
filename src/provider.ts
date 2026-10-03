@@ -38,12 +38,12 @@ import {
 import { generateSessionId, calculateBackoff } from "./utils";
 import { extractClockEnds, aggregateClockEnds } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext, SyncResult } from "./sync";
-import { isClientOfflineError, largeUpdatePath } from "./sync-policy";
+import { isClientOfflineError, isLostAckCommit, largeUpdatePath } from "./sync-policy";
 import { compact as performTieredCompaction, CompactionContext, CompactionResult } from "./compaction";
 import { isPersistentCompactionFailure } from "./compaction-policy";
 import { squashDocument, readDocEpoch, SquashResult } from "./squash";
 import { sharedClockOffset } from "./locking";
-import { uploadBlob } from "./storage-blobs";
+import { uploadBlob, restoreMissingBlob } from "./storage-blobs";
 import {
   handleSubdocs as handleSubdocsEvent,
   destroyAllSubdocs,
@@ -1302,16 +1302,24 @@ export class FireProvider extends ObservableV2<any> {
             updateStoragePath: storagePath,
           });
         } catch (pointerErr) {
-          // A rejected write never commits (the SDK retries transient
-          // errors itself), so no pointer to this blob exists or ever
-          // will, and the retry uploads the batch again under a new path.
-          // Delete this copy instead of orphaning one per failed attempt
-          // (in the background: the retry need not wait for it).
-          deleteObject(ref(this.storage, storagePath)).catch(err => {
-            console.warn(`Failed to delete unreferenced update blob ${storagePath}`, err);
-          });
-          throw pointerErr;
+          // Committed by an earlier send whose ack was lost: the pointer
+          // is live, so the save succeeded (see isLostAckCommit).
+          if (!isLostAckCommit(pointerErr)) {
+            // Any other rejected write never commits (the SDK retries
+            // transient errors itself), so no pointer to this blob exists
+            // or ever will, and the retry uploads the batch again under a
+            // new path. Delete this copy instead of orphaning one per
+            // failed attempt (in the background: the retry need not wait
+            // for it).
+            deleteObject(ref(this.storage, storagePath)).catch(err => {
+              console.warn(`Failed to delete unreferenced update blob ${storagePath}`, err);
+            });
+            throw pointerErr;
+          }
         }
+        // A re-send may have re-created a pointer whose blob a compaction
+        // already reclaimed
+        await restoreMissingBlob(this.storage, storagePath, update);
         console.log(`Oversized update (${update.byteLength} bytes) offloaded to Cloud Storage: ${storagePath}`);
       } else {
         await addDoc(collection(this.db, this.path, FIRESTORE_PATHS.UPDATES), {

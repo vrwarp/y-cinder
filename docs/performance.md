@@ -783,6 +783,21 @@ the pointer (one document read, only on that 404): if it is gone the
 update was compacted away and arrives with the fold, instead of being
 quarantined and reported as a false `corrupted-document`.
 
+A lost ack is the exception to both "rejected means never committed"
+and "a deleted pointer stays deleted": the SDK re-sends every write it
+holds no ack for when its stream reconnects. If the pointer committed,
+the re-send is rejected ALREADY_EXISTS, which the writer treats as
+committed (it keeps the blob and does not retry). If a compaction
+consumed the pointer in between, the re-send re-creates it under the
+same id behind a reclaimed blob, and every later compaction would abort
+on the missing payload. So the writer checks its blob once the pointer
+write settles (one Storage metadata read per offloaded write), and
+compaction re-reads each merged pointer after deleting its blob (one
+document read per reclaimed blob). Whichever of the two runs second sees
+the other's step and uploads the blob again. Squash needs no check: a
+pointer re-created after it carries the old epoch and is deleted unread.
+Pinned by `tests/integration/lost_ack_large_update_pointer.test.ts`.
+
 Measured with `tests/integration/large_update_blob_leak.test.ts`
 (emulator; Storage ledger vs. surviving pointers; counts identical in 5
 interleaved runs each):

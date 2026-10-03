@@ -99,6 +99,23 @@ export function isPermanentDownloadError(error: any): boolean {
     return error?.code === 'storage/object-not-found';
 }
 
+/**
+ * Whether a rejected `addDoc` committed after all.
+ *
+ * The SDK re-sends every write it holds no ack for once its write stream
+ * reconnects, and `addDoc` creates a fresh auto-id document under the
+ * precondition `exists: false`. ALREADY_EXISTS therefore means an earlier
+ * send of this very write committed and only its ack was lost: the
+ * document is live, and a pointer's blob must not be deleted as
+ * unreferenced.
+ *
+ * @param error - The value `addDoc` rejected with.
+ * @returns true when the document the write created exists.
+ */
+export function isLostAckCommit(error: any): boolean {
+    return error?.code === 'already-exists';
+}
+
 /** Error code initial sync fails with when the client is offline */
 export const CLIENT_OFFLINE = 'client-offline';
 

@@ -342,8 +342,9 @@ export function planUpdateDoc(data: Record<string, any> | null | undefined, curr
  * The Cloud Storage blob a storage-backed update document points to.
  *
  * Every such blob has exactly one pointer document (see largeUpdatePath),
- * so once a committed transaction deletes the pointer nothing can ever
- * read the blob again. Compaction and squash delete it right after the
+ * so once a committed transaction deletes the pointer nothing reads the
+ * blob again, unless the writer's SDK re-sends the pointer write (see
+ * reclaimUpdateBlobs). Compaction and squash delete it right after the
  * commit; left alone it would stay in billed Storage forever.
  *
  * @param data - Update document data.

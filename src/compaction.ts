@@ -57,6 +57,7 @@ import {
     orderBy,
     getDocs,
     getDoc,
+    getDocFromServer,
     getCountFromServer,
     serverTimestamp,
     deleteField,
@@ -385,7 +386,7 @@ export async function compact(
                 epoch: currentEpoch,
             });
             if (delta !== null) {
-                await reclaimUpdateBlobs(storage, updateBlobs, delta.deletedRefs);
+                await reclaimUpdateBlobs(storage, updateBlobs, delta.deletedRefs, updatesToProcess);
                 return delta.result;
             }
             // Segment would not fit inline — fall through to a full fold.
@@ -427,7 +428,7 @@ export async function compact(
         })) {
             if (staleRefs.length > 0) {
                 const deletedRefs = await deleteStaleEpochDocs(db, path, uid, staleRefs);
-                await reclaimUpdateBlobs(storage, updateBlobs, deletedRefs);
+                await reclaimUpdateBlobs(storage, updateBlobs, deletedRefs, updatesToProcess);
                 return { success: true, type: 'none' as const, updatesCompacted: staleRefs.length, historySegmentsMerged: 0 };
             }
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
@@ -556,7 +557,7 @@ export async function compact(
             foldTail,
             expectedVersion: currentVersion,
         });
-        await reclaimUpdateBlobs(storage, updateBlobs, deletedRefs);
+        await reclaimUpdateBlobs(storage, updateBlobs, deletedRefs, updatesToProcess);
 
         // Garbage Collect Old Storage Snapshot (and its delete-set and tail blobs).
         // Delete the paths the replaced main document stored: blob names are
@@ -852,9 +853,9 @@ async function deleteStaleEpochDocs(
 
 /**
  * Deletes the Storage blobs of the pointer documents a committed
- * transaction deleted. With its pointer gone nothing can read a blob
- * again; left alone, every oversized save or push stayed in billed
- * Storage forever.
+ * transaction deleted. With its pointer gone nothing reads a blob again;
+ * left alone, every oversized save or push stayed in billed Storage
+ * forever.
  *
  * Must run only after the commit, and only for documents that commit
  * deleted (the transaction body's return value, so a re-run on
@@ -866,14 +867,24 @@ async function deleteStaleEpochDocs(
  * the updates, and the update listener skips one whose pointer is gone,
  * receiving the data through the fold or segment instead.
  *
+ * A writer whose ack was lost re-sends its pointer write on reconnect,
+ * which re-creates a deleted pointer under the same id. So each merged
+ * pointer is re-read after its blob is deleted, and the blob uploaded
+ * again from the merged payload if the pointer is back; the writer checks
+ * its blob after its write (restoreMissingBlob), so one of the two always
+ * sees the other. A stale-epoch pointer is never merged, so one re-created
+ * behind a missing blob is harmless: compaction deletes it unread.
+ *
  * Best effort, like snapshot garbage collection: a failure (including a
  * 404 from a double delete) only leaves an orphan, never fails the cycle.
  */
 async function reclaimUpdateBlobs(
     storage: FirebaseStorage,
     updateBlobs: Map<string, string>,
-    deletedRefs: DocumentReference[]
+    deletedRefs: DocumentReference[],
+    merged: { ref: DocumentReference; data: Uint8Array }[]
 ): Promise<void> {
+    const payloads = new Map(merged.map(u => [u.ref.path, u.data]));
     await Promise.all(deletedRefs.map(async (docRef) => {
         const blobPath = updateBlobs.get(docRef.path);
         if (blobPath === undefined) return;
@@ -881,6 +892,17 @@ async function reclaimUpdateBlobs(
             await deleteObject(ref(storage, blobPath));
         } catch (err) {
             console.warn(`Failed to delete update blob ${blobPath}`, err);
+            return;
+        }
+        const payload = payloads.get(docRef.path);
+        if (payload === undefined) return;
+        try {
+            if ((await getDocFromServer(docRef)).exists()) {
+                console.warn(`Update pointer ${docRef.id} was re-sent after its blob was reclaimed; uploading it again`);
+                await uploadBlob(storage, blobPath, payload);
+            }
+        } catch (err) {
+            console.warn(`Failed to check update blob ${blobPath} for a re-sent pointer`, err);
         }
     }));
 }

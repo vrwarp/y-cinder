@@ -86,6 +86,7 @@ import {
     epochTag as buildEpochTag,
     hasMorePages,
     isClientOfflineError,
+    isLostAckCommit,
     isPermanentDownloadError,
     isServedFromCache,
     largeUpdatePath,
@@ -97,7 +98,7 @@ import {
     survivesEpochFence,
 } from "./sync-policy";
 import { readDocEpoch, docHasContent } from "./squash";
-import { uploadBlob } from "./storage-blobs";
+import { uploadBlob, restoreMissingBlob } from "./storage-blobs";
 
 /**
  * Context required for sync operations.
@@ -675,15 +676,22 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 try {
                     await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
                 } catch (pointerErr) {
-                    // A rejected write never commits (the SDK retries
-                    // transient errors itself), and the sync retry pushes
-                    // again under a new path: delete this copy instead of
-                    // orphaning it, in the background.
-                    deleteObject(storageRef).catch(err => {
-                        console.warn(`Failed to delete unreferenced update blob ${storagePath}`, err);
-                    });
-                    throw pointerErr;
+                    // Committed by an earlier send whose ack was lost: the
+                    // pointer is live (see isLostAckCommit).
+                    if (!isLostAckCommit(pointerErr)) {
+                        // Any other rejected write never commits (the SDK
+                        // retries transient errors itself), and the sync
+                        // retry pushes again under a new path: delete this
+                        // copy instead of orphaning it, in the background.
+                        deleteObject(storageRef).catch(err => {
+                            console.warn(`Failed to delete unreferenced update blob ${storagePath}`, err);
+                        });
+                        throw pointerErr;
+                    }
                 }
+                // A re-send may have re-created a pointer whose blob a
+                // compaction already reclaimed
+                await restoreMissingBlob(ctx.storage, storagePath, localDiff);
                 console.log(`Oversized initial sync diff (${localDiff.byteLength} bytes) offloaded to Cloud Storage: ${storagePath}`);
             } else {
                 // Standard inline update

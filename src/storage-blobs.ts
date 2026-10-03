@@ -24,8 +24,9 @@
  * @module storage-blobs
  */
 
-import { FirebaseStorage, ref, uploadBytes, UploadMetadata } from "@firebase/storage";
+import { FirebaseStorage, getMetadata, ref, uploadBytes, UploadMetadata } from "@firebase/storage";
 import { gzipBlobAsync } from "./merge-utils";
+import { isPermanentDownloadError } from "./sync-policy";
 
 /**
  * Metadata of a gzip-compressed blob. The content type describes the
@@ -60,5 +61,32 @@ export async function uploadBlob(storage: FirebaseStorage, path: string, blob: U
         await uploadBytes(ref(storage, path), compressed, GZIP_METADATA);
     } else {
         await uploadBytes(ref(storage, path), blob);
+    }
+}
+
+/**
+ * Uploads an offloaded update's blob again if it is gone once the
+ * writer's pointer write has settled.
+ *
+ * The SDK re-sends a write whose ack was lost when its stream reconnects.
+ * If a compaction consumed the pointer in between, it also deleted the
+ * blob, and the re-send re-creates the pointer under the same id behind a
+ * missing blob. Compaction re-reads each merged pointer after deleting
+ * its blob (see reclaimUpdateBlobs) and the writer checks the blob after
+ * its write, so whichever comes second sees the other and puts the blob
+ * back.
+ *
+ * @param storage - Firebase Storage instance
+ * @param path - The blob's path
+ * @param blob - The raw Yjs V1 blob the pointer was written for
+ * @throws When the blob's existence cannot be checked.
+ */
+export async function restoreMissingBlob(storage: FirebaseStorage, path: string, blob: Uint8Array): Promise<void> {
+    try {
+        await getMetadata(ref(storage, path));
+    } catch (e) {
+        if (!isPermanentDownloadError(e)) throw e;
+        console.warn(`Update blob ${path} was reclaimed behind a re-sent pointer; uploading it again`);
+        await uploadBlob(storage, path, blob);
     }
 }

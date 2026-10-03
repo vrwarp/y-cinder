@@ -39,7 +39,7 @@ import { generateSessionId, calculateBackoff } from "./utils";
 import { extractClockEnds, aggregateClockEnds, updateEndsWithDeletions } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext, SyncResult } from "./sync";
 import { isClientOfflineError, isLostAckCommit, largeUpdatePath } from "./sync-policy";
-import { compact as performTieredCompaction, CompactionContext, CompactionResult } from "./compaction";
+import { compact as performTieredCompaction, deleteUpdateBlobs, CompactionContext, CompactionResult, UpdateBlobReclaim } from "./compaction";
 import { isPersistentCompactionFailure } from "./compaction-policy";
 import { squashDocument, readDocEpoch, SquashResult } from "./squash";
 import { sharedClockOffset } from "./locking";
@@ -127,6 +127,12 @@ export class FireProvider extends ObservableV2<any> {
    */
   private _compactionFailures = 0;
   private _compactionBackoffUntil = 0;
+  /**
+   * Blobs of update pointers this provider's compactions or squash
+   * deleted, reclaimed by its next compaction, or by destroy() when none
+   * follows (see CompactionContext.deferredUpdateBlobs).
+   */
+  private _deferredUpdateBlobs: UpdateBlobReclaim[] = [];
 
   /**
    * Buffered local updates awaiting the debounced save.
@@ -470,6 +476,7 @@ export class FireProvider extends ObservableV2<any> {
       historyFoldThreshold: this.historyFoldThreshold,
       beforeSquash,
       minUpdates,
+      deferredUpdateBlobs: this._deferredUpdateBlobs,
     };
 
     // FIX: Pause history listener during compaction to avoid contention/deadlock in emulator
@@ -650,6 +657,7 @@ export class FireProvider extends ObservableV2<any> {
       storage: this.storage,
       isDestroyed: () => this._isDestroyed,
       doc: this.doc,
+      deferredUpdateBlobs: this._deferredUpdateBlobs,
     }).finally(() => {
       this._inflightSquash = null;
     });
@@ -779,6 +787,11 @@ export class FireProvider extends ObservableV2<any> {
       window.removeEventListener('beforeunload', this._boundBeforeUnload);
       this._boundBeforeUnload = null;
     }
+
+    // No compaction follows to reclaim the blobs earlier ones left (see
+    // _deferredUpdateBlobs): in the background, best effort
+    // (deleteUpdateBlobs never rejects).
+    void deleteUpdateBlobs(this.storage, this._deferredUpdateBlobs.splice(0));
 
     // Bound the waits below. A Firestore write resolves only when the
     // server acknowledges it, which never happens while offline (the SDK

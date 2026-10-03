@@ -292,6 +292,9 @@ describe('Storage-backed update blobs are reclaimed (large_updates/*.bin)', () =
         }
 
         await provider.destroy();
+        // A destroyed provider runs no later cycle to reclaim what its last
+        // fold left, so destroy() does.
+        const afterDestroy = await settledLedger(path);
         ydoc.destroy();
 
         const counters = transferCounters();
@@ -304,6 +307,7 @@ describe('Storage-backed update blobs are reclaimed (large_updates/*.bin)', () =
             ...counters,
             orphansPerCycle: perCycle.map(l => l.orphans),
             orphanBytesPerCycle: perCycle.map(l => l.orphanBytes),
+            orphansAfterDestroy: afterDestroy.orphans,
         });
 
         const last = perCycle[CYCLES - 1];
@@ -313,6 +317,7 @@ describe('Storage-backed update blobs are reclaimed (large_updates/*.bin)', () =
         // fold, forever.
         expect(last.orphans, `orphaned large_updates blobs after ${CYCLES} folds`).toBeLessThanOrEqual(1);
         expect(last.orphanBytes, `orphaned large_updates bytes after ${CYCLES} folds`).toBeLessThanOrEqual(maxBlobBytes);
+        expect(afterDestroy.orphans, 'large_updates blobs left after destroy()').toBe(0);
     });
 
     it('squash reclaims the blob of the oversized-save pointer it deletes', { timeout: 120000 }, async () => {

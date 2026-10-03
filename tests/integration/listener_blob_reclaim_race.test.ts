@@ -3,11 +3,12 @@
  * compaction reclaims the blob must not report a corrupted document.
  *
  * Compaction deletes a storage-backed update's blob (`large_updates/`)
- * right after the transaction that deleted its pointer document commits:
- * nothing references the blob any more, and before that change every
- * oversized save stayed in billed Storage forever. A peer whose listener
- * received the pointer just before the fold can still be downloading the
- * blob when it disappears, and `getBytes` then fails with
+ * once the transaction that deleted its pointer document has committed
+ * (the compacting client's next cycle reclaims it): nothing references
+ * the blob any more, and before that change every oversized save stayed
+ * in billed Storage forever. A peer whose listener received the pointer
+ * before the fold can still be downloading the blob when it disappears
+ * (a slow link, a stalled tab), and `getBytes` then fails with
  * `storage/object-not-found` — the same error as a blob missing behind a
  * live pointer, which the listener quarantines and reports as
  * 'corrupted-document'.
@@ -121,10 +122,11 @@ describe('Update listener vs. post-commit blob reclaim', () => {
                 timeout: 20000, message: 'reader listener download held',
             });
 
-            // The fold consumes the pointer and reclaims its blob while the
-            // reader is still downloading it.
+            // The fold consumes the pointer, and the next cycle reclaims its
+            // blob, while the reader is still downloading it.
             await writer.compact();
             expect((await getDocs(collection(db, path, FIRESTORE_PATHS.UPDATES))).size).toBe(0);
+            await writer.compact();
 
             gate.release!();
             await waitForConditionTruthy(() => gate.outcome !== null, {

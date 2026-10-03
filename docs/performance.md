@@ -783,14 +783,19 @@ whose pointer write was rejected also re-uploaded the whole update under
 a new name on every retry, orphaning one full copy per attempt.
 
 Each compaction / squash transaction now reports the documents its
-committed attempt deleted, and the cycle deletes their blobs right after
-the commit (best effort, like snapshot GC: one Storage delete per blob).
-A rejected pointer write deletes the copy it just uploaded. Blob names
-carry a per-attempt id, so every blob has exactly one pointer. A peer
-whose update listener is mid-download when the blob goes away re-reads
-the pointer (one document read, only on that 404): if it is gone the
-update was compacted away and arrives with the fold, instead of being
-quarantined and reported as a false `corrupted-document`.
+committed attempt deleted, and the client's next compaction cycle
+deletes their blobs, or its `destroy()` when no cycle follows (best
+effort, like snapshot GC: one Storage delete per blob). Not right after
+the commit: a peer whose update listener got the pointer just before it
+can still be downloading the blob, and clients on earlier releases
+quarantine an update on any failed download and report a false
+`corrupted-document`. A rejected pointer write deletes the copy it just
+uploaded. Blob names carry a per-attempt id, so every blob has exactly
+one pointer. A current peer whose update listener is still mid-download
+when the blob goes away re-reads the pointer (one document read, only on
+that 404): if it is gone the update was compacted away and arrives with
+the fold, instead of being quarantined and reported as a false
+`corrupted-document`.
 
 A lost ack is the exception to both "rejected means never committed"
 and "a deleted pointer stays deleted": the SDK re-sends every write it
@@ -803,7 +808,10 @@ on the missing payload. So the writer checks its blob once the pointer
 write settles (one Storage metadata read per offloaded write), and
 compaction re-reads each merged pointer after deleting its blob (one
 document read per reclaimed blob). Whichever of the two runs second sees
-the other's step and uploads the blob again. Squash needs no check: a
+the other's step and uploads the blob again. Because that delete waits
+for the next cycle, a re-send can land anywhere in between, so the
+deferred entry keeps the payload it merged (in memory, only for
+storage-backed updates) until the re-read is done. Squash needs no check: a
 pointer re-created after it carries the old epoch and is deleted unread.
 Pinned by `tests/integration/lost_ack_large_update_pointer.test.ts`.
 
@@ -813,13 +821,16 @@ interleaved runs each):
 
 | scenario | orphaned before | orphaned after |
 | --- | ---: | ---: |
-| 3 × 1.1 MB saves, each folded | 1 / 2 / 3 blobs (3.3 MB) | 0 |
+| 3 × 1.1 MB saves, each folded | 1 / 2 / 3 blobs (3.3 MB) | 1 / 1 / 1 (awaiting the next cycle), 0 after `destroy()` |
 | squash after a 1.1 MB save | 1.1 MB | 0 |
 | stale-epoch pointer cleanup | 1.1 MB | 0 |
-| save, 3 rejected pointer writes (after save / fold) | 3.3 / 4.4 MB | 0 / 0 |
-| initial-sync push, 2 rejections (after push / fold) | 2.2 / 3.3 MB | 0 / 0 |
+| save, 3 rejected pointer writes (after save / fold) | 3.3 / 4.4 MB | 0 / 1 (awaiting the next cycle) |
+| initial-sync push, 2 rejections (after push / fold) | 2.2 / 3.3 MB | 0 / 1 (awaiting the next cycle) |
 
-Pinned by that file and `tests/integration/listener_blob_reclaim_race.test.ts`.
+The squash and stale-epoch rows call `squashDocument` / `compact`
+directly, with no provider to defer to, so they delete right after the
+commit. Pinned by that file, `tests/integration/listener_blob_reclaim_race.test.ts`
+and `tests/integration/old_client_blob_reclaim_race.test.ts`.
 
 ## Fix 10: a compaction that keeps failing backs off
 

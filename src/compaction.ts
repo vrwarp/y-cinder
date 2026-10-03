@@ -155,6 +155,15 @@ export interface CompactionContext {
      */
     minUpdates?: number;
     /**
+     * Storage blobs of pointer documents this client's earlier cycles (or
+     * its squash) deleted, kept by the provider across cycles: each cycle
+     * reclaims them before its own work and leaves its own for the next
+     * (see reclaimUpdateBlobs). Without it, a cycle reclaims its own right
+     * after its commit. A merged pointer's entry keeps its payload until
+     * then (see deleteUpdateBlobs).
+     */
+    deferredUpdateBlobs?: UpdateBlobReclaim[];
+    /**
      * Test seam: inline cap for the delete-set fingerprint field.
      * Defaults to DEFAULTS.MAX_DELETE_SET_FIELD_BYTES.
      * @internal
@@ -221,6 +230,15 @@ export async function compact(
 ): Promise<CompactionResult> {
     const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, cachedClockOffset, storage } = ctx;
     const historyFoldThreshold = (ctx.historyFoldThreshold ?? DEFAULTS.HISTORY_FOLD_THRESHOLD) + (ctx.beforeSquash ? 1 : 0);
+
+    // The blobs earlier cycles left for this one: a peer's download that
+    // raced their commit has had until now to finish (see
+    // reclaimUpdateBlobs). Awaited before the updates are listed, so a
+    // pointer re-sent meanwhile has its blob back first (see
+    // deleteUpdateBlobs).
+    if (ctx.deferredUpdateBlobs?.length) {
+        await deleteUpdateBlobs(storage, ctx.deferredUpdateBlobs.splice(0));
+    }
 
     // 1. Distributed Gate: Try to become the Leader
     // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
@@ -394,7 +412,7 @@ export async function compact(
                 epoch: currentEpoch,
             });
             if (delta !== null) {
-                await reclaimUpdateBlobs(storage, updateBlobs, delta.deletedRefs, updatesToProcess);
+                await reclaimUpdateBlobs(ctx, blobsOf(updateBlobs, delta.deletedRefs, updatesToProcess));
                 return delta.result;
             }
             // Segment would not fit inline — fall through to a full fold.
@@ -436,7 +454,7 @@ export async function compact(
         })) {
             if (staleRefs.length > 0) {
                 const deletedRefs = await deleteStaleEpochDocs(db, path, uid, staleRefs);
-                await reclaimUpdateBlobs(storage, updateBlobs, deletedRefs, updatesToProcess);
+                await reclaimUpdateBlobs(ctx, blobsOf(updateBlobs, deletedRefs, updatesToProcess));
                 return { success: true, type: 'none' as const, updatesCompacted: staleRefs.length, historySegmentsMerged: 0 };
             }
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
@@ -572,7 +590,7 @@ export async function compact(
             foldTail,
             expectedVersion: currentVersion,
         });
-        await reclaimUpdateBlobs(storage, updateBlobs, deletedRefs, updatesToProcess);
+        await reclaimUpdateBlobs(ctx, blobsOf(updateBlobs, deletedRefs, updatesToProcess));
 
         // Garbage Collect Old Storage Snapshot (and its delete-set and tail blobs).
         // Delete the paths the replaced main document stored: blob names are
@@ -867,59 +885,108 @@ async function deleteStaleEpochDocs(
 }
 
 /**
- * Deletes the Storage blobs of the pointer documents a committed
- * transaction deleted. With its pointer gone nothing reads a blob again;
- * left alone, every oversized save or push stayed in billed Storage
- * forever.
+ * A reclaimed update blob awaiting deletion (see reclaimUpdateBlobs).
+ * `pointer` and `payload` are set for a pointer this client merged, so
+ * that deleteUpdateBlobs can give the blob back to a pointer a lost-ack
+ * re-send re-created.
+ */
+export interface UpdateBlobReclaim {
+    /** The blob's storage path. */
+    path: string;
+    /** The merged pointer document the commit deleted. */
+    pointer?: DocumentReference;
+    /** The payload merged from the blob (raw Yjs V1). */
+    payload?: Uint8Array;
+}
+
+/**
+ * Reclaims the Storage blobs of the pointer documents a committed
+ * transaction deleted (compaction here, squash in squash.ts). With its
+ * pointer gone nothing reads a blob again; left alone, every oversized
+ * save or push stayed in billed Storage forever.
  *
  * Must run only after the commit, and only for documents that commit
  * deleted (the transaction body's return value, so a re-run on
  * contention reports its own deletes). The deletes are blind (see
  * "Deletion" in the module header), but compaction only lists committed
  * pointers, so once the commit lands each one is gone either way, and its
- * payload is in what the commit wrote. Readers racing the delete are
- * safe: initial sync skips a missing blob and reads the snapshot after
- * the updates, and the update listener skips one whose pointer is gone,
- * receiving the data through the fold or segment instead.
+ * payload is in what the commit wrote.
+ *
+ * The blobs are left for this client's next cycle
+ * (ctx.deferredUpdateBlobs) rather than deleted now: a peer whose update
+ * listener got the pointer just before the commit can still be
+ * downloading one, and by the next cycle (a threshold crossing or
+ * compact() call later) it has finished. Current readers survive the
+ * delete either way (initial sync skips a missing blob, the update
+ * listener one whose pointer is gone, and the data arrives through the
+ * fold or segment), but releases that predate reclaiming quarantine an
+ * update on any failed download and report a false 'corrupted-document'.
+ * Without a deferral list, or once the provider is destroyed (no next
+ * cycle), they are deleted now (see deleteUpdateBlobs).
+ */
+export async function reclaimUpdateBlobs(
+    ctx: Pick<CompactionContext, 'storage' | 'isDestroyed' | 'deferredUpdateBlobs'>,
+    blobs: UpdateBlobReclaim[]
+): Promise<void> {
+    if (ctx.deferredUpdateBlobs && !ctx.isDestroyed()) {
+        ctx.deferredUpdateBlobs.push(...blobs);
+        return;
+    }
+    await deleteUpdateBlobs(ctx.storage, blobs);
+}
+
+/**
+ * Deletes reclaimed update blobs whose pointers are gone, in parallel.
  *
  * A writer whose ack was lost re-sends its pointer write on reconnect,
- * which re-creates a deleted pointer under the same id. So each merged
- * pointer is re-read after its blob is deleted, and the blob uploaded
- * again from the merged payload if the pointer is back; the writer checks
- * its blob after its write (restoreMissingBlob), so one of the two always
- * sees the other. A stale-epoch pointer is never merged, so one re-created
- * behind a missing blob is harmless: compaction deletes it unread.
+ * which re-creates a deleted pointer under the same id, possibly while
+ * its blob still awaits deletion here. So each merged pointer is re-read
+ * after its blob is deleted, and the blob uploaded again from the merged
+ * payload (kept in its entry until then) if the pointer is back; the
+ * writer checks its blob after its write (restoreMissingBlob), so one of
+ * the two always sees the other. A stale-epoch pointer is never merged,
+ * so one re-created behind a missing blob is harmless: compaction deletes
+ * it unread.
  *
  * Best effort, like snapshot garbage collection: a failure (including a
  * 404 from a double delete) only leaves an orphan, never fails the cycle.
  */
-async function reclaimUpdateBlobs(
-    storage: FirebaseStorage,
-    updateBlobs: Map<string, string>,
-    deletedRefs: DocumentReference[],
-    merged: { ref: DocumentReference; data: Uint8Array }[]
-): Promise<void> {
-    const payloads = new Map(merged.map(u => [u.ref.path, u.data]));
-    await Promise.all(deletedRefs.map(async (docRef) => {
-        const blobPath = updateBlobs.get(docRef.path);
-        if (blobPath === undefined) return;
+export async function deleteUpdateBlobs(storage: FirebaseStorage, blobs: UpdateBlobReclaim[]): Promise<void> {
+    await Promise.all(blobs.map(async ({ path: blobPath, pointer, payload }) => {
         try {
             await deleteObject(ref(storage, blobPath));
         } catch (err) {
             console.warn(`Failed to delete update blob ${blobPath}`, err);
             return;
         }
-        const payload = payloads.get(docRef.path);
-        if (payload === undefined) return;
+        if (pointer === undefined || payload === undefined) return;
         try {
-            if ((await getDocFromServer(docRef)).exists()) {
-                console.warn(`Update pointer ${docRef.id} was re-sent after its blob was reclaimed; uploading it again`);
+            if ((await getDocFromServer(pointer)).exists()) {
+                console.warn(`Update pointer ${pointer.id} was re-sent after its blob was reclaimed; uploading it again`);
                 await uploadBlob(storage, blobPath, payload);
             }
         } catch (err) {
             console.warn(`Failed to check update blob ${blobPath} for a re-sent pointer`, err);
         }
     }));
+}
+
+/**
+ * The blobs of the pointer documents among `deletedRefs` (from compact's
+ * updateBlobs), with the payload of each one among `merged`.
+ */
+function blobsOf(
+    updateBlobs: Map<string, string>,
+    deletedRefs: DocumentReference[],
+    merged: { ref: DocumentReference; data: Uint8Array }[]
+): UpdateBlobReclaim[] {
+    const payloads = new Map(merged.map(u => [u.ref.path, u.data]));
+    return deletedRefs.flatMap((docRef): UpdateBlobReclaim[] => {
+        const blobPath = updateBlobs.get(docRef.path);
+        if (blobPath === undefined) return [];
+        const payload = payloads.get(docRef.path);
+        return [payload === undefined ? { path: blobPath } : { path: blobPath, pointer: docRef, payload }];
+    });
 }
 
 /**

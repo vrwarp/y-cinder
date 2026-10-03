@@ -60,6 +60,7 @@ import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";
 import { generateSessionId } from "./utils";
 import { updateBlobPath } from "./compaction-policy";
+import { reclaimUpdateBlobs, UpdateBlobReclaim } from "./compaction";
 import { uploadBlob } from "./storage-blobs";
 import {
     isNotQuiescent,
@@ -243,6 +244,8 @@ export interface SquashContext {
     isDestroyed: () => boolean;
     /** The live, fully-synced document to squash */
     doc: Y.Doc;
+    /** See CompactionContext.deferredUpdateBlobs */
+    deferredUpdateBlobs?: UpdateBlobReclaim[];
 }
 
 export interface SquashResult {
@@ -423,15 +426,13 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         });
 
         // Nothing references a deleted pointer's blob any more (see
-        // updateBlobPath). A re-sent pointer write may re-create one, but
-        // tagged with the old epoch: listeners drop it, initial sync skips
-        // a missing blob, and compaction deletes it unread.
+        // updateBlobPath), but a peer may still be downloading one: it is
+        // reclaimed later, like compaction's (see reclaimUpdateBlobs). A
+        // re-sent pointer write may re-create a pointer, but tagged with
+        // the old epoch: listeners drop it, initial sync skips a missing
+        // blob, and compaction deletes it unread.
         if (result.success) {
-            await Promise.all(deletedBlobs.map(async (blobPath) => {
-                try {
-                    await deleteObject(ref(storage, blobPath));
-                } catch { /* orphaned blob is harmless */ }
-            }));
+            await reclaimUpdateBlobs(ctx, deletedBlobs.map(blobPath => ({ path: blobPath })));
         }
 
         // Best-effort cleanup of the previous epoch's blobs

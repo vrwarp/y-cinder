@@ -1261,12 +1261,12 @@ async function applyFoldTail(
  * Whether an update document still exists on the server.
  *
  * Asked once its Storage blob turned out to be missing. Compaction and
- * squash delete a pointer's blob right after the transaction deleting the
- * pointer commits, so a listener download racing that cycle finds the
- * object gone while the update itself lives on in the fold, segment or
- * new epoch the other listeners deliver. Only a blob missing behind a
- * pointer that still exists is lost. When the check itself fails, the
- * document is assumed to exist.
+ * squash delete a pointer's blob after the transaction deleting the
+ * pointer commits (see reclaimUpdateBlobs), so a listener download still
+ * running by then finds the object gone while the update itself lives
+ * on in the fold, segment or new epoch the other listeners deliver. Only
+ * a blob missing behind a pointer that still exists is lost. When the
+ * check itself fails, the document is assumed to exist.
  *
  * @param docRef - The update (pointer) document.
  * @returns false when the document is gone.

@@ -431,10 +431,14 @@ describe('Lost ack of a storage-backed update pointer', () => {
             writerDoc.getText('t').insert(0, 'x'.repeat(BIG_CHARS));
 
             await waitForPointerCommittedWithoutAck(path);
-            // A peer compacts the pointer away. After its commit but before
-            // its blob delete is sent, the writer reconnects: the re-send
-            // re-creates the pointer, and the writer's save settles while
-            // the blob is still there. Only then does the delete go out.
+            // A peer compacts the pointer away. Its blob delete waits for
+            // the peer's next cycle (old releases may still be downloading
+            // it), so that cycle sends it. After the commit but before that
+            // delete is sent, the writer reconnects: the re-send re-creates
+            // the pointer, and the writer's save settles while the blob is
+            // still there. Only then does the delete go out.
+            await peer.compact();
+            expect(await updateCount(path)).toBe(0);
             storageCtl.beforeDelete = async (fullPath) => {
                 if (!fullPath.includes('/large_updates/')) return;
                 storageCtl.beforeDelete = null;

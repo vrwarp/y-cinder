@@ -343,9 +343,10 @@ export function planUpdateDoc(data: Record<string, any> | null | undefined, curr
  *
  * Every such blob has exactly one pointer document (see largeUpdatePath),
  * so once a committed transaction deletes the pointer nothing reads the
- * blob again, unless the writer's SDK re-sends the pointer write (see
- * reclaimUpdateBlobs). Compaction and squash delete it right after the
- * commit; left alone it would stay in billed Storage forever.
+ * blob again, unless the writer's SDK re-sends the pointer write.
+ * Compaction and squash reclaim it after the commit (see
+ * reclaimUpdateBlobs); left alone it would stay in billed Storage
+ * forever.
  *
  * @param data - Update document data.
  * @returns The blob's storage path, or null when the payload is inline

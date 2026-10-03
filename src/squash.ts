@@ -60,8 +60,8 @@ import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";
 import { generateSessionId } from "./utils";
 import { readMainDocState, updateBlobPath } from "./compaction-policy";
-import { reclaimUpdateBlobs, UpdateBlobReclaim } from "./compaction";
-import { uploadBlob } from "./storage-blobs";
+import { reclaimUpdateBlobs } from "./compaction";
+import { uploadBlob, UpdateBlobReclaim } from "./storage-blobs";
 import {
     isNotQuiescent,
     isSquashPreempted,

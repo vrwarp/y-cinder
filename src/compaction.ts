@@ -60,7 +60,6 @@ import {
     orderBy,
     getDocs,
     getDoc,
-    getDocFromServer,
     getCountFromServer,
     serverTimestamp,
     deleteField,
@@ -98,7 +97,7 @@ import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
 import { wait, calculateBackoff, generateSessionId, writeStateVector } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
 import { mergeUpdatesWithMetaAsync } from "./merge-utils";
-import { uploadBlob } from "./storage-blobs";
+import { uploadBlob, deleteUpdateBlobs, UpdateBlobReclaim } from "./storage-blobs";
 import { updateHasDeletions } from "./update-metadata";
 import { isPermanentDownloadError } from "./sync-policy";
 
@@ -888,21 +887,6 @@ async function deleteStaleEpochDocs(
 }
 
 /**
- * A reclaimed update blob awaiting deletion (see reclaimUpdateBlobs).
- * `pointer` and `payload` are set for a pointer this client merged, so
- * that deleteUpdateBlobs can give the blob back to a pointer a lost-ack
- * re-send re-created.
- */
-export interface UpdateBlobReclaim {
-    /** The blob's storage path. */
-    path: string;
-    /** The merged pointer document the commit deleted. */
-    pointer?: DocumentReference;
-    /** The payload merged from the blob (raw Yjs V1). */
-    payload?: Uint8Array;
-}
-
-/**
  * Reclaims the Storage blobs of the pointer documents a committed
  * transaction deleted (compaction here, squash in squash.ts). With its
  * pointer gone nothing reads a blob again; left alone, every oversized
@@ -936,42 +920,6 @@ export async function reclaimUpdateBlobs(
         return;
     }
     await deleteUpdateBlobs(ctx.storage, blobs);
-}
-
-/**
- * Deletes reclaimed update blobs whose pointers are gone, in parallel.
- *
- * A writer whose ack was lost re-sends its pointer write on reconnect,
- * which re-creates a deleted pointer under the same id, possibly while
- * its blob still awaits deletion here. So each merged pointer is re-read
- * after its blob is deleted, and the blob uploaded again from the merged
- * payload (kept in its entry until then) if the pointer is back; the
- * writer checks its blob after its write (restoreMissingBlob), so one of
- * the two always sees the other. A stale-epoch pointer is never merged,
- * so one re-created behind a missing blob is harmless: compaction deletes
- * it unread.
- *
- * Best effort, like snapshot garbage collection: a failure (including a
- * 404 from a double delete) only leaves an orphan, never fails the cycle.
- */
-export async function deleteUpdateBlobs(storage: FirebaseStorage, blobs: UpdateBlobReclaim[]): Promise<void> {
-    await Promise.all(blobs.map(async ({ path: blobPath, pointer, payload }) => {
-        try {
-            await deleteObject(ref(storage, blobPath));
-        } catch (err) {
-            console.warn(`Failed to delete update blob ${blobPath}`, err);
-            return;
-        }
-        if (pointer === undefined || payload === undefined) return;
-        try {
-            if ((await getDocFromServer(pointer)).exists()) {
-                console.warn(`Update pointer ${pointer.id} was re-sent after its blob was reclaimed; uploading it again`);
-                await uploadBlob(storage, blobPath, payload);
-            }
-        } catch (err) {
-            console.warn(`Failed to check update blob ${blobPath} for a re-sent pointer`, err);
-        }
-    }));
 }
 
 /**

@@ -39,11 +39,11 @@ import { generateSessionId, calculateBackoff } from "./utils";
 import { extractClockEnds, aggregateClockEnds, updateEndsWithDeletions } from "./update-metadata";
 import { performInitialSync, createUpdateListener, createSnapshotListener, createHistoryListener, SyncContext, SyncResult } from "./sync";
 import { isClientOfflineError, isLostAckCommit, largeUpdatePath } from "./sync-policy";
-import { compact as performTieredCompaction, deleteUpdateBlobs, CompactionContext, CompactionResult, UpdateBlobReclaim } from "./compaction";
+import { compact as performTieredCompaction, CompactionContext, CompactionResult } from "./compaction";
 import { isPersistentCompactionFailure } from "./compaction-policy";
 import { squashDocument, readDocEpoch, SquashResult } from "./squash";
 import { sharedClockOffset } from "./locking";
-import { uploadBlob, restoreMissingBlob } from "./storage-blobs";
+import { uploadBlob, restoreMissingBlob, deleteUpdateBlobs, UpdateBlobReclaim } from "./storage-blobs";
 import {
   handleSubdocs as handleSubdocsEvent,
   destroyAllSubdocs,

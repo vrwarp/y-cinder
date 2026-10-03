@@ -346,13 +346,15 @@ export function processSnapshotMetadata(data: any, serverSVMap: Map<number, numb
  * it — e.g. a save that commits before initial sync has pushed the doc's
  * pre-existing local content.
  *
- * Each update/history blob therefore contributes the [from, to) range
- * `Y.parseUpdateMeta` reports per client (the same lazy walk as
- * `extractClockEnds`; it never reads the delete-set), and a range only
- * extends the coverage when it starts within it. The base snapshot counts
- * as [0, sv) and is never parsed — it is O(document) and often not even
- * downloaded. The update and history tiers are bounded by compaction, so
- * this stays flat as the document ages.
+ * Each update/history blob therefore contributes the [from, to) ranges
+ * its structs hold per client (one `Y.decodeUpdate` walk, about the cost
+ * of `Y.parseUpdateMeta`, which would report a delta segment merged
+ * across a gap as one range), and a range only extends the coverage when
+ * it starts within it. The base snapshot counts as [0, sv) and is never
+ * parsed — it is O(document) and often not even downloaded; a fold stores
+ * as sv only what the snapshot holds contiguously from clock 0 (see
+ * mergeUpdatesWithMeta). The update and history tiers are bounded by
+ * compaction, so this stays flat as the document ages.
  *
  * @param snapshotSVMap - The base snapshot's state vector (empty if none)
  * @param items - Pending updates collected during initial sync
@@ -361,22 +363,41 @@ export function processSnapshotMetadata(data: any, serverSVMap: Map<number, numb
 export function buildServerCoverage(snapshotSVMap: Map<number, number>, items: PendingUpdate[]): Map<number, number> {
     const ranges = new Map<number, [number, number][]>();
     for (const item of items) {
+        // The fingerprint holds no structs; decoding it would only read
+        // its O(delete-set) deletions.
+        if (item.fingerprint) continue;
         const raw = item.type === 'history' ? item.data.segment
             : item.type === 'update' ? item.data.update
                 : null;
         if (!raw) continue;
-        let meta: { from: Map<number, number>; to: Map<number, number> };
+        let structs: ReturnType<typeof Y.decodeUpdate>['structs'];
         try {
-            meta = Y.parseUpdateMeta(blobOf(raw));
+            structs = Y.decodeUpdate(blobOf(raw)).structs;
         } catch (e) {
             // A corrupted blob proves no coverage; worst case we push a
             // redundant (idempotent) diff.
             console.warn("Failed to parse server blob clock ranges", e);
             continue;
         }
-        for (const [client, from] of meta.from) {
+        // One range per run of contiguous structs: a merged blob (a delta
+        // segment over a gap) marks the clocks it lacks with a Skip, so
+        // its first and last clock do not bound what it holds.
+        let run: [number, number] | null = null;
+        let runClient = 0;
+        for (const struct of structs) {
+            if (struct instanceof Y.Skip) {
+                run = null;
+                continue;
+            }
+            const { client, clock } = struct.id;
+            if (run !== null && client === runClient && clock === run[1]) {
+                run[1] = clock + struct.length;
+                continue;
+            }
+            run = [clock, clock + struct.length];
+            runClient = client;
             const clientRanges = ranges.get(client) || [];
-            clientRanges.push([from, meta.to.get(client) || from]);
+            clientRanges.push(run);
             ranges.set(client, clientRanges);
         }
     }

@@ -599,6 +599,28 @@ describe('buildServerCoverage', () => {
         expect(buildServerCoverage(new Map(), [item]).get(1)).toBe(8);
     });
 
+    it('stops at the gap inside a segment merged across it', () => {
+        // Delta compaction of U1 and U3: one blob whose clocks read as
+        // [0, 12) although it skips [4, 8)
+        const [u1, , u3] = sequentialUpdates();
+        const segment = Y.mergeUpdates([u1, u3]);
+        expect(Y.parseUpdateMeta(segment).to.get(1)).toBe(12);
+        const item: PendingUpdate = { type: 'history', priority: 2, data: { segment: bytes(segment) } };
+
+        expect(buildServerCoverage(new Map(), [item]).get(1)).toBe(4);
+    });
+
+    it('never decodes the delete-set fingerprint (no structs, O(delete-set) to read)', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const [u1] = sequentialUpdates();
+        const fingerprint: PendingUpdate = {
+            type: 'update', priority: 2, fingerprint: true, data: { update: bytes(new Uint8Array([255, 255, 255, 255])) },
+        };
+
+        expect(buildServerCoverage(new Map(), [fingerprint, updateItem(u1)]).get(1)).toBe(4);
+        expect(warn).not.toHaveBeenCalled();
+    });
+
     it('ignores snapshot items and blobs stored under the wrong field', () => {
         const [u1] = sequentialUpdates();
         const items: PendingUpdate[] = [

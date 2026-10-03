@@ -31,6 +31,8 @@ interface MergeRequest {
     updates: Uint8Array[];
     /** When true, garbage-collect deleted content from the merged result */
     gc?: boolean;
+    /** When true, the updates make up a whole document (see MergeOptions.snapshot) */
+    snapshot?: boolean;
     /**
      * When true, also validate the result and return its state vector and
      * delete-set fingerprint (compaction metadata). Keeps multi-hundred-ms
@@ -66,7 +68,7 @@ const ctx: Worker = self as any;
  * Handle incoming merge requests from the main thread.
  */
 ctx.onmessage = (event: MessageEvent<MergeRequest>) => {
-    const { id, updates, gc, meta, diffAgainst, gzip } = event.data;
+    const { id, updates, gc, snapshot, meta, diffAgainst, gzip } = event.data;
 
     if (gzip) {
         // Compression Streams are async; they run on this thread, so a
@@ -93,7 +95,7 @@ ctx.onmessage = (event: MessageEvent<MergeRequest>) => {
         }
 
         if (meta) {
-            const { result, stateVector, dsUpdate } = mergeUpdatesWithMeta(updates, { gc });
+            const { result, stateVector, dsUpdate } = mergeUpdatesWithMeta(updates, { gc, snapshot });
             const response: MergeResponse = { id, result, stateVector, dsUpdate };
             ctx.postMessage(response, [result.buffer, stateVector.buffer, dsUpdate.buffer]);
             return;

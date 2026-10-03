@@ -499,11 +499,14 @@ sessions is `Y.decodeUpdate` of six history segments.
 The server state vector the guard compares against is, per client, the
 clock up to which the server holds *every* struct: the snapshot's state
 vector extended by the `[from, to)` ranges of the update and history
-blobs (`buildServerCoverage`, a lazy `Y.parseUpdateMeta` walk of the two
-tiers compaction keeps small). It is never the highest end clock in the
-metadata: that hides a server-side gap — e.g. a save that committed
-before initial sync pushed the doc's pre-existing content — and the guard
-would never push the missing range.
+blobs (`buildServerCoverage`, a `Y.decodeUpdate` walk of the two tiers
+compaction keeps small, split at the `Skip` a segment merged across a gap
+carries). It is never the highest end clock in the metadata: that hides
+a server-side gap — e.g. a save that committed before initial sync
+pushed the doc's pre-existing content — and the guard would never push
+the missing range. For the same reason a fold stores as the snapshot's
+state vector only what the snapshot holds contiguously from clock 0, not
+its clock ends: a fold over such a gap would otherwise hide it for good.
 
 The snapshot listener also re-applied the fingerprint on every delivery —
 including the attach-delivery of every reconnect, whose state initial sync

@@ -207,7 +207,7 @@ export async function mergeUpdatesAsync(updates: Uint8Array[], options?: MergeOp
  * structural validation.
  *
  * @param updates - Array of Uint8Array updates to merge
- * @param options - Merge options (gc)
+ * @param options - Merge options (gc, snapshot)
  * @returns Promise resolving to the merged update plus its metadata
  */
 export async function mergeUpdatesWithMetaAsync(
@@ -216,7 +216,7 @@ export async function mergeUpdatesWithMetaAsync(
 ): Promise<MergeWithMetaResult> {
     if (initWorker() && mergeWorker) {
         const response = await postToWorker(
-            { updates, gc: !!options?.gc, meta: true },
+            { updates, gc: !!options?.gc, snapshot: !!options?.snapshot, meta: true },
             () => mergeUpdatesWithMeta(updates, options)
         );
         if (response.stateVector && response.dsUpdate) {
@@ -225,7 +225,7 @@ export async function mergeUpdatesWithMetaAsync(
         // Worker dropped the meta fields — derive on the main thread from
         // its merge result (defensive; should not happen since worker and
         // client are bundled together). gc already happened in the worker.
-        return mergeUpdatesWithMeta([response.result], { gc: false });
+        return mergeUpdatesWithMeta([response.result], { gc: false, snapshot: options?.snapshot });
     }
 
     return Promise.resolve(mergeUpdatesWithMeta(updates, options));
@@ -289,7 +289,7 @@ export async function gzipBlobAsync(blob: Uint8Array): Promise<Uint8Array> {
  * @param timeoutMs - How long to wait for the worker (default 30 s)
  */
 function postToWorker(
-    message: { updates: Uint8Array[]; gc: boolean; meta: boolean; diffAgainst?: Uint8Array; gzip?: boolean },
+    message: { updates: Uint8Array[]; gc: boolean; snapshot?: boolean; meta: boolean; diffAgainst?: Uint8Array; gzip?: boolean },
     fallback: () => WorkerResponse | Promise<WorkerResponse>,
     timeoutMs: number = MERGE_TIMEOUT_MS
 ): Promise<WorkerResponse> {

@@ -434,14 +434,14 @@ export async function compact(
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
         }
 
-        // A fold must merge a per-client prefix of the document: the
-        // snapshot's state vector holds clock ends, and the sync layer skips
-        // every segment that vector covers. When history extends past what
-        // one fold can merge, the pending updates are newer than the
-        // segments left behind, so folding them in would make the snapshot
-        // claim clocks it does not hold and fresh clients would skip those
-        // segments for good. Such a fold takes base + the oldest history
-        // only; the updates wait for a later cycle.
+        // A fold must merge a per-client prefix of the document. When
+        // history extends past what one fold can merge, the pending updates
+        // are newer than the segments left behind, so folding them in would
+        // leave gaps in the snapshot: its state vector would stop at the
+        // first one (see below), the GC rebuild would fail, and every
+        // reader would park the structs past the gaps until a later fold.
+        // Such a fold takes base + the oldest history only; the updates
+        // wait for a later cycle.
         const updatesToFold = historyTruncated ? [] : updatesToProcess;
 
         // === FOLD: download base, merge all, upload new snapshot ===
@@ -470,6 +470,13 @@ export async function compact(
         // keeps compaction's main-thread cost near zero. A validation
         // failure rejects, and a corrupted merge must never overwrite the
         // canonical snapshot.
+        //
+        // The state vector is what the snapshot holds contiguously from
+        // clock 0 (snapshot: true), not its clock ends: the push guard
+        // reads it as the range [0, sv) the server holds, so a fold that
+        // merges across a server-side gap (an update document written
+        // without the same client's earlier structs) must not claim the
+        // gap, or the client holding the missing range never pushes it.
         const tailSources = [...historyToMerge.map(h => h.val), ...updatesToFold.map(u => u.data)];
         const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...tailSources];
         let candidate: Uint8Array;
@@ -477,7 +484,7 @@ export async function compact(
         let deleteSetUpdate: Uint8Array | null = null;
         let oversizedDeleteSet: Uint8Array | null = null;
         try {
-            const merged = await mergeUpdatesWithMetaAsync(allContent, { gc: ctx.gc !== false });
+            const merged = await mergeUpdatesWithMetaAsync(allContent, { gc: ctx.gc !== false, snapshot: true });
             candidate = merged.result;
             stateVectorB64 = toBase64(merged.stateVector);
 

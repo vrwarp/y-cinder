@@ -100,6 +100,7 @@ import { acquireLock, releaseLock } from "./locking";
 import { mergeUpdatesWithMetaAsync } from "./merge-utils";
 import { uploadBlob } from "./storage-blobs";
 import { updateHasDeletions } from "./update-metadata";
+import { isPermanentDownloadError } from "./sync-policy";
 
 /**
  * Context required for compaction operations.
@@ -366,7 +367,7 @@ export async function compact(
                     // still holding it as redundant. Abort; a later cycle
                     // retries once the download succeeds.
                     console.error(`Compaction failed to download storage-backed update ${uDoc.id}`, e);
-                    throw e;
+                    throw await blobDownloadError(db, e, uDoc.ref, updateBlobPath, plan.storagePath);
                 }
             }
             if (plan.kind === 'inline') {
@@ -479,7 +480,8 @@ export async function compact(
                 baseSnapshot = new Uint8Array(buffer);
             } catch (e) {
                 console.error("Compaction failed to download base snapshot from storage", e);
-                throw e; // Cannot safely compact without base state
+                // Cannot safely compact without base state
+                throw await blobDownloadError(db, e, mainRef, (data) => readMainDocState(data).baseStoragePath, baseStoragePath);
             }
         } else if (baseInline) {
             baseSnapshot = baseInline.toUint8Array();
@@ -988,6 +990,52 @@ function blobsOf(
         const payload = payloads.get(docRef.path);
         return [payload === undefined ? { path: blobPath } : { path: blobPath, pointer: docRef, payload }];
     });
+}
+
+/**
+ * The error a cycle fails with when it could not download a blob that
+ * one of its reads named.
+ *
+ * Those reads can be stale even though the lock transaction reached the
+ * server: the SDK answers getDoc/getDocs from its cache while it
+ * considers itself offline, and from a live listener's view, which
+ * trails the server. A blob is deleted only after a commit replaced or
+ * deleted the pointer naming it, so a stale pointer can name a blob that
+ * another client's compaction already reclaimed. Storage reports that as
+ * a missing object before our commit could detect the race, and a
+ * missing object is a failure retrying will not fix
+ * (isPersistentCompactionFailure). A missing blob is therefore checked
+ * against the pointer as the server holds it, read in a transaction
+ * (getDoc could answer from the same stale view): a pointer that no
+ * longer names the blob makes the failure contention, which compact()
+ * retries on fresh reads. A blob missing behind a pointer that still
+ * names it is gone for good. A failed check throws its own error.
+ *
+ * @param db - Firestore instance
+ * @param error - The download error
+ * @param pointerRef - The document whose read named the blob
+ * @param namedBlob - The blob a version of that document names, if any
+ * @param blobPath - The blob that could not be downloaded
+ * @returns The error to throw
+ */
+async function blobDownloadError(
+    db: Firestore,
+    error: unknown,
+    pointerRef: DocumentReference,
+    namedBlob: (data: Record<string, any> | null) => string | null,
+    blobPath: string
+): Promise<unknown> {
+    if (!isPermanentDownloadError(error)) {
+        return error;
+    }
+    const pointer = await runTransaction(db, (transaction) => transaction.get(pointerRef));
+    if (namedBlob(pointer.exists() ? pointer.data() : null) === blobPath) {
+        return error;
+    }
+    return Object.assign(
+        new Error(`${blobPath} was reclaimed by another client's compaction after this cycle read ${pointerRef.path}. Aborting to retry.`),
+        { code: 'aborted' }
+    );
 }
 
 /**

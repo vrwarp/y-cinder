@@ -94,11 +94,27 @@ export interface SubdocError {
 export type SubProviderMap = Map<string, any>;
 
 /**
+ * The subdocument instance each provider was started for. Providers are
+ * keyed by guid, but moving or replacing a subdoc gives its guid a new
+ * Y.Doc instance, and only the removed instance's provider may be torn down.
+ */
+const providerDocs = new WeakMap<object, Y.Doc>();
+
+/**
+ * Other instances of each provider's guid that asked for a provider while
+ * it was bound to an earlier instance: a subdoc moved by inserting the copy
+ * before deleting the original, or a second reference to the same guid.
+ * One of them takes the guid over when the bound instance is removed.
+ */
+const waitingDocs = new WeakMap<object, Set<Y.Doc>>();
+
+/**
  * Handles subdocument events (added, removed, loaded).
  * 
  * This function manages the lifecycle of subdocument providers:
  * - For added/loaded subdocs: Creates a new provider
- * - For removed subdocs: Destroys the existing provider
+ * - For removed subdocs: Destroys the provider bound to that instance and
+ *   hands its guid to another instance of it waiting for a provider
  * 
  * @param event - The subdocs event from Y.Doc
  * @param ctx - Subdocument context
@@ -118,6 +134,43 @@ export function handleSubdocs(
 ): void {
     const { added, removed, loaded } = event;
 
+    // Handle removed subdocs first: moving or replacing a subdoc in one
+    // transaction removes the old instance and adds a new one with the same
+    // guid in a single event, and the new instance needs its own provider.
+    // Only the provider bound to the removed instance is destroyed, so the
+    // second event Yjs emits when it then destroys that instance is a no-op.
+    //
+    // A removed instance that is already destroyed was unloaded by
+    // subdoc.destroy() (also run on every subdoc when the parent is
+    // destroyed), and Yjs added an unloaded placeholder with the same guid
+    // in its place. That placeholder waits for load() in either mode.
+    const unloaded = new Set<string>();
+    removed.forEach(subdoc => {
+        const guid = subdoc.guid;
+        if (subdoc.isDestroyed) {
+            unloaded.add(guid);
+        }
+        const provider = subProviders.get(guid);
+        if (provider && providerDocs.get(provider) === subdoc) {
+            Promise.resolve(provider.destroy()).catch((err: unknown) => {
+                console.error(`Failed to destroy subdoc provider ${guid}:`, err);
+            });
+            subProviders.delete(guid);
+
+            // Hand the guid to an instance that waited for it, unless that
+            // instance is removed too or the parent is being destroyed
+            // (which destroys every subdoc in turn).
+            waitingDocs.get(provider)?.forEach(other => {
+                const parent = (other._item?.parent as Y.AbstractType<any> | undefined)?.doc;
+                if (!removed.has(other) && !parent?.isDestroyed) {
+                    startSubdocProvider(other, ctx, subProviders);
+                }
+            });
+        } else if (provider) {
+            waitingDocs.get(provider)?.delete(subdoc);
+        }
+    });
+
     // Handle added subdocs.
     // In lazy mode, remote-arriving subdocs (shouldLoad === false) are NOT
     // synced yet: a document with hundreds of subdocs would otherwise pay
@@ -126,7 +179,8 @@ export function handleSubdocs(
     // them in the `loaded` set below. Locally created subdocs and
     // autoLoad subdocs have shouldLoad === true and sync immediately.
     added.forEach(subdoc => {
-        if (ctx.subdocLoadingMode === 'lazy' && !subdoc.shouldLoad) {
+        if (!subdoc.shouldLoad &&
+            (ctx.subdocLoadingMode === 'lazy' || unloaded.has(subdoc.guid))) {
             return;
         }
         startSubdocProvider(subdoc, ctx, subProviders);
@@ -135,18 +189,6 @@ export function handleSubdocs(
     // Handle loaded subdocs (explicit subdoc.load() calls)
     loaded.forEach(subdoc => {
         startSubdocProvider(subdoc, ctx, subProviders);
-    });
-
-    // Handle removed subdocs
-    removed.forEach(subdoc => {
-        const guid = subdoc.guid;
-        const provider = subProviders.get(guid);
-        if (provider) {
-            Promise.resolve(provider.destroy()).catch((err: unknown) => {
-                console.error(`Failed to destroy subdoc provider ${guid}:`, err);
-            });
-            subProviders.delete(guid);
-        }
     });
 }
 
@@ -159,7 +201,8 @@ export function handleSubdocs(
  * @param subdoc - The subdocument to sync
  * @param ctx - Subdocument context
  * @param subProviders - Map of existing subdocument providers
- * @returns The created provider, or null if depth limit exceeded
+ * @returns The created provider, or null if depth limit exceeded or the
+ *   subdoc is destroyed
  * 
  * @example
  * ```typescript
@@ -176,9 +219,21 @@ export function startSubdocProvider(
 ): any | null {
     const guid = subdoc.guid;
 
-    // Already have a provider for this subdoc
-    if (subProviders.has(guid)) {
-        return subProviders.get(guid);
+    // A subdoc inserted and destroyed in the same transaction is reported
+    // as added; a destroyed Y.Doc never syncs again.
+    if (subdoc.isDestroyed) {
+        return null;
+    }
+
+    // Already have a provider for this guid. If it is bound to another
+    // instance, this one waits and takes over once that instance is removed.
+    const existing = subProviders.get(guid);
+    if (existing) {
+        if (providerDocs.get(existing) !== subdoc) {
+            const waiting = waitingDocs.get(existing) ?? new Set<Y.Doc>();
+            waitingDocs.set(existing, waiting.add(subdoc));
+        }
+        return existing;
     }
 
     const subPath = `${ctx.parentPath}/subdocs/${guid}`;
@@ -215,6 +270,7 @@ export function startSubdocProvider(
         subdocLoadingMode: ctx.subdocLoadingMode,
     });
 
+    providerDocs.set(provider, subdoc);
     subProviders.set(guid, provider);
     return provider;
 }

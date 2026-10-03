@@ -9,15 +9,18 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+    compactionBackoffMs,
     computeSaveDelay,
+    initialSyncSaveHold,
     isRemoteOrigin,
+    planListenerRecovery,
     squashBlockedBy,
     validateProviderConfig,
 } from '../../src/provider-policy';
 import { FIREBASE_ORIGINS } from '../../src/types';
 
 describe('validateProviderConfig', () => {
-    const valid = { path: 'docs/a', maxUpdatesThreshold: 10, maxAggregationTime: 1_000, depth: 0 };
+    const valid = { path: 'docs/a', maxUpdatesThreshold: 10, maxWaitTime: 100, maxAggregationTime: 1_000, depth: 0 };
 
     it('accepts a valid configuration', () => {
         expect(() => validateProviderConfig(valid)).not.toThrow();
@@ -47,6 +50,20 @@ describe('validateProviderConfig', () => {
         expect(() => validateProviderConfig({ ...valid, maxUpdatesThreshold: 1 })).not.toThrow();
     });
 
+    it('rejects a negative wait time', () => {
+        expect(() => validateProviderConfig({ ...valid, maxWaitTime: -1 }))
+            .toThrow(/Invalid maxWaitTime/);
+    });
+
+    it('accepts a zero wait time (save immediately)', () => {
+        expect(() => validateProviderConfig({ ...valid, maxWaitTime: 0 })).not.toThrow();
+    });
+
+    it('blames a negative wait time before the aggregation time derived from it', () => {
+        expect(() => validateProviderConfig({ ...valid, maxWaitTime: -1, maxAggregationTime: -10 }))
+            .toThrow(/Invalid maxWaitTime/);
+    });
+
     it('rejects a non-positive aggregation time', () => {
         expect(() => validateProviderConfig({ ...valid, maxAggregationTime: 0 }))
             .toThrow(/Invalid maxAggregationTime/);
@@ -63,7 +80,7 @@ describe('validateProviderConfig', () => {
     });
 
     it('reports the path problem first when several are wrong', () => {
-        expect(() => validateProviderConfig({ path: '', maxUpdatesThreshold: 0, maxAggregationTime: 0, depth: -5 }))
+        expect(() => validateProviderConfig({ path: '', maxUpdatesThreshold: 0, maxWaitTime: -1, maxAggregationTime: 0, depth: -5 }))
             .toThrow(/Invalid Firestore path/);
     });
 });
@@ -128,8 +145,100 @@ describe('computeSaveDelay', () => {
     });
 });
 
+describe('initialSyncSaveHold', () => {
+    const base = { syncInFlight: true, maxAggregationTime: 5_000, pendingSince: 9_000, now: 10_000 };
+
+    it('saves at once when no initial sync is running', () => {
+        expect(initialSyncSaveHold({ ...base, syncInFlight: false })).toBe(0);
+    });
+
+    it('saves at once when nothing is buffered', () => {
+        expect(initialSyncSaveHold({ ...base, pendingSince: null })).toBe(0);
+    });
+
+    /*
+     * The sync's push covers the buffer: a save now would upload it twice
+     * (on a cold start, the whole hydrated document).
+     */
+    it('waits for the sync until the aggregation ceiling', () => {
+        // Buffered at 9,000; ceiling 14,000; now 10,000 -> 4,000 left.
+        expect(initialSyncSaveHold(base)).toBe(4_000);
+    });
+
+    /* A stalled sync (offline push) must not hold edits indefinitely. */
+    it('stops holding once the ceiling has passed', () => {
+        expect(initialSyncSaveHold({ ...base, now: 14_000 })).toBe(0);
+        expect(initialSyncSaveHold({ ...base, now: 1_000_000 })).toBe(0);
+    });
+});
+
+describe('planListenerRecovery', () => {
+    const base = { retryCount: 0, attachedAt: 100_000, now: 100_500, healthyMs: 30_000, maxRetries: 5 };
+
+    it('re-syncs after the first error', () => {
+        expect(planListenerRecovery(base)).toEqual({ retryCount: 1, giveUp: false });
+    });
+
+    it('escalates when the fresh listeners fail again quickly', () => {
+        expect(planListenerRecovery({ ...base, retryCount: 2 })).toEqual({ retryCount: 3, giveUp: false });
+    });
+
+    /*
+     * The re-sync's reads can succeed while the listen itself keeps being
+     * rejected; without a cap every cycle re-reads the whole document.
+     */
+    it('gives up once errors in quick succession reach maxRetries', () => {
+        expect(planListenerRecovery({ ...base, retryCount: 3 })).toEqual({ retryCount: 4, giveUp: false });
+        expect(planListenerRecovery({ ...base, retryCount: 4 })).toEqual({ retryCount: 5, giveUp: true });
+    });
+
+    it('starts over when the listeners stayed up for healthyMs', () => {
+        expect(planListenerRecovery({ ...base, retryCount: 4, now: base.attachedAt + 30_000 }))
+            .toEqual({ retryCount: 1, giveUp: false });
+    });
+
+    it('still counts listeners that failed just short of healthyMs', () => {
+        expect(planListenerRecovery({ ...base, retryCount: 4, now: base.attachedAt + 29_999 }))
+            .toEqual({ retryCount: 5, giveUp: true });
+    });
+});
+
+describe('compactionBackoffMs', () => {
+    const base = { failures: 1, baseMs: 10_000, maxMs: 1_800_000, random: 0 };
+
+    /*
+     * One failure must cost no more triggers than a healthy document: the
+     * first delay is the trigger cooldown itself.
+     */
+    it('waits one base delay after the first failure', () => {
+        expect(compactionBackoffMs(base)).toBe(10_000);
+    });
+
+    it('doubles per consecutive failure', () => {
+        expect(compactionBackoffMs({ ...base, failures: 2 })).toBe(20_000);
+        expect(compactionBackoffMs({ ...base, failures: 3 })).toBe(40_000);
+        expect(compactionBackoffMs({ ...base, failures: 8 })).toBe(1_280_000);
+    });
+
+    it('stops growing at the cap', () => {
+        expect(compactionBackoffMs({ ...base, failures: 9 })).toBe(1_800_000);
+        expect(compactionBackoffMs({ ...base, failures: 5_000 })).toBe(1_800_000);
+    });
+
+    it('adds up to a quarter of jitter, never less than the step', () => {
+        expect(compactionBackoffMs({ ...base, random: 0.5 })).toBe(11_250);
+        expect(compactionBackoffMs({ ...base, random: 0.999 })).toBeLessThan(12_500);
+        expect(compactionBackoffMs({ ...base, failures: 20, random: 0.999 })).toBeLessThan(2_250_000);
+        expect(compactionBackoffMs({ ...base, failures: 20, random: 0.999 })).toBeGreaterThan(1_800_000);
+    });
+
+    it('treats a zero failure count like the first failure', () => {
+        expect(compactionBackoffMs({ ...base, failures: 0 })).toBe(10_000);
+    });
+});
+
 describe('squashBlockedBy', () => {
-    const ready = { isDestroyed: false, synced: true, epochFenced: false, subProviderCount: 0, depth: 0 };
+    const ready = { isDestroyed: false, synced: true, epochFenced: false, subProviderCount: 0, subdocCount: 0, depth: 0 };
 
     it('allows a squash when everything is ready', () => {
         expect(squashBlockedBy(ready)).toBeNull();
@@ -154,6 +263,16 @@ describe('squashBlockedBy', () => {
 
     it('blocks a provider that owns subdocuments', () => {
         expect(squashBlockedBy({ ...ready, subProviderCount: 1 }))
+            .toEqual({ kind: 'subdocs-unsupported' });
+    });
+
+    /*
+     * Lazy mode starts no provider for an unloaded subdocument, so the
+     * provider count alone let squash reach buildSquashedDoc with
+     * subdocuments in the document.
+     */
+    it('blocks a document holding subdocuments that have no provider', () => {
+        expect(squashBlockedBy({ ...ready, subdocCount: 1 }))
             .toEqual({ kind: 'subdocs-unsupported' });
     });
 

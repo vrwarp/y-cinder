@@ -52,7 +52,8 @@ export interface FireProviderConfig {
      */
     maxUpdatesThreshold?: number;
     /**
-     * Debounce wait time in milliseconds before saving updates.
+     * Debounce wait time in milliseconds before saving updates. 0 saves
+     * without debouncing; negative values are rejected.
      * @default 500
      */
     maxWaitTime?: number;
@@ -102,7 +103,9 @@ export interface FireProviderConfig {
      * re-uploading the whole snapshot every maxUpdatesThreshold updates.
      * On aged documents (multi-MB snapshots) this cuts steady-state
      * compaction transfer by roughly this factor.
-     * Set to 1 to restore the old always-fold behavior.
+     * Set to 1 to restore the old always-fold behavior. Values above 100
+     * behave like 100: one fold merges at most 99 history segments
+     * (Firestore's 500-write transaction limit).
      * @default 8
      */
     historyFoldThreshold?: number;
@@ -131,6 +134,18 @@ export interface FireProviderConfig {
      * @internal
      */
     cachedClockOffset?: number;
+    /**
+     * Settles once local persistence has loaded the stored state into
+     * `ydoc` (y-indexeddb / y-idb: `persistence.whenSynced`). Pass it when
+     * the provider is constructed before that load completes: initial sync
+     * still reads the server meanwhile, but waits for it before comparing
+     * the local doc with the server. A doc that is still empty there
+     * downloads the whole Storage snapshot local persistence is about to
+     * load anyway, and old-epoch local state slips past the epoch fence.
+     * A rejection, or no settlement within 10 seconds, lets sync proceed
+     * without it. Not passed on to subdocument providers.
+     */
+    localReady?: Promise<unknown>;
     /**
      * Test hooks for dependency injection.
      * @internal
@@ -180,12 +195,29 @@ export const DEFAULTS = {
     MAX_SUBDOC_DEPTH: 50,
     TARGET_SNAPSHOT_SIZE: 900000, // 900KB
     MAX_RETRIES: 5,
+    /**
+     * Real-time listeners that stay up this long count as healthy: their
+     * next error restarts the re-sync backoff instead of counting toward
+     * MAX_RETRIES.
+     */
+    LISTENER_HEALTHY_MS: 30_000,
+    /**
+     * Longest wait between initial-sync attempts while the client is
+     * offline (these attempts do not count toward MAX_RETRIES).
+     */
+    OFFLINE_SYNC_RETRY_MAX_MS: 10_000,
     /** Maximum docs to fetch per batch during initial sync (P0.1 fix) */
     SYNC_BATCH_SIZE: 100,
     /** Pending-update count that forces a compaction trigger, bypassing the trigger cooldown */
     REALTIME_LIMIT: 200,
     /** Minimum time between compaction triggers from a single client's listener */
     COMPACTION_TRIGGER_COOLDOWN_MS: 10_000,
+    /**
+     * Cap on the automatic-compaction backoff after failures that retrying
+     * cannot fix. The first delay is COMPACTION_TRIGGER_COOLDOWN_MS and it
+     * doubles per consecutive failure up to this cap (plus jitter).
+     */
+    COMPACTION_FAILURE_BACKOFF_MAX_MS: 30 * 60_000,
     /** Firestore maximum document size in bytes (1MB) */
     FIRESTORE_DOC_LIMIT: 1_048_576,
     /**
@@ -197,6 +229,25 @@ export const DEFAULTS = {
     /** Maximum consecutive save failures before emitting save-rejected */
     MAX_SAVE_RETRIES: 5,
     /**
+     * How long destroy() waits for Firestore to acknowledge its final
+     * writes. Offline the ack never comes; the writes stay queued in the
+     * SDK and are sent on reconnect, so destroy() settles anyway.
+     */
+    DESTROY_FLUSH_TIMEOUT_MS: 5_000,
+    /**
+     * How long initial sync waits for `localReady`. y-idb's whenSynced
+     * never rejects, and never settles if the persistence is destroyed
+     * first; past this, sync proceeds as if the option were absent.
+     */
+    LOCAL_READY_TIMEOUT_MS: 10_000,
+    /**
+     * How long compaction and squash wait for the clock-skew probe before
+     * their first lock. Its write resolves only when the server
+     * acknowledges it, which never happens while offline; past this, the
+     * operation gives up as a lock transaction would offline.
+     */
+    CLOCK_SKEW_PROBE_TIMEOUT_MS: 10_000,
+    /**
      * Caps on documents deleted per compaction transaction. Firestore
      * transactions allow at most 500 writes; updates + history + 1 snapshot
      * set must stay within that budget (400 + 99 + 1 = 500).
@@ -205,9 +256,10 @@ export const DEFAULTS = {
     MAX_COMPACTION_HISTORY: 99,
     /**
      * Maximum size of the delete-set fingerprint stored inline on the main
-     * document. Larger delete-sets are simply not stored (clients fall back
-     * to a redundant-but-idempotent push), keeping the main document well
-     * under the Firestore size limit.
+     * document. Larger fingerprints are offloaded to Cloud Storage
+     * (`deleteSetStoragePath`). So are smaller ones that would not fit
+     * within INLINE_UPDATE_LIMIT beside the main document's base64 state
+     * vector, which grows with every client ever seen.
      */
     MAX_DELETE_SET_FIELD_BYTES: 700_000,
 } as const;

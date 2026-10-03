@@ -53,14 +53,19 @@ import {
     deleteField,
     limit,
 } from "@firebase/firestore";
-import { ref, uploadBytes, deleteObject, FirebaseStorage } from "@firebase/storage";
+import { ref, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
 import { toBase64, fromBase64 } from "lib0/buffer";
 import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";
+import { generateSessionId } from "./utils";
+import { readMainDocState, updateBlobPath } from "./compaction-policy";
+import { reclaimUpdateBlobs } from "./compaction";
+import { uploadBlob, UpdateBlobReclaim } from "./storage-blobs";
 import {
     isNotQuiescent,
     isSquashPreempted,
+    localCoversDeletions,
     localCoversPendingDoc,
     readVersionEpoch,
     squashSnapshotPath,
@@ -94,6 +99,8 @@ export function docHasContent(ydoc: Y.Doc): boolean {
 /**
  * Deep-clones the CONTENT of `source` into a fresh Y.Doc with a brand-new
  * id space, and stamps the target epoch into the provider metadata map.
+ * `source` is only read: its subdocuments and embedded types are copied,
+ * never moved, so destroying the result leaves `source` intact.
  *
  * Throws when a root shared type was never concretely typed on this client
  * (its constructor is still AbstractType) — squashing such a document
@@ -140,10 +147,10 @@ export function buildSquashedDoc(source: Y.Doc, epoch: number): Y.Doc {
                     t.insert(0, type.toArray().map(cloneValue));
                 } else if (type instanceof Y.XmlFragment && !(type instanceof Y.XmlElement)) {
                     const t = target.getXmlFragment(name);
-                    t.insert(0, (type.toArray() as any[]).map((c) => c.clone()));
+                    t.insert(0, type.toArray().map(cloneValue) as any[]);
                 } else if (type instanceof Y.Text) {
                     const t = target.getText(name);
-                    t.applyDelta(type.toDelta());
+                    t.applyDelta(cloneDelta(type.toDelta()));
                 } else {
                     throw new Error(
                         `Cannot squash: root share '${name}' has unsupported type ${type.constructor?.name}`
@@ -159,8 +166,53 @@ export function buildSquashedDoc(source: Y.Doc, epoch: number): Y.Doc {
     return target;
 }
 
+/**
+ * Deep-clones a value for the squashed document.
+ *
+ * Nothing integrated in the live doc may reach the clone: Yjs re-parents
+ * an integrated type or subdocument into whichever document it is
+ * inserted into, detaching it from the live doc — and destroying the
+ * clone then destroys a live subdocument. Yjs's own clone() passes
+ * subdocuments, Y.Text embeds and Y.XmlHook values through as the live
+ * instances, so the recursion is done here for every built-in type.
+ */
 function cloneValue(v: unknown): unknown {
+    if (v instanceof Y.Doc) {
+        // A subdocument is a guid reference; its content syncs on its own
+        return new Y.Doc({ guid: v.guid, gc: v.gc, autoLoad: v.autoLoad, meta: v.meta, shouldLoad: false });
+    }
+    if (v instanceof Y.Map) {
+        const m: Y.Map<unknown> = v instanceof Y.XmlHook ? new Y.XmlHook(v.hookName) : new Y.Map();
+        v.forEach((x: unknown, k: string) => m.set(k, cloneValue(x)));
+        return m;
+    }
+    if (v instanceof Y.Array) {
+        const a = new Y.Array();
+        a.insert(0, v.toArray().map(cloneValue));
+        return a;
+    }
+    if (v instanceof Y.Text) {
+        const t = v instanceof Y.XmlText ? new Y.XmlText() : new Y.Text();
+        t.applyDelta(cloneDelta(v.toDelta()));
+        return t;
+    }
+    if (v instanceof Y.XmlElement) {
+        const el = new Y.XmlElement(v.nodeName);
+        Object.entries(v.getAttributes()).forEach(([k, x]) => el.setAttribute(k, cloneValue(x) as any));
+        el.insert(0, v.toArray().map(cloneValue) as any[]);
+        return el;
+    }
+    if (v instanceof Y.XmlFragment) {
+        const f = new Y.XmlFragment();
+        f.insert(0, v.toArray().map(cloneValue) as any[]);
+        return f;
+    }
     return v instanceof Y.AbstractType ? (v as any).clone() : v;
+}
+
+/** Clones the embedded values of a Y.Text delta (strings stay as-is). */
+function cloneDelta(delta: any[]): any[] {
+    return delta.map((op) => ({ ...op, insert: cloneValue(op.insert) }));
 }
 
 /**
@@ -192,6 +244,8 @@ export interface SquashContext {
     isDestroyed: () => boolean;
     /** The live, fully-synced document to squash */
     doc: Y.Doc;
+    /** See CompactionContext.deferredUpdateBlobs */
+    deferredUpdateBlobs?: UpdateBlobReclaim[];
 }
 
 export interface SquashResult {
@@ -200,9 +254,10 @@ export interface SquashResult {
     epoch?: number;
     /**
      * Why the squash was skipped (no error): another client holds the
-     * lock, too much unfolded data, or the local doc is behind the server.
+     * lock, too much unfolded data, the local doc is behind the server,
+     * or the local doc changed while the squash was uploading/committing.
      */
-    skippedReason?: 'lock-unavailable' | 'not-quiescent' | 'local-behind';
+    skippedReason?: 'lock-unavailable' | 'not-quiescent' | 'local-behind' | 'local-changed';
     error?: Error;
 }
 
@@ -212,14 +267,18 @@ export interface SquashResult {
  * Preconditions (validated here):
  *  - caller is fully synced (local state vector covers everything stored
  *    server-side, checked against the snapshot state vector and pending
- *    update/segment metadata);
+ *    update/segment metadata, and every server-side deletion of a struct
+ *    it holds is applied locally, checked against the snapshot's
+ *    delete-set fingerprint and the pending updates/segments);
  *  - pending updates + history fit one Firestore transaction — run a
  *    normal compaction first to fold the backlog.
  *
  * The new snapshot is uploaded to Cloud Storage; the transaction bumps
  * `epoch` and `version`, resets the delete-set fingerprint (a squashed
  * document has no deletions), and deletes the old-epoch update/history
- * documents it verified.
+ * documents it verified. It commits nothing when the live doc changed
+ * after it was cloned (skippedReason 'local-changed'): the snapshot would
+ * lack that change, and the squashing client stops syncing on success.
  */
 export async function squashDocument(ctx: SquashContext): Promise<SquashResult> {
     const { db, path, uid, lockTTL, cachedClockOffset, storage, isDestroyed, doc: ydoc } = ctx;
@@ -228,6 +287,11 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
     if (!hasLock) {
         return { success: false, skippedReason: 'lock-unavailable' };
     }
+
+    // Set by any change to the live doc after the clone below (e.g. the
+    // user editing while the snapshot uploads).
+    let changedSinceClone = false;
+    const onLiveUpdate = () => { changedSinceClone = true; };
 
     try {
         // Snapshot of what exists server-side right now
@@ -264,8 +328,25 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         if (!stateVectorCovers(localSV, mainData?.stateVector)) {
             return { success: false, skippedReason: 'local-behind' };
         }
-        for (const snap of [...updatesSnap.docs, ...historySnap.docs]) {
-            if (!localCoversPendingDoc(localSV, snap.data())) {
+        const pendingDocs = [...updatesSnap.docs, ...historySnap.docs].map(snap => snap.data());
+        for (const data of pendingDocs) {
+            if (!localCoversPendingDoc(localSV, data)) {
+                return { success: false, skippedReason: 'local-behind' };
+            }
+        }
+
+        // State vectors do not move on deletion, so the squasher must also
+        // have applied every deletion the server holds: the snapshot's
+        // delete-set fingerprint (or, predating fingerprints, the snapshot
+        // itself) and each pending update/segment.
+        const deletionBlobs = await Promise.all([
+            mainData?.deleteSet || mainData?.deleteSetStoragePath
+                ? readBlob(storage, mainData.deleteSet, mainData.deleteSetStoragePath)
+                : readBlob(storage, mainData?.content, mainData?.snapshotStoragePath),
+            ...pendingDocs.map(data => readBlob(storage, data.update ?? data.segment, data.updateStoragePath)),
+        ]);
+        for (const blob of deletionBlobs) {
+            if (blob && !localCoversDeletions(ydoc, blob)) {
                 return { success: false, skippedReason: 'local-behind' };
             }
         }
@@ -273,6 +354,7 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         // Build the new-epoch document
         const newEpoch = currentEpoch + 1;
         const squashed = buildSquashedDoc(ydoc, newEpoch);
+        ydoc.on('update', onLiveUpdate);
         let candidate: Uint8Array;
         let stateVectorB64: string;
         let dsUpdate: Uint8Array;
@@ -286,10 +368,14 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         }
 
         const nextVersion = currentVersion + 1;
-        const storagePath = squashSnapshotPath(path, newEpoch, nextVersion);
-        await uploadBytes(ref(storage, storagePath), candidate);
+        const storagePath = squashSnapshotPath(path, newEpoch, nextVersion, generateSessionId());
+        await uploadBlob(storage, storagePath, candidate);
 
+        // Blobs of the pointer documents the committed attempt deleted
+        // (reset per attempt: the body re-runs on contention).
+        let deletedBlobs: string[] = [];
         const result = await runTransaction(db, async (transaction) => {
+            deletedBlobs = [];
             const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
             const lockSnap = await transaction.get(lockRef);
             if (!stillHoldsLock(lockSnap.exists() ? lockSnap.data() : undefined, uid)) {
@@ -302,10 +388,12 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
                 throw new Error("Document changed during squash upload. Aborting.");
             }
 
-            const [updateChecks, historyChecks] = await Promise.all([
-                Promise.all(updatesSnap.docs.map(d => transaction.get(d.ref))),
-                Promise.all(historySnap.docs.map(d => transaction.get(d.ref))),
-            ]);
+            // Checked last, right before the writes: a change the clone
+            // lacks would be silently dropped from the new epoch. Commit
+            // nothing and let the provider keep syncing it in this epoch.
+            if (changedSinceClone) {
+                return { success: false as const, skippedReason: 'local-changed' as const };
+            }
 
             transaction.set(mainRef, {
                 snapshotStoragePath: storagePath,
@@ -314,18 +402,41 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
                 // A squashed document has no deletions yet
                 deleteSet: Bytes.fromUint8Array(dsUpdate),
                 deleteSetStoragePath: deleteField(),
+                // Recorded for the same reason as a fold's (see
+                // MainDocState.orphanedBlobPaths)
+                snapshotBlobPaths: [storagePath],
+                // A fold's tail belongs to the old epoch's id space
+                foldTailStoragePath: deleteField(),
+                foldTailBaseClocks: deleteField(),
+                foldTailVersion: deleteField(),
                 version: nextVersion,
                 epoch: newEpoch,
                 updatedAt: serverTimestamp(),
                 origin: uid,
             }, { merge: true });
 
-            for (const s of [...updateChecks, ...historyChecks]) {
-                if (s.exists()) transaction.delete(s.ref);
+            // Deleted without re-reading: the squashed doc covers every one
+            // of them (checked above), and only lock holders delete
+            // update/history documents (see "Deletion" in compaction.ts).
+            for (const d of [...updatesSnap.docs, ...historySnap.docs]) {
+                transaction.delete(d.ref);
             }
+            deletedBlobs = updatesSnap.docs
+                .map(d => updateBlobPath(d.data()))
+                .filter((p): p is string => p !== null);
 
             return { success: true as const, epoch: newEpoch };
         });
+
+        // Nothing references a deleted pointer's blob any more (see
+        // updateBlobPath), but a peer may still be downloading one: it is
+        // reclaimed later, like compaction's (see reclaimUpdateBlobs). A
+        // re-sent pointer write may re-create a pointer, but tagged with
+        // the old epoch: listeners drop it, initial sync skips a missing
+        // blob, and compaction deletes it unread.
+        if (result.success) {
+            await reclaimUpdateBlobs(ctx, deletedBlobs.map(blobPath => ({ path: blobPath })));
+        }
 
         // Best-effort cleanup of the previous epoch's blobs
         if (result.success && typeof mainData?.snapshotStoragePath === 'string') {
@@ -338,11 +449,42 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
                 await deleteObject(ref(storage, mainData.deleteSetStoragePath));
             } catch { /* orphaned blob is harmless */ }
         }
+        if (result.success && typeof mainData?.foldTailStoragePath === 'string') {
+            try {
+                await deleteObject(ref(storage, mainData.foldTailStoragePath));
+            } catch { /* orphaned blob is harmless */ }
+        }
+        // ...and those an older client's fold replaced without deleting
+        // them: this commit replaced the record of them
+        if (result.success) {
+            for (const blobPath of readMainDocState(mainData).orphanedBlobPaths) {
+                try {
+                    await deleteObject(ref(storage, blobPath));
+                } catch { /* orphaned blob is harmless */ }
+            }
+        }
 
         return result;
     } catch (e: any) {
         return { success: false, error: e instanceof Error ? e : new Error(String(e)) };
     } finally {
+        ydoc.off('update', onLiveUpdate);
         await releaseLock({ db, path, uid });
     }
+}
+
+/**
+ * Reads a blob a document stores either inline (Firestore Bytes) or in
+ * Cloud Storage.
+ *
+ * @returns The bytes, or null when the document carries neither.
+ */
+async function readBlob(storage: FirebaseStorage, inline: unknown, storagePath: unknown): Promise<Uint8Array | null> {
+    if (inline) {
+        return (inline as Bytes).toUint8Array();
+    }
+    if (typeof storagePath === 'string') {
+        return new Uint8Array(await getBytes(ref(storage, storagePath)));
+    }
+    return null;
 }

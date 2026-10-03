@@ -21,8 +21,13 @@
  * {
  *   clientIDs: number[],    // All client IDs in the update
  *   clientClocks: number[], // Per-client clockEnd values (paired with clientIDs)
+ *   hasDeletions?: true,    // The update deletes something (omitted when not)
  * }
  * ```
+ *
+ * Clocks only cover structs, so they can never prove a reader already
+ * holds an update's deletions: a document flagged `hasDeletions` is
+ * applied even when its clocks are covered (applying is idempotent).
  *
  * @module update-metadata
  */
@@ -141,6 +146,43 @@ export function extractClockEnds(update: Uint8Array): Map<number, number> {
         console.warn("Failed to extract update clock metadata:", e);
         return new Map();
     }
+}
+
+/**
+ * Whether a Yjs update carries any deletions.
+ *
+ * Clock metadata cannot answer this: a deletion adds no struct, so it never
+ * moves a state vector. Decodes the whole blob, so it is meant for small
+ * structs-empty updates such as a merge's `dsUpdate`.
+ *
+ * @param update - The Yjs update blob to inspect
+ * @returns true when the delete-set is non-empty, or when the blob fails to
+ *          parse (claiming deletions only costs a redundant apply)
+ */
+export function updateHasDeletions(update: Uint8Array): boolean {
+    try {
+        return Y.decodeUpdate(update).ds.clients.size > 0;
+    } catch (e) {
+        console.warn("Failed to read update delete-set:", e);
+        return true;
+    }
+}
+
+/**
+ * Whether a V1 update carries any deletions, read from its last byte.
+ *
+ * The delete-set trails a V1 update (see encodeDeleteSet). An empty one is
+ * the single byte 0 (no clients); a non-empty one ends with its last
+ * range's length, a varUint of at least 1 whose final byte is never 0
+ * (Yjs writes no client without ranges and no empty range). Unlike
+ * `updateHasDeletions` it costs nothing on a large blob, so the save and
+ * push paths can flag every update document they write.
+ *
+ * @param update - A V1 update as Yjs encodes it
+ * @returns true when the delete-set is non-empty
+ */
+export function updateEndsWithDeletions(update: Uint8Array): boolean {
+    return update.byteLength > 0 && update[update.byteLength - 1] !== 0;
 }
 
 /**
@@ -288,11 +330,20 @@ export function diffCarriesNewData(diff: Uint8Array, getServerBlobs: () => Uint8
  * Proves (or fails to prove) that the union of the server blobs' delete-sets
  * covers `localDs`.
  *
- * Blobs are checked smallest-first with an early exit once coverage is
+ * Blobs are decoded smallest-first with an early exit once coverage is
  * proven. On a long-lived document, the snapshot's delete-set fingerprint
  * (small by construction) almost always proves coverage on its own, so a
  * reconnecting client never decodes the multi-megabyte snapshot or history
  * blobs just to conclude "nothing to push".
+ *
+ * Coverage is monotone in the union of the server sets, so it is only
+ * checked when the next blob would more than double the bytes decoded at
+ * the previous check, and once at the end. That always checks before a
+ * blob larger than everything decoded so far (the early exit still skips
+ * the snapshot), decodes less than twice what checking after every blob
+ * would, and bounds the O(|DS|) checks to a logarithmic number: the dozens
+ * of tiny pending update documents that sort ahead of the fingerprint no
+ * longer cost one full check each.
  *
  * Used by the reconnect push guard both via {@link diffCarriesNewData}
  * (when a diff was already encoded) and directly with a delete-set obtained
@@ -308,8 +359,23 @@ export function deleteSetCoveredByBlobs(
     getServerBlobs: () => Uint8Array[]
 ): boolean {
     let serverDs = Y.mergeDeleteSets([]);
-    const covered = () =>
-        Y.equalDeleteSets(serverDs, Y.mergeDeleteSets([serverDs, localDs]));
+    let unmerged: ReturnType<typeof Y.decodeUpdate>['ds'][] = [];
+    let decodedBytes = 0;
+    let checkedBytes = 0;
+    // Only the private accumulator and freshly decoded sets are merged:
+    // Y.mergeDeleteSets reuses the input DeleteItems and widens them in
+    // place, so localDs must never go in (the caller's set would change,
+    // and serverDs stretched over adjacent local deletions would "prove"
+    // its own coverage). The merged result is canonical, as
+    // deleteSetContains requires.
+    const covered = () => {
+        if (unmerged.length > 0) {
+            serverDs = Y.mergeDeleteSets([serverDs, ...unmerged]);
+            unmerged = [];
+        }
+        checkedBytes = decodedBytes;
+        return deleteSetContains(serverDs, localDs);
+    };
 
     // Handles the trivial case (empty local delete-set) without decoding
     // any server blob at all.
@@ -319,16 +385,186 @@ export function deleteSetCoveredByBlobs(
 
     const blobs = getServerBlobs().slice().sort((a, b) => a.byteLength - b.byteLength);
     for (const blob of blobs) {
+        if (unmerged.length > 0 && decodedBytes + blob.byteLength > 2 * checkedBytes && covered()) {
+            return true;
+        }
         try {
-            serverDs = Y.mergeDeleteSets([serverDs, Y.decodeUpdate(blob).ds]);
+            unmerged.push(Y.decodeUpdate(blob).ds);
         } catch (e) {
             // Corrupted server blob contributes nothing to coverage;
             // worst case we push a redundant (idempotent) diff.
             continue;
         }
-        if (covered()) {
-            return true;
+        decodedBytes += blob.byteLength;
+    }
+    return covered();
+}
+
+/**
+ * Strips from a diff the deletions the server provably holds already.
+ *
+ * Yjs embeds the document's COMPLETE delete-set in every diff, so pushing
+ * a few bytes of offline structs would re-upload every deletion the
+ * document has ever seen: an O(delete-set) update document that every
+ * online peer integrates and the next delta compaction copies into a
+ * history segment.
+ *
+ * The result keeps the diff's structs section byte for byte and replaces
+ * its trailing delete-set with the ranges the server blobs do not prove: a
+ * range is dropped only when one range of the blobs' merged delete-set
+ * contains it. Merging joins adjacent and overlapping ranges, so that is
+ * exactly "the server's union contains it"; a range only partly on the
+ * server is kept whole (re-deleting the rest is idempotent).
+ *
+ * The delete-set is read from the diff itself and its re-encoding must
+ * match the diff's trailing bytes, so the split point is the diff's own;
+ * otherwise, and on any error, the diff is returned unchanged. A blob that
+ * fails to parse proves nothing, so the result only errs towards pushing
+ * more.
+ *
+ * @param diff - A V1 update, typically `Y.encodeStateAsUpdate(doc, serverSV)`
+ * @param getServerBlobs - Lazily provides the server blobs whose delete-sets
+ *                         prove coverage (only invoked when the diff
+ *                         carries deletions)
+ * @returns The diff carrying only the deletions the server lacks, or `diff`
+ *          itself when none can be dropped
+ */
+export function withoutServerDeletions(diff: Uint8Array, getServerBlobs: () => Uint8Array[]): Uint8Array {
+    try {
+        const diffDs = Y.decodeUpdate(diff).ds;
+        if (diffDs.clients.size === 0) {
+            return diff;
+        }
+        const dsSection = encodeDeleteSet(diffDs);
+        if (!endsWith(diff, dsSection)) {
+            return diff;
+        }
+
+        // One merge over all blobs: merging them one at a time re-sorts the
+        // accumulated set per blob, O(blobs × delete-set). The decoded sets
+        // are throwaway, so Y.mergeDeleteSets widening them in place is
+        // harmless here.
+        const serverDss: ReturnType<typeof Y.decodeUpdate>['ds'][] = [];
+        for (const blob of getServerBlobs()) {
+            try {
+                serverDss.push(Y.decodeUpdate(blob).ds);
+            } catch (e) {
+                // Corrupted server blob contributes nothing to coverage
+                continue;
+            }
+        }
+        const missing = deletionsMissingFrom(diffDs, Y.mergeDeleteSets(serverDss));
+        if (missing === null) {
+            return diff;
+        }
+
+        const structsEnd = diff.byteLength - dsSection.byteLength;
+        const missingSection = encodeDeleteSet(missing);
+        const trimmed = new Uint8Array(structsEnd + missingSection.byteLength);
+        trimmed.set(diff.subarray(0, structsEnd));
+        trimmed.set(missingSection, structsEnd);
+        return trimmed;
+    } catch (e) {
+        console.warn("Failed to strip server deletions from diff:", e);
+        return diff;
+    }
+}
+
+/**
+ * The ranges of `ds` that no single range of `serverDs` contains.
+ *
+ * @param ds - Delete-set with each client's ranges sorted by clock
+ * @param serverDs - Sorted and merged delete-set, as Y.mergeDeleteSets
+ *                   returns it
+ * @returns The ranges to keep, or null when no range can be dropped
+ */
+function deletionsMissingFrom(
+    ds: ReturnType<typeof Y.decodeUpdate>['ds'],
+    serverDs: ReturnType<typeof Y.decodeUpdate>['ds']
+): ReturnType<typeof Y.decodeUpdate>['ds'] | null {
+    const missing = Y.createDeleteSet();
+    let dropped = false;
+    ds.clients.forEach((items, client) => {
+        const serverItems = serverDs.clients.get(client) || [];
+        const kept: typeof items = [];
+        let j = 0;
+        for (const item of items) {
+            // Both lists are sorted: skip server ranges ending before it
+            while (j < serverItems.length && serverItems[j].clock + serverItems[j].len <= item.clock) {
+                j++;
+            }
+            const range = serverItems[j];
+            if (range !== undefined && range.clock <= item.clock &&
+                item.clock + item.len <= range.clock + range.len) {
+                dropped = true;
+            } else {
+                kept.push(item);
+            }
+        }
+        if (kept.length > 0) {
+            missing.clients.set(client, kept);
+        }
+    });
+    return dropped ? missing : null;
+}
+
+/**
+ * Encodes a delete-set exactly as it trails a V1 update: Y.encodeSnapshot
+ * writes it with the same writer as Y.encodeStateAsUpdate, followed by the
+ * snapshot's state vector (empty here: a single zero byte).
+ */
+function encodeDeleteSet(ds: ReturnType<typeof Y.decodeUpdate>['ds']): Uint8Array {
+    const encoded = Y.encodeSnapshot(Y.createSnapshot(ds, new Map()));
+    return encoded.subarray(0, encoded.byteLength - 1);
+}
+
+function endsWith(bytes: Uint8Array, suffix: Uint8Array): boolean {
+    const offset = bytes.byteLength - suffix.byteLength;
+    if (offset < 0) {
+        return false;
+    }
+    for (let i = 0; i < suffix.byteLength; i++) {
+        if (bytes[offset + i] !== suffix[i]) {
+            return false;
         }
     }
-    return false;
+    return true;
+}
+
+/**
+ * Whether every deletion in `ds` lies within one range of `canonicalDs`,
+ * which must be sorted and merged the way Y.mergeDeleteSets or
+ * Y.createDeleteSetFromStructStore leave it (overlapping AND adjacent
+ * ranges joined). Equivalent to
+ * `Y.equalDeleteSets(canonicalDs, Y.mergeDeleteSets([canonicalDs, ds]))`,
+ * without copying, sorting or mutating either set.
+ */
+export function deleteSetContains(
+    canonicalDs: ReturnType<typeof Y.decodeUpdate>['ds'],
+    ds: ReturnType<typeof Y.decodeUpdate>['ds']
+): boolean {
+    for (const [client, items] of ds.clients) {
+        const ranges = canonicalDs.clients.get(client);
+        if (ranges === undefined) {
+            return false;
+        }
+        for (let i = 0; i < items.length; i++) {
+            const { clock, len } = items[i];
+            // Only the last range starting at or before `clock` can contain it
+            let lo = 0;
+            let hi = ranges.length - 1;
+            while (lo <= hi) {
+                const mid = (lo + hi) >>> 1;
+                if (ranges[mid].clock <= clock) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            if (hi < 0 || ranges[hi].clock + ranges[hi].len < clock + len) {
+                return false;
+            }
+        }
+    }
+    return true;
 }

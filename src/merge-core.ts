@@ -35,6 +35,12 @@ export interface MergeOptions {
      * with garbage collection enabled, dropping deleted-item content.
      */
     gc?: boolean;
+    /**
+     * When true, the updates make up a whole document (a fold's snapshot),
+     * and mergeUpdatesWithMeta reports as its state vector what the result
+     * holds contiguously from clock 0 instead of its clock ends.
+     */
+    snapshot?: boolean;
 }
 
 /**
@@ -122,8 +128,17 @@ export function mergeUpdatesWithMeta(updates: Uint8Array[], options?: MergeOptio
     // breaks the sync layer's redundancy checks (empty = "covers nothing"
     // = segment skipped as vacuously redundant) and makes the dsUpdate
     // diff below degenerate to the whole update.
-    const stateVector = Y.encodeStateVector(Y.parseUpdateMeta(merged).to);
-    const dsUpdate = Y.diffUpdate(merged, stateVector);
+    const clockEnds = Y.encodeStateVector(Y.parseUpdateMeta(merged).to);
+    // A snapshot is the opposite case: the push guard reads its state
+    // vector as the range [0, sv) the server holds (buildServerCoverage).
+    // When the merge skips clocks of a client (an update document written
+    // without the same client's earlier structs, which is also what sends
+    // a GC rebuild here), its clock ends claim the gap, and the client
+    // holding the missing range would never push it.
+    // encodeStateVectorFromUpdate stops at the gap.
+    const stateVector = options?.snapshot ? Y.encodeStateVectorFromUpdate(merged) : clockEnds;
+    // Diffed against the clock ends: no structs, full delete-set
+    const dsUpdate = Y.diffUpdate(merged, clockEnds);
     return { result: merged, stateVector, dsUpdate };
 }
 

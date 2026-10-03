@@ -5,6 +5,9 @@
  * - extractAllMetadata: Parses Yjs update internals to get clock ranges
  * - aggregateMetadata: Combines metadata for Firestore storage
  * - isUpdateRedundant: Determines if an update is already applied locally
+ * - updateHasDeletions: Detects deletions, which clock metadata cannot show
+ * - updateEndsWithDeletions: The same answer from an update's last byte
+ * - deleteSetContains: Exact delete-set range containment
  *
  * These functions enable efficient sync by comparing clocks instead of content.
  *
@@ -15,7 +18,10 @@ import { describe, it, expect, vi } from 'vitest';
 import {
     extractAllMetadata,
     aggregateMetadata,
-    isUpdateRedundant
+    isUpdateRedundant,
+    updateHasDeletions,
+    updateEndsWithDeletions,
+    deleteSetContains
 } from '../../src/update-metadata';
 import * as Y from 'yjs';
 
@@ -242,6 +248,167 @@ describe('update-metadata', () => {
             );
 
             expect(result).toBe(false);
+        });
+    });
+
+    describe('updateHasDeletions', () => {
+        it('should be false for an insert-only update', () => {
+            const doc = new Y.Doc();
+            doc.getMap('m').set('a', 1);
+
+            expect(updateHasDeletions(Y.encodeStateAsUpdate(doc))).toBe(false);
+            doc.destroy();
+        });
+
+        it('should be true for a delete-only update, whose clock metadata is empty', () => {
+            const doc = new Y.Doc();
+            const map = doc.getMap('m');
+            map.set('a', 1);
+            const before = Y.encodeStateVector(doc);
+            map.delete('a');
+            const deleteOnly = Y.encodeStateAsUpdate(doc, before);
+
+            expect(Y.parseUpdateMeta(deleteOnly).to.size).toBe(0);
+            expect(updateHasDeletions(deleteOnly)).toBe(true);
+            doc.destroy();
+        });
+
+        it('should be false for a structs-empty update with an empty delete-set', () => {
+            const doc = new Y.Doc();
+            doc.getMap('m').set('a', 1);
+
+            expect(updateHasDeletions(Y.encodeStateAsUpdate(doc, Y.encodeStateVector(doc)))).toBe(false);
+            doc.destroy();
+        });
+
+        it('should claim deletions for an unparseable blob (never skipped)', () => {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+            expect(updateHasDeletions(new Uint8Array([0xff, 0xff, 0xff]))).toBe(true);
+            expect(warn).toHaveBeenCalled();
+            warn.mockRestore();
+        });
+    });
+
+    /*
+     * The save and push paths flag update documents from the last byte
+     * alone; it must agree with a full decode on every update shape they
+     * write: transaction updates, merged batches and state diffs.
+     */
+    describe('updateEndsWithDeletions', () => {
+        const updatesOf = () => {
+            const doc = new Y.Doc();
+            doc.clientID = 7;
+            const peer = new Y.Doc();
+            peer.clientID = 2 ** 31 + 5;
+            const events: Uint8Array[] = [];
+            doc.on('update', (u: Uint8Array) => events.push(u));
+            const text = doc.getText('t');
+            const map = doc.getMap('m');
+            text.insert(0, 'x'.repeat(400));
+            map.set('k', 1);
+            Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+            const beforeEdits = Y.encodeStateVector(doc);
+            map.set('k', 2); // an overwrite deletes the old value
+            text.delete(10, 300); // a range length past one varUint byte
+            text.insert(0, 'y');
+            map.delete('k');
+            peer.getText('t').delete(0, 1);
+            Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer, Y.encodeStateVector(doc)));
+            text.insert(0, 'z');
+            const updates = [
+                ...events,
+                Y.mergeUpdates(events),
+                Y.mergeUpdates(events.slice(0, 2)),
+                Y.encodeStateAsUpdate(doc),
+                Y.encodeStateAsUpdate(doc, beforeEdits),
+                Y.encodeStateAsUpdate(doc, Y.encodeStateVector(doc)),
+                Y.encodeStateAsUpdate(new Y.Doc()),
+            ];
+            doc.destroy();
+            peer.destroy();
+            return updates;
+        };
+
+        it('should agree with updateHasDeletions on every update', () => {
+            const updates = updatesOf();
+            const decoded = updates.map(updateHasDeletions);
+
+            expect(decoded).toContain(true);
+            expect(decoded).toContain(false);
+            expect(updates.map(updateEndsWithDeletions)).toEqual(decoded);
+        });
+    });
+
+    describe('deleteSetContains', () => {
+        /** A delete-set from client -> [clock, len] ranges, in the order given. */
+        const dsOf = (ranges: Record<number, [number, number][]>) => {
+            const ds = Y.createDeleteSet();
+            for (const [client, items] of Object.entries(ranges)) {
+                ds.clients.set(Number(client), items.map(([clock, len]) => ({ clock, len })) as any);
+            }
+            return ds;
+        };
+        // Canonical: sorted, overlapping and adjacent ranges joined.
+        const canonical = () => dsOf({ 1: [[0, 5], [10, 5], [20, 1]], 2: [[3, 4]] });
+
+        it('should be true for ranges inside, or exactly matching, canonical ranges', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[0, 5], [11, 2], [14, 1], [20, 1]], 2: [[3, 4]] }))).toBe(true);
+        });
+
+        it('should be true for an empty delete-set', () => {
+            expect(deleteSetContains(canonical(), Y.createDeleteSet())).toBe(true);
+            expect(deleteSetContains(Y.createDeleteSet(), Y.createDeleteSet())).toBe(true);
+        });
+
+        it('should be false for a range one clock past either end of a canonical range', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[10, 6]] }))).toBe(false);
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[9, 2]] }))).toBe(false);
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[21, 1]] }))).toBe(false);
+        });
+
+        it('should be false for a range bridging the gap between two canonical ranges', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[3, 9]] }))).toBe(false);
+        });
+
+        it('should be false for a range before every canonical range of its client', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 2: [[0, 1]] }))).toBe(false);
+        });
+
+        it('should be false for a client the canonical set lacks', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 3: [[0, 1]] }))).toBe(false);
+        });
+
+        it('should judge every range, in any order, not just the first or last', () => {
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[20, 1], [5, 1], [0, 1]] }))).toBe(false);
+            expect(deleteSetContains(canonical(), dsOf({ 1: [[20, 1], [12, 1], [0, 1]] }))).toBe(true);
+        });
+
+        it('should modify neither set', () => {
+            const sup = canonical();
+            const sub = dsOf({ 1: [[1, 2], [12, 8]] });
+            const copy = (ds: ReturnType<typeof dsOf>) => [...ds.clients].map(([c, items]) => [c, items.map(i => [i.clock, i.len])]);
+            const [supBefore, subBefore] = [copy(sup), copy(sub)];
+
+            deleteSetContains(sup, sub);
+
+            expect(copy(sup)).toEqual(supBefore);
+            expect(copy(sub)).toEqual(subBefore);
+        });
+
+        it('should judge real delete-sets against one built from the struct store', () => {
+            const doc = new Y.Doc();
+            const map = doc.getMap('m');
+            for (let i = 0; i < 30; i++) map.set(`k${i % 7}`, i);
+            const local = Y.createDeleteSetFromStructStore(doc.store);
+            const held = Y.decodeUpdate(Y.encodeStateAsUpdate(doc)).ds;
+            map.delete('k3');
+            const ahead = Y.createDeleteSetFromStructStore(doc.store);
+
+            expect(deleteSetContains(local, held)).toBe(true);
+            expect(deleteSetContains(local, ahead)).toBe(false);
+            expect(deleteSetContains(ahead, local)).toBe(true);
+            doc.destroy();
         });
     });
 });

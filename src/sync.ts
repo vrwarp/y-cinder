@@ -10,7 +10,7 @@
  * ### Initial Sync (performInitialSync)
  * 1. Fetch all server data (updates, history, snapshot)
  * 2. Extract metadata (client IDs and clock values) from each item
- * 3. Build a server state vector from the metadata
+ * 3. Build a server state vector: the clocks the server holds contiguously
  * 4. Compare with local state vector
  * 5. Apply only items that contain data missing locally
  * 6. Push any local data that's missing on the server
@@ -44,13 +44,15 @@ import {
     orderBy,
     getDocs,
     getDoc,
+    getDocFromServer,
     serverTimestamp,
     limit,
     startAfter,
     limitToLast,
     QueryDocumentSnapshot,
+    DocumentReference,
 } from "@firebase/firestore";
-import { getBytes, ref, uploadBytes, FirebaseStorage } from "@firebase/storage";
+import { getBytes, ref, deleteObject, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
 import { fromBase64 } from "lib0/buffer";
 import {
@@ -58,24 +60,35 @@ import {
     FIRESTORE_PATHS,
     DEFAULTS,
 } from "./types";
-import { writeStateVector } from "./utils";
-import { extractClockEnds, aggregateClockEnds, isUpdateRedundant, diffCarriesNewData, deleteSetCoveredByBlobs } from "./update-metadata";
+import { writeStateVector, wait, calculateBackoff, generateSessionId } from "./utils";
+import { extractClockEnds, aggregateClockEnds, updateEndsWithDeletions, isUpdateRedundant, deleteSetCoveredByBlobs, withoutServerDeletions } from "./update-metadata";
 import {
     PendingUpdate,
     collectServerBlobs,
     ensureDecodedSV,
+    foldTailMayCatchUp,
     localCoversSnapshot,
-    processUpdateMetadata,
-    processHistoryMetadata,
     processSnapshotMetadata,
+    buildServerCoverage,
+    refreshLocalClocks,
+    rebaseIfPending,
     isItemRedundant,
+    fingerprintIsRedundant,
+    transactionChangedDoc,
     applyItem,
+    blobOf,
+    diffSnapshotForLocal,
 } from "./sync-helpers";
 import {
+    CLIENT_OFFLINE,
     diffHasPayload,
     diffNeedsStorage,
     epochTag as buildEpochTag,
     hasMorePages,
+    isClientOfflineError,
+    isLostAckCommit,
+    isPermanentDownloadError,
+    isServedFromCache,
     largeUpdatePath,
     orderByApplyPriority,
     serverCoversLocalStructs,
@@ -85,6 +98,7 @@ import {
     survivesEpochFence,
 } from "./sync-policy";
 import { readDocEpoch, docHasContent } from "./squash";
+import { uploadBlob, restoreMissingBlob } from "./storage-blobs";
 
 /**
  * Context required for sync operations.
@@ -102,6 +116,21 @@ export interface SyncContext {
     maxUpdatesThreshold: number;
     /** Callback to trigger compaction */
     onCompactionNeeded?: () => void;
+    /**
+     * When automatic compaction triggers may resume (epoch ms, 0 = now).
+     * The provider backs off after a compaction failure that retrying
+     * cannot fix; until then the update listener triggers nothing, not
+     * even at the realtime hard cap.
+     */
+    getCompactionBackoffUntil?: () => number;
+    /**
+     * Fired when this client sees compaction progress made by any client:
+     * update documents leaving the collection, or a new snapshot version.
+     * The provider ends its failure backoff, so recovery after another
+     * client succeeds (or an operator fixes the cause) is not delayed by up
+     * to the backoff cap.
+     */
+    onCompactionProgress?: () => void;
     /** P1.7 FIX: Callback when listener encounters an error */
     onListenerError?: (error: Error) => void;
     /** Flag to check if provider is destroyed */
@@ -134,6 +163,30 @@ export interface SyncContext {
      * this so the application can rebuild from the new epoch.
      */
     onEpochChanged?: (serverEpoch: number) => void;
+    /**
+     * Fired during initial sync once the server's epoch is known and does
+     * not conflict with the local document, before any local data is
+     * pushed. The provider must tag its saves with this epoch from then
+     * on: a save that starts while the initial-sync push is in flight
+     * carries edits made after the diff, and peers drop it unless it
+     * belongs to the same epoch as the push.
+     */
+    onEpochAdopted?: (serverEpoch: number) => void;
+    /**
+     * Fired synchronously right before the push decision reads the local
+     * doc. Once performInitialSync then reports success, the server holds
+     * everything the doc held at this point (already, or inside the push),
+     * so the provider retires the local updates it had buffered by then
+     * instead of saving them a second time.
+     */
+    onLocalStateCaptured?: () => void;
+    /**
+     * Resolves once local persistence has loaded into the doc (bounded by
+     * the provider; never rejects — see FireProviderConfig.localReady).
+     * Initial sync awaits it after its server reads, before anything
+     * compares the local doc with the server.
+     */
+    localReady?: Promise<void>;
 }
 
 /**
@@ -150,6 +203,12 @@ export interface SyncResult {
     localUpdatesPushed: boolean;
     /** The last document observed during sync, used as a cursor for the listener */
     lastSyncedDoc: QueryDocumentSnapshot | null;
+    /**
+     * Number of update documents up to and including lastSyncedDoc. The
+     * listener's query starts after that cursor, so these are passed to it
+     * separately: they still count toward the compaction threshold.
+     */
+    syncedUpdateCount: number;
     /** The last history document observed during sync, used as a cursor for history listener */
     lastHistoryDoc: QueryDocumentSnapshot | null;
     /**
@@ -168,6 +227,22 @@ export interface SyncResult {
      * an epoch-changed event instead of retrying.
      */
     epochConflict?: { serverEpoch: number; localEpoch: number };
+}
+
+/**
+ * Fails initial sync when a read was answered from the local cache (see
+ * isServedFromCache): the client is offline.
+ *
+ * @param snapshot - The query or document snapshot just read.
+ * @throws An error isClientOfflineError recognizes.
+ */
+function requireServerRead(snapshot: { metadata?: { fromCache?: boolean } }): void {
+    if (isServedFromCache(snapshot)) {
+        throw Object.assign(
+            new Error('Initial sync read was served from the local cache: client is offline'),
+            { code: CLIENT_OFFLINE }
+        );
+    }
 }
 
 /**
@@ -215,12 +290,13 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
     const BATCH_SIZE = DEFAULTS.SYNC_BATCH_SIZE;
 
     try {
-        const serverSVMap = new Map<number, number>();
+        const snapshotSVMap = new Map<number, number>();
         const pendingUpdates: PendingUpdate[] = [];
         let updatesApplied = 0;
 
         // 1. Fetch Updates (Tier 3) with pagination (P0.1 fix)
         let lastUpdateDoc: QueryDocumentSnapshot | null = null;
+        let syncedUpdateCount = 0;
         let hasMoreUpdates = true;
 
         while (hasMoreUpdates) {
@@ -238,7 +314,8 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const updatesSnap = await getDocs(updatesQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+            requireServerRead(updatesSnap);
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
             if (updatesSnap.empty) {
                 hasMoreUpdates = false;
@@ -251,16 +328,23 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                             try {
                                 const storageRef = ref(ctx.storage, data.updateStoragePath);
                                 const buffer = await getBytes(storageRef);
-                                data.update = Bytes.fromUint8Array(new Uint8Array(buffer));
+                                data.update = new Uint8Array(buffer);
                             } catch (storageErr) {
                                 console.error(`Failed to download storage-backed update: ${data.updateStoragePath}`, storageErr);
+                                // Skipping would still report success and move the listener
+                                // cursor past this update, so nothing would ever fetch it
+                                // again — propagate so the sync retry logic in provider.ts
+                                // handles backoff/retry. Only a blob that is gone is skipped.
+                                if (!isPermanentDownloadError(storageErr)) {
+                                    throw storageErr;
+                                }
                                 continue; // Skip this update — cannot apply without data
                             }
                         }
                         // Metadata is folded into the server state vector
                         // only after the epoch is known (main doc read) —
                         // foreign-epoch documents must not contribute.
-                        pendingUpdates.push({ type: 'update', data, priority: 3 });
+                        pendingUpdates.push({ type: 'update', data, priority: 3, unacknowledged: snap.metadata.hasPendingWrites });
                     }
                 }
 
@@ -269,6 +353,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
 
                 if (cursorIndex >= 0) {
                     lastUpdateDoc = updatesSnap.docs[cursorIndex];
+                    syncedUpdateCount += cursorIndex + 1;
                 }
 
                 hasMoreUpdates = hasMorePages(updatesSnap.docs.length, BATCH_SIZE);
@@ -294,7 +379,8 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 );
 
             const historySnap = await getDocs(historyQ);
-            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+            requireServerRead(historySnap);
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
 
             if (historySnap.empty) {
                 hasMoreHistory = false;
@@ -324,7 +410,18 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // 3. Fetch Base Snapshot (Tier 1) - single document, no pagination needed
         const mainRef = doc(db, path);
         const mainSnap = await getDoc(mainRef);
-        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+        requireServerRead(mainSnap);
+        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+
+        // Local persistence may still be loading into the doc (provider
+        // constructed first); the reads above overlapped with it. Wait for
+        // it before anything below compares the doc with the server: a
+        // still-empty doc would slip past the epoch fence and download the
+        // Storage snapshot that local persistence is about to load.
+        if (ctx.localReady) {
+            await ctx.localReady;
+            if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+        }
 
         let snapshotVersion: number | null = null;
         let serverEpoch = 0;
@@ -350,6 +447,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         updatesApplied: 0,
                         localUpdatesPushed: false,
                         lastSyncedDoc: null,
+                        syncedUpdateCount: 0,
                         lastHistoryDoc: null,
                         snapshotVersion,
                         epoch: serverEpoch,
@@ -357,14 +455,15 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     };
                 }
 
-                processSnapshotMetadata(data, serverSVMap);
+                processSnapshotMetadata(data, snapshotSVMap);
 
                 // The delete-set fingerprint written by compaction is a
                 // structs-empty update. Treating it as a regular update both
                 // proves delete-set coverage to the push guard below and
-                // applies any deletions the local doc may have missed.
+                // applies any deletions the local doc may have missed (only
+                // when there are some: see the apply loop).
                 if (data.deleteSet) {
-                    pendingUpdates.push({ type: 'update', data: { update: data.deleteSet, epoch: serverEpoch }, priority: 2 });
+                    pendingUpdates.push({ type: 'update', data: { update: data.deleteSet, epoch: serverEpoch }, priority: 2, fingerprint: true });
                 } else if (data.deleteSetStoragePath) {
                     // Fingerprint outgrew the inline cap and was offloaded to
                     // Cloud Storage. Download it: it is O(delete-set) and its
@@ -375,8 +474,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         const buffer = await getBytes(ref(ctx.storage, data.deleteSetStoragePath));
                         pendingUpdates.push({
                             type: 'update',
-                            data: { update: Bytes.fromUint8Array(new Uint8Array(buffer)), epoch: serverEpoch },
+                            data: { update: new Uint8Array(buffer), epoch: serverEpoch },
                             priority: 2,
+                            fingerprint: true,
                         });
                     } catch (dsErr) {
                         // Coverage falls back to the other server blobs; worst
@@ -387,6 +487,16 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
 
                 // Fetch snapshot from Cloud Storage if available
                 if (data.snapshotStoragePath) {
+                    // A client that missed only the last fold (a device
+                    // returning while another one kept editing) lacks just
+                    // that fold's tail: catch up from it first. Applied on
+                    // its own, ahead of the transaction below, because only
+                    // the re-check after it can tell whether the snapshot
+                    // is still needed.
+                    if (!localCoversSnapshot(data, ydoc) && foldTailMayCatchUp(data, ydoc)) {
+                        await applyFoldTail(ctx.storage, data, ydoc, isDestroyed);
+                        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+                    }
                     // Skip the (potentially large) blob download when the
                     // local doc already covers the snapshot's state vector —
                     // typical for reconnecting clients.
@@ -394,8 +504,14 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         try {
                             const storageRef = ref(ctx.storage, data.snapshotStoragePath);
                             const buffer = await getBytes(storageRef);
-                            // Convert ArrayBuffer to Uint8Array and inject it into data.content
-                            data.content = Bytes.fromUint8Array(new Uint8Array(buffer));
+                            // A local doc behind the snapshot gets only what
+                            // it lacks (diffed off the main thread when
+                            // possible); a fresh one gets the whole blob.
+                            // Injected into data.content as a Uint8Array, not
+                            // Bytes: the readers take either (blobOf), and
+                            // wrapping an O(document) blob costs a string
+                            // concat per byte.
+                            data.content = await diffSnapshotForLocal(new Uint8Array(buffer), data, ydoc);
                             pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
                         } catch (storageErr) {
                             console.error("Failed to download snapshot from Cloud Storage", storageErr);
@@ -410,13 +526,20 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 }
             }
         }
+        // The Storage downloads above can take seconds: a provider destroyed
+        // meanwhile must not apply anything nor push its local diff.
+        if (isDestroyed()) return { success: false, updatesApplied: 0, localUpdatesPushed: false, lastSyncedDoc: null, syncedUpdateCount: 0, lastHistoryDoc: null, snapshotVersion: null, epoch: 0 };
+
+        // The server epoch is final for this sync: adopt it before the
+        // push below computes its diff (see SyncContext.onEpochAdopted).
+        ctx.onEpochAdopted?.(serverEpoch);
 
         // 3b. Epoch filter + server state vector. Update/history documents
         // from foreign epochs are dropped: their structs belong to an
         // unrelated id space (pre-squash) and would sit in pendingStructs
-        // forever, poisoning GC compaction. Metadata therefore only enters
+        // forever, poisoning GC compaction. Blobs therefore only enter
         // the server state vector for same-epoch items — and the fence
-        // must run BEFORE metadata processing so a stale update can never
+        // must run BEFORE it is built so a stale update can never
         // suppress the initial-sync push.
         for (let i = pendingUpdates.length - 1; i >= 0; i--) {
             const item = pendingUpdates[i];
@@ -424,13 +547,17 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                 pendingUpdates.splice(i, 1);
             }
         }
-        for (const item of pendingUpdates) {
-            if (item.type === 'history') {
-                processHistoryMetadata(item.data, serverSVMap);
-            } else if (item.type === 'update') {
-                processUpdateMetadata(item.data, serverSVMap);
-            }
-        }
+        // Contiguous coverage, not the metadata's clock ENDs: an update
+        // written without what precedes it (e.g. a save that committed
+        // before initial sync pushed the doc's pre-existing content) ends
+        // at the client's full clock although the server lacks its start.
+        //
+        // Only committed documents count as server evidence. This client's
+        // unacknowledged saves are applied like the rest, but the server
+        // may reject one after the push left its content out, and the
+        // provider retires the batch it put back along with the push's.
+        const serverItems = pendingUpdates.filter(item => !item.unacknowledged);
+        const serverSVMap = buildServerCoverage(snapshotSVMap, serverItems);
 
         // 4. Apply missing data with state vector refresh (P0.4 fix)
         let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
@@ -443,9 +570,26 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // doc observers and encoding an 'update' event per blob — on a
         // long-lived document with hundreds of pending items that means
         // hundreds of editor re-renders during initial load instead of one.
-        ydoc.transact(() => {
+        //
+        // The delete-set fingerprint is applied only when it deletes
+        // something: on a client that already holds every deletion (a
+        // synced warm start) the apply is an O(delete-set) no-op. The local
+        // delete-set it is checked against is kept for the push guard.
+        let fingerprintLocalDs: ReturnType<typeof Y.createDeleteSetFromStructStore> | null = null;
+        const applyTransaction = ydoc.transact((tr) => {
             for (const item of orderedUpdates) {
                 if (isDestroyed()) break;
+
+                if (item.fingerprint) {
+                    fingerprintLocalDs = Y.createDeleteSetFromStructStore((ydoc as any).store);
+                    // blobOf: an offloaded fingerprint is the downloaded
+                    // Uint8Array, an inline one shares the push guard's copy
+                    if (fingerprintIsRedundant(blobOf(item.data.update), fingerprintLocalDs)) {
+                        // Skipped, not dropped: it stays in pendingUpdates
+                        // as server evidence for the push guard below.
+                        continue;
+                    }
+                }
 
                 if (!isItemRedundant(item, localSVMap)) {
                     const applied = applyItem(item, ydoc);
@@ -453,16 +597,14 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         updatesApplied++;
                         // Incremental update of localSVMap instead of expensive re-encode/decode (P3.0 Optimization)
                         // This prevents redundant processing of history/updates already in snapshot/previous segments
-                        if (item.type === 'snapshot') {
-                            processSnapshotMetadata(item.data, localSVMap);
-                        } else if (item.type === 'history') {
-                            processHistoryMetadata(item.data, localSVMap);
-                        } else if (item.type === 'update') {
-                            processUpdateMetadata(item.data, localSVMap);
-                        }
+                        refreshLocalClocks(item, ydoc, localSVMap);
+                        // Structs parked behind a gap did not advance the doc;
+                        // the item that fills it must not look redundant
+                        rebaseIfPending(ydoc, localSVMap);
                     }
                 }
             }
+            return tr;
         }, FIREBASE_ORIGINS.UPDATE);
 
         // 5. Push Missing Local Updates
@@ -475,39 +617,63 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // be structs-empty anyway, and pushability is decided purely by
         // delete-set coverage — provable straight from the struct store
         // and the snapshot's fingerprint without encoding anything.
+        //
+        // When a diff is pushed, it carries only the deletions the server
+        // blobs do not already prove (withoutServerDeletions): otherwise a
+        // one-character offline edit is written as an O(delete-set) update
+        // that every peer integrates and the next segment inherits.
         const serverSV = writeStateVector(serverSVMap);
         let localUpdatesPushed = false;
 
+        // No await from here to the diff: the push covers exactly what the
+        // doc holds now (see SyncContext.onLocalStateCaptured).
+        ctx.onLocalStateCaptured?.();
         const exactLocalSV = Y.decodeStateVector(Y.encodeStateVector(ydoc));
         const serverCoversStructs = serverCoversLocalStructs(exactLocalSV, serverSVMap);
+        // The fingerprint stands in for the snapshot, whose content is
+        // O(document) and never decoded just to trim the push.
+        const deletionProofBlobs = () =>
+            collectServerBlobs(serverItems.filter(item => item.type !== 'snapshot'));
 
         let shouldPush: boolean;
         let localDiff: Uint8Array | null = null;
         if (serverCoversStructs) {
-            const localDs = Y.createDeleteSetFromStructStore((ydoc as any).store);
-            shouldPush = !deleteSetCoveredByBlobs(localDs, () => collectServerBlobs(pendingUpdates));
+            // The fingerprint check's delete-set is still exact unless the
+            // apply transaction changed the doc (an item applied after the
+            // check, or an observer reacting to one applied before it).
+            const localDs = fingerprintLocalDs !== null && !transactionChangedDoc(applyTransaction)
+                ? fingerprintLocalDs
+                : Y.createDeleteSetFromStructStore((ydoc as any).store);
+            shouldPush = !deleteSetCoveredByBlobs(localDs, () => collectServerBlobs(serverItems));
             if (shouldPush) {
                 // Rare: local deletion-only changes the server lacks.
-                localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
+                localDiff = withoutServerDeletions(Y.encodeStateAsUpdate(ydoc, serverSV), deletionProofBlobs);
             }
         } else {
-            localDiff = Y.encodeStateAsUpdate(ydoc, serverSV);
+            localDiff = withoutServerDeletions(Y.encodeStateAsUpdate(ydoc, serverSV), deletionProofBlobs);
             // The diff has structs by construction (a local clock exceeds
-            // the server's), so it always carries new data.
-            shouldPush = diffHasPayload(localDiff.byteLength) &&
-                diffCarriesNewData(localDiff, () => collectServerBlobs(pendingUpdates));
+            // the server's), so it always carries new data. It is not
+            // decoded again to check (diffCarriesNewData): stripping
+            // already decoded it, and a second pass doubles the cost of a
+            // large first push. A diff left with neither structs nor
+            // missing deletions would be the bare two-byte header anyway.
+            shouldPush = diffHasPayload(localDiff.byteLength);
         }
 
         if (shouldPush && localDiff !== null) {
             console.log("Pushing missing local updates to Firestore.");
             const clockEnds = extractClockEnds(localDiff);
             const epochTag = buildEpochTag(serverEpoch);
+            // Readers may already hold every struct (from a save that
+            // committed after the reads above); the flag keeps them from
+            // skipping its deletions as redundant.
+            const deletionTag = updateEndsWithDeletions(localDiff) ? { hasDeletions: true } : {};
 
             if (diffNeedsStorage(localDiff.byteLength, DEFAULTS.INLINE_UPDATE_LIMIT)) {
                 // Storage-backed update: upload binary to Cloud Storage
-                const storagePath = largeUpdatePath(path, uid, Date.now());
+                const storagePath = largeUpdatePath(path, uid, Date.now(), generateSessionId());
                 const storageRef = ref(ctx.storage, storagePath);
-                await uploadBytes(storageRef, localDiff);
+                await uploadBlob(ctx.storage, storagePath, localDiff);
 
                 // Write lightweight pointer document to updates collection
                 const pkg: any = {
@@ -515,9 +681,28 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     createdAt: serverTimestamp(),
                     createdBy: uid,
                     ...epochTag,
-                    ...aggregateClockEnds(clockEnds)
+                    ...aggregateClockEnds(clockEnds),
+                    ...deletionTag
                 };
-                await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
+                try {
+                    await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
+                } catch (pointerErr) {
+                    // Committed by an earlier send whose ack was lost: the
+                    // pointer is live (see isLostAckCommit).
+                    if (!isLostAckCommit(pointerErr)) {
+                        // Any other rejected write never commits (the SDK
+                        // retries transient errors itself), and the sync
+                        // retry pushes again under a new path: delete this
+                        // copy instead of orphaning it, in the background.
+                        deleteObject(storageRef).catch(err => {
+                            console.warn(`Failed to delete unreferenced update blob ${storagePath}`, err);
+                        });
+                        throw pointerErr;
+                    }
+                }
+                // A re-send may have re-created a pointer whose blob a
+                // compaction already reclaimed
+                await restoreMissingBlob(ctx.storage, storagePath, localDiff);
                 console.log(`Oversized initial sync diff (${localDiff.byteLength} bytes) offloaded to Cloud Storage: ${storagePath}`);
             } else {
                 // Standard inline update
@@ -526,7 +711,8 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     createdAt: serverTimestamp(),
                     createdBy: uid,
                     ...epochTag,
-                    ...aggregateClockEnds(clockEnds)
+                    ...aggregateClockEnds(clockEnds),
+                    ...deletionTag
                 };
                 await addDoc(collection(db, path, FIRESTORE_PATHS.UPDATES), pkg);
             }
@@ -538,18 +724,22 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             updatesApplied,
             localUpdatesPushed,
             lastSyncedDoc: lastUpdateDoc,
+            syncedUpdateCount,
             lastHistoryDoc,
             snapshotVersion,
             epoch: serverEpoch
         };
     } catch (err) {
-        console.error("Sync failed", err);
+        if (!isClientOfflineError(err)) {
+            console.error("Sync failed", err);
+        }
         return {
             success: false,
             error: err instanceof Error ? err : new Error(String(err)),
             updatesApplied: 0,
             localUpdatesPushed: false,
             lastSyncedDoc: null,
+            syncedUpdateCount: 0,
             lastHistoryDoc: null,
             snapshotVersion: null,
             epoch: 0
@@ -566,9 +756,12 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
  * 
  * @param ctx - Sync context
  * @param startAfterDoc - Optional cursor to start listening from (prevents gaps)
+ * @param syncedUpdateCount - Update documents up to and including the
+ * cursor (see SyncResult.syncedUpdateCount), counted toward the compaction
+ * threshold alongside the documents this listener delivers
  * @returns Unsubscribe function
  */
-export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocumentSnapshot | null = null): Unsubscribe {
+export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocumentSnapshot | null = null, syncedUpdateCount: number = 0): Unsubscribe {
     const { db, path, doc: ydoc, uid, maxUpdatesThreshold, onCompactionNeeded, onListenerError, isDestroyed } = ctx;
 
     let liveUpdatesQ;
@@ -600,19 +793,45 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
     // are suppressed for a cooldown window unless the hard cap is reached.
     let lastCompactionTrigger = 0;
 
-    return onSnapshot(liveUpdatesQ, (snapshot) => {
+    // Storage-backed downloads are retried beyond the delivery that started
+    // them, so they must stop with the listener: on destroy, and when the
+    // provider unsubscribes it (e.g. at an epoch fence).
+    let stopped = false;
+    const isStopped = () => stopped || isDestroyed();
+
+    // Update documents initial sync read up to the cursor are outside this
+    // query but still in the updates collection, so they count toward the
+    // threshold too; otherwise only sessions that write more than the
+    // threshold themselves would ever compact. They leave the count once a
+    // trigger hands them to compaction, which drains oldest-first.
+    let backlog = syncedUpdateCount;
+
+    const unsubscribe = onSnapshot(liveUpdatesQ, (snapshot) => {
+        const changes = snapshot.docChanges();
+
+        // Committed update documents leave the collection only when a
+        // compaction (or a squash) deletes them; a document that still had
+        // pending writes was this client's own write, rejected by the
+        // server. Reported before the trigger decision so a backoff it ends
+        // no longer suppresses this delivery.
+        if (changes.some(change => change.type === 'removed' && !change.doc.metadata.hasPendingWrites)) {
+            ctx.onCompactionProgress?.();
+        }
+
         if (onCompactionNeeded) {
             const now = Date.now();
 
             if (shouldTriggerCompaction({
-                size: snapshot.size,
+                size: backlog + snapshot.size,
                 maxUpdatesThreshold,
                 now,
                 lastTriggerAt: lastCompactionTrigger,
                 cooldownMs: DEFAULTS.COMPACTION_TRIGGER_COOLDOWN_MS,
                 hardCap: DEFAULTS.REALTIME_LIMIT,
+                backoffUntil: ctx.getCompactionBackoffUntil?.() ?? 0,
             })) {
                 lastCompactionTrigger = now;
+                backlog = 0;
                 onCompactionNeeded();
             }
         }
@@ -624,7 +843,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
         // an observer flush + 'update' event (editor re-render) per doc.
         const inlineBatch: { docId: string; data: any }[] = [];
 
-        snapshot.docChanges().forEach((change) => {
+        changes.forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
                 const docId = change.doc.id;
@@ -637,8 +856,11 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 });
 
                 if (plan.kind === 'skip-own') {
-                    // Fold our own metadata in anyway so later checks stay accurate.
-                    processUpdateMetadata(data, localSVMap);
+                    // Refresh the clocks it touches anyway so later checks stay accurate.
+                    refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
+                    // Our initial-sync push also carries any structs parked in
+                    // pendingStructs; re-base while anything is still parked.
+                    rebaseIfPending(ydoc, localSVMap);
                     return;
                 }
                 if (plan.kind !== 'download' && plan.kind !== 'apply-inline') {
@@ -649,15 +871,22 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 if (plan.kind === 'download') {
                     (async () => {
                         try {
-                            const storageRef = ref(ctx.storage, data.updateStoragePath);
-                            const buffer = await getBytes(storageRef);
-                            // Provider may have been destroyed while downloading
-                            if (isDestroyed()) return;
+                            const buffer = await downloadWithRetry(ctx.storage, data.updateStoragePath, isStopped);
+                            // Listener may have stopped (or the provider been destroyed) while downloading
+                            if (buffer === null || isStopped()) return;
                             const update = new Uint8Array(buffer);
                             Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                             // Incremental update of cached state vector (P3.0 Optimization)
-                            processUpdateMetadata(data, localSVMap);
+                            refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
+                            rebaseIfPending(ydoc, localSVMap);
                         } catch (e) {
+                            // Compacted away mid-download: the blob is
+                            // deleted once the pointer's deletion commits,
+                            // and the fold or segment holding the update
+                            // arrives through the other listeners.
+                            if (isPermanentDownloadError(e) && !(await updateDocExists(change.doc.ref))) {
+                                return;
+                            }
                             console.error(`Failed to apply storage-backed update ${docId} (quarantined)`, e);
                             ctx.corruptedDocIds?.add(docId);
                             ctx.onCorruptedDocument?.(docId, e instanceof Error ? e : new Error(String(e)));
@@ -677,7 +906,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 for (const { docId, data } of inlineBatch) {
                     // Re-check redundancy as the state vector evolves within
                     // the batch (preserves the sequential semantics)
-                    if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0 &&
+                    if (!data.hasDeletions && data.clientIDs?.length > 0 && data.clientClocks?.length > 0 &&
                         isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks)) {
                         continue;
                     }
@@ -685,7 +914,8 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                         const update = (data.update as Bytes).toUint8Array();
                         Y.applyUpdate(ydoc, update, FIREBASE_ORIGINS.UPDATE);
                         // Incremental update of cached state vector (P3.0 Optimization)
-                        processUpdateMetadata(data, localSVMap);
+                        refreshLocalClocks({ type: 'update', data }, ydoc, localSVMap);
+                        rebaseIfPending(ydoc, localSVMap);
                     } catch (e) {
                         console.error(`Failed to apply update ${docId} (quarantined)`, e);
                         ctx.corruptedDocIds?.add(docId);
@@ -706,6 +936,11 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
             onListenerError(error);
         }
     });
+
+    return () => {
+        stopped = true;
+        unsubscribe();
+    };
 }
 
 /**
@@ -734,28 +969,41 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
     let lastQuarantinedPath: string | null = null;
     let lastProcessedVersion: number | null = initialVersion;
 
-    return onSnapshot(doc(db, path), async (snapshot) => {
+    // A delivery that awaited its snapshot diff must not apply once the
+    // provider unsubscribed the listener (e.g. at an epoch fence).
+    let stopped = false;
+
+    // Bumped by each delivery past the version gate. A snapshot download
+    // still retrying for an older delivery gives up once a newer one takes
+    // over: a later fold covers it (and deletes its blob).
+    let latestDelivery = 0;
+
+    // Each new fold carries the whole delete-set again; when the local doc
+    // already holds every deletion in it, applying it is an O(delete-set)
+    // no-op (see fingerprintIsRedundant).
+    const applyFingerprint = (fingerprint: Uint8Array): void => {
+        if (!fingerprintIsRedundant(fingerprint, Y.createDeleteSetFromStructStore((ydoc as any).store))) {
+            Y.applyUpdate(ydoc, fingerprint, FIREBASE_ORIGINS.SNAPSHOT);
+        }
+    };
+
+    const unsubscribe = onSnapshot(doc(db, path), async (snapshot) => {
         if (!snapshot.exists()) return;
 
         const data = snapshot.data();
         if (!data) return;
 
-        // Skip snapshots produced by our own compaction
-        if (data.origin === ctx.uid) {
-            if (typeof data.version === 'number') {
-                lastProcessedVersion = data.version;
-            }
-            return;
-        }
-
         // Epoch fence: someone squashed the document into a new epoch.
         // The new snapshot must NOT be applied onto the old-epoch local
         // doc (content would duplicate — the id spaces are unrelated);
-        // surface it so the application rebuilds instead.
+        // surface it so the application rebuilds instead. Our own squash
+        // fences this provider itself (it emits 'squashed').
         const snapEpoch = typeof data.epoch === 'number' ? data.epoch : 0;
         const curEpoch = ctx.getEpoch?.() ?? 0;
         if (snapEpoch > curEpoch) {
-            ctx.onEpochChanged?.(snapEpoch);
+            if (data.origin !== ctx.uid) {
+                ctx.onEpochChanged?.(snapEpoch);
+            }
             return;
         }
         if (snapEpoch < curEpoch) {
@@ -769,14 +1017,22 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
         if (typeof data.version === 'number' && data.version === lastProcessedVersion) {
             return;
         }
+        const delivery = ++latestDelivery;
+
+        // A new version means a fold committed (ours or another client's).
+        ctx.onCompactionProgress?.();
 
         // Redundancy check: if the local doc already covers the snapshot's
         // state vector, downloading it would be a no-op. The delete-set
         // fingerprint is still applied first to pick up any deletions that
-        // travelled in structs we already cover.
+        // travelled in structs we already cover. Our own compactions go
+        // through this too: a fold merges what the SERVER holds, which can
+        // include data the local doc lacks (e.g. a quarantined update) —
+        // and it deletes the source documents, so this is the only path
+        // left for that data.
         if (data.deleteSet) {
             try {
-                Y.applyUpdate(ydoc, (data.deleteSet as Bytes).toUint8Array(), FIREBASE_ORIGINS.SNAPSHOT);
+                applyFingerprint((data.deleteSet as Bytes).toUint8Array());
             } catch (e) {
                 console.warn("Failed to apply snapshot delete-set fingerprint", e);
             }
@@ -785,10 +1041,17 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
             try {
                 const buffer = await getBytes(ref(storage, data.deleteSetStoragePath));
                 if (isDestroyed()) return;
-                Y.applyUpdate(ydoc, new Uint8Array(buffer), FIREBASE_ORIGINS.SNAPSHOT);
+                applyFingerprint(new Uint8Array(buffer));
             } catch (e) {
                 console.warn("Failed to apply storage-backed delete-set fingerprint", e);
             }
+        }
+        // A client that missed only this fold (e.g. offline across it)
+        // lacks just its tail; the check below decides whether that sufficed.
+        if (!localCoversSnapshot(data, ydoc) && foldTailMayCatchUp(data, ydoc)) {
+            const tailStopped = () => stopped || isDestroyed() || (ctx.getEpoch?.() ?? 0) !== snapEpoch;
+            await applyFoldTail(storage, data, ydoc, tailStopped);
+            if (tailStopped()) return;
         }
         if (localCoversSnapshot(data, ydoc)) {
             if (typeof data.version === 'number') {
@@ -812,17 +1075,25 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
                 return;
             }
 
+            const snapshotStopped = () =>
+                stopped || isDestroyed() || (ctx.getEpoch?.() ?? 0) !== snapEpoch || delivery !== latestDelivery;
             try {
-                const storageRef = ref(storage, data.snapshotStoragePath);
-                const buffer = await getBytes(storageRef);
-                // Provider may have been destroyed while downloading
-                if (isDestroyed()) return;
-                const content = new Uint8Array(buffer);
+                // Transient failures are retried: an unchanged main document
+                // is not delivered again (see downloadWithRetry)
+                const buffer = await downloadWithRetry(storage, data.snapshotStoragePath, snapshotStopped);
+                // Stopped, destroyed or superseded while downloading
+                if (buffer === null || snapshotStopped()) return;
+                // Only what the local doc lacks (see diffSnapshotForLocal)
+                const content = await diffSnapshotForLocal(new Uint8Array(buffer), data, ydoc);
+                if (snapshotStopped()) return;
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
                 if (typeof data.version === 'number') {
                     lastProcessedVersion = data.version;
                 }
             } catch (storageErr) {
+                // A newer fold deletes this blob once it commits; only a
+                // failure of the current delivery is a corrupted snapshot.
+                if (snapshotStopped()) return;
                 console.error(`Failed to apply snapshot ${snapshotKey} (quarantined)`, storageErr);
                 ctx.corruptedDocIds?.add(snapshotKey);
                 lastQuarantinedPath = snapshotKey;
@@ -854,6 +1125,11 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
         console.error("Snapshot listener failed", error);
         if (onListenerError) onListenerError(error);
     });
+
+    return () => {
+        stopped = true;
+        unsubscribe();
+    };
 }
 
 /**
@@ -929,7 +1205,8 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
                             // Apply it
                             Y.applyUpdate(ydoc, (data.segment as Bytes).toUint8Array(), FIREBASE_ORIGINS.HISTORY);
                             // Incremental update of cached state vector (P3.0 Optimization)
-                            processHistoryMetadata(data, localSVMap);
+                            refreshLocalClocks(item, ydoc, localSVMap);
+                            rebaseIfPending(ydoc, localSVMap);
                         }
                     } catch (err) {
                         console.error(`Failed to apply history segment ${docId} (quarantined)`, err);
@@ -952,3 +1229,86 @@ export function createHistoryListener(ctx: SyncContext, startAfterDoc: QueryDocu
 
 // --- Helper Functions ---
 
+/**
+ * Downloads the current fold's tail and applies it to the local document.
+ *
+ * Only a shortcut around the snapshot download (see foldTailMayCatchUp),
+ * so it never throws and quarantines nothing: on any failure — including
+ * a tail the next fold has already garbage-collected — the caller's
+ * coverage re-check still fails and it downloads the snapshot as before.
+ *
+ * @param storage - Firebase Storage instance
+ * @param data - Main document data carrying the tail fields
+ * @param ydoc - Local Yjs document
+ * @param isStopped - Whether the caller has stopped (checked after the download)
+ */
+async function applyFoldTail(
+    storage: FirebaseStorage,
+    data: any,
+    ydoc: Y.Doc,
+    isStopped: () => boolean
+): Promise<void> {
+    try {
+        const buffer = await getBytes(ref(storage, data.foldTailStoragePath));
+        if (isStopped()) return;
+        Y.applyUpdate(ydoc, new Uint8Array(buffer), FIREBASE_ORIGINS.SNAPSHOT);
+    } catch (e) {
+        console.warn(`Failed to apply fold tail ${data.foldTailStoragePath}; downloading the snapshot instead`, e);
+    }
+}
+
+/**
+ * Whether an update document still exists on the server.
+ *
+ * Asked once its Storage blob turned out to be missing. Compaction and
+ * squash delete a pointer's blob after the transaction deleting the
+ * pointer commits (see reclaimUpdateBlobs), so a listener download still
+ * running by then finds the object gone while the update itself lives
+ * on in the fold, segment or new epoch the other listeners deliver. Only
+ * a blob missing behind a pointer that still exists is lost. When the
+ * check itself fails, the document is assumed to exist.
+ *
+ * @param docRef - The update (pointer) document.
+ * @returns false when the document is gone.
+ */
+async function updateDocExists(docRef: DocumentReference): Promise<boolean> {
+    try {
+        return (await getDocFromServer(docRef)).exists();
+    } catch {
+        return true;
+    }
+}
+
+/**
+ * Downloads a blob for a listener (a storage-backed update or a snapshot),
+ * retrying failures that may be transient.
+ *
+ * An update document is never delivered again, and neither is an unchanged
+ * main document, so giving up on a network error would drop the update or
+ * fold for the rest of the session. Failures are retried for as long as
+ * the listener runs, with a backoff that stops growing after
+ * DEFAULTS.MAX_RETRIES attempts; a permanent failure is rethrown so the
+ * caller quarantines the document.
+ *
+ * @param storage - Firebase Storage instance
+ * @param storagePath - The blob path
+ * @param isStopped - Whether the listener has stopped
+ * @returns The blob, or null when the listener stopped first
+ */
+async function downloadWithRetry(
+    storage: FirebaseStorage,
+    storagePath: string,
+    isStopped: () => boolean
+): Promise<ArrayBuffer | null> {
+    for (let attempt = 1; !isStopped(); attempt++) {
+        try {
+            return await getBytes(ref(storage, storagePath));
+        } catch (e) {
+            if (isPermanentDownloadError(e)) throw e;
+            const backoff = calculateBackoff(Math.min(attempt, DEFAULTS.MAX_RETRIES));
+            console.warn(`Failed to download ${storagePath} (attempt ${attempt}). Retrying in ${Math.floor(backoff)}ms...`, e);
+            await wait(backoff);
+        }
+    }
+    return null;
+}

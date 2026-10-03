@@ -35,6 +35,24 @@ export interface MainDocState {
     hasBase: boolean;
     /** Cloud Storage path of the base snapshot, when it lives there. */
     baseStoragePath: string | null;
+    /** Cloud Storage path of the base's offloaded delete-set fingerprint. */
+    baseDeleteSetStoragePath: string | null;
+    /**
+     * Cloud Storage path of the tail published by the fold that wrote the
+     * base. Read whatever version it is bound to: a stale one left behind
+     * by an older client is still a blob to garbage-collect.
+     */
+    baseFoldTailStoragePath: string | null;
+    /**
+     * Blobs a fold or squash recorded in `snapshotBlobPaths` that
+     * snapshotStoragePath and deleteSetStoragePath no longer reference. An
+     * older client's fold overwrites those two and garbage-collects by
+     * names rebuilt from the version, which attempt-unique names never
+     * match, but leaves the record alone: still blobs to garbage-collect.
+     */
+    orphanedBlobPaths: string[];
+    /** The base snapshot's base64 state vector, when the document has one. */
+    baseStateVector: string | null;
     /** Legacy inline snapshot content, when the base is still inline. */
     baseInline: unknown | null;
     /** Snapshot version, used for optimistic concurrency. */
@@ -57,6 +75,10 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
     const state: MainDocState = {
         hasBase: false,
         baseStoragePath: null,
+        baseDeleteSetStoragePath: null,
+        baseFoldTailStoragePath: null,
+        orphanedBlobPaths: [],
+        baseStateVector: null,
         baseInline: null,
         currentVersion: 0,
         currentEpoch: 0,
@@ -72,6 +94,19 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
     } else if (data.content) {
         state.hasBase = true;
         state.baseInline = data.content;
+    }
+    if (data.deleteSetStoragePath) {
+        state.baseDeleteSetStoragePath = data.deleteSetStoragePath;
+    }
+    if (typeof data.foldTailStoragePath === 'string') {
+        state.baseFoldTailStoragePath = data.foldTailStoragePath;
+    }
+    if (Array.isArray(data.snapshotBlobPaths)) {
+        state.orphanedBlobPaths = data.snapshotBlobPaths.filter((p: unknown): p is string =>
+            typeof p === 'string' && p !== state.baseStoragePath && p !== state.baseDeleteSetStoragePath);
+    }
+    if (typeof data.stateVector === 'string') {
+        state.baseStateVector = data.stateVector;
     }
     if (typeof data.version === 'number') {
         state.currentVersion = data.version;
@@ -90,10 +125,17 @@ export function readMainDocState(data: Record<string, any> | null | undefined): 
  * costs O(new data) and never downloads or re-uploads the base snapshot.
  * FOLD rebuilds the snapshot from base + history + updates and costs
  * O(document), so it must stay amortized: it runs when there is no base to
- * build on, when there is nothing new, or when history has grown to the
- * fold threshold (counting the segment this cycle would add).
+ * build on, or when history has grown to the fold threshold (counting the
+ * segment this cycle would add). With nothing new there is no delta to
+ * write; whether such a cycle folds is shouldFoldWithoutUpdates's call.
  *
- * @param params - Base presence, pending counts and the fold threshold.
+ * The threshold is capped at maxHistory + 1. One fold can merge at most
+ * maxHistory segments (the transaction write budget), so compaction never
+ * counts more than that: a larger threshold could never be reached, and
+ * history would grow without bound, never folding.
+ *
+ * @param params - Base presence, pending counts, the fold threshold and the
+ * per-cycle history cap.
  * @returns true to run DELTA, false to FOLD.
  */
 export function shouldUseDelta(params: {
@@ -101,10 +143,97 @@ export function shouldUseDelta(params: {
     updateCount: number;
     historyCount: number;
     historyFoldThreshold: number;
+    maxHistory?: number;
 }): boolean {
-    const { hasBase, updateCount, historyCount, historyFoldThreshold } = params;
+    const { hasBase, updateCount, historyCount, historyFoldThreshold, maxHistory = DEFAULTS.MAX_COMPACTION_HISTORY } = params;
+    const foldThreshold = effectiveFoldThreshold(historyFoldThreshold, maxHistory);
 
-    return hasBase && updateCount > 0 && historyCount + 1 < historyFoldThreshold;
+    return hasBase && updateCount > 0 && historyCount + 1 < foldThreshold;
+}
+
+/**
+ * The fold threshold shouldUseDelta applies: historyFoldThreshold capped at
+ * maxHistory + 1 (see shouldUseDelta). Compaction counts history segments
+ * only up to this many, since every count from there on folds.
+ *
+ * @param historyFoldThreshold - The configured fold threshold.
+ * @param maxHistory - The per-cycle history cap.
+ * @returns The capped threshold.
+ */
+export function effectiveFoldThreshold(historyFoldThreshold: number, maxHistory: number = DEFAULTS.MAX_COMPACTION_HISTORY): number {
+    return Math.min(historyFoldThreshold, maxHistory + 1);
+}
+
+/**
+ * Whether a cycle that found no pending updates should fold anyway.
+ *
+ * With nothing new, a fold only re-merges base + history into the content
+ * they already hold: O(document) download, GC merge and upload, plus a
+ * main-document rewrite every client's snapshot listener re-applies.
+ * Readers apply history anyway, so it is never needed for correctness and
+ * waits for the cycle that makes it due — unless there is no base to build
+ * on, history extends past what one fold can merge (the oldest-prefix fold
+ * must drain it), or history already sits at the fold threshold by
+ * shouldUseDelta's count (the fold the next cycle would run regardless).
+ *
+ * @param params - Base presence, the history count and whether it was
+ * truncated, the fold threshold and the per-cycle history cap.
+ * @returns true to FOLD, false to end the cycle without merging.
+ */
+export function shouldFoldWithoutUpdates(params: {
+    hasBase: boolean;
+    historyCount: number;
+    historyTruncated: boolean;
+    historyFoldThreshold: number;
+    maxHistory?: number;
+}): boolean {
+    const { hasBase, historyCount, historyTruncated, historyFoldThreshold, maxHistory = DEFAULTS.MAX_COMPACTION_HISTORY } = params;
+    const foldThreshold = Math.min(historyFoldThreshold, maxHistory + 1);
+
+    return historyCount > 0
+        && (!hasBase || historyTruncated || historyCount + 1 >= foldThreshold);
+}
+
+/**
+ * Whether a threshold-triggered compaction should leave the cycle it just
+ * locked to a later trigger.
+ *
+ * Every online client's update listener triggers on the same threshold
+ * crossing. A client whose lock attempt lands after the winner released
+ * the lock (the SDK retries a contended transaction after ~1 s; a
+ * throttled tab sees the crossing late) finds only what arrived since.
+ * Compacting that writes a tiny history segment that uses up a fold slot
+ * — or, with nothing pending, folds base + history into a new snapshot
+ * for zero updates: O(snapshot) transfer and a new version for every
+ * client. Below `minUpdates` such a cycle is skipped unless a fold is due
+ * anyway (the same test as shouldUseDelta, which also rules out truncated
+ * history). Skipping only defers: the leftovers join the next crossing.
+ *
+ * `updateCount` is the raw number of update documents read, stale-epoch
+ * and unusable ones included: the trigger counts them too, and deferring
+ * their cleanup would keep every client triggering futile cycles. The
+ * minimum is clamped to what one cycle reads and to the realtime hard
+ * cap, so a large `maxUpdatesThreshold` can never starve compaction.
+ * Manual and squash compactions pass 0 and always drain.
+ *
+ * @param params - The minimum, the raw counts read, the per-cycle update
+ * read limit, the fold threshold and the per-cycle history cap.
+ * @returns true to release the lock without compacting.
+ */
+export function shouldDeferCompaction(params: {
+    minUpdates: number;
+    updateCount: number;
+    updateLimit: number;
+    historyCount: number;
+    historyFoldThreshold: number;
+    maxHistory?: number;
+    hardCap?: number;
+}): boolean {
+    const { minUpdates, updateCount, updateLimit, historyCount, historyFoldThreshold, maxHistory = DEFAULTS.MAX_COMPACTION_HISTORY, hardCap = DEFAULTS.REALTIME_LIMIT } = params;
+    const foldThreshold = Math.min(historyFoldThreshold, maxHistory + 1);
+
+    return updateCount < Math.min(minUpdates, updateLimit, hardCap)
+        && historyCount + 1 < foldThreshold;
 }
 
 /**
@@ -134,6 +263,35 @@ export function isRetryableCompactionError(error: any): boolean {
  */
 export function isLockLostError(error: any): boolean {
     return typeof error?.message === 'string' && error.message.includes('Lock lost');
+}
+
+/**
+ * Whether a failed compaction will fail the same way next time, so that
+ * automatic triggers should back off instead of retrying it.
+ *
+ * compact() has given up by the time this is asked; its own retries
+ * already covered contention and transport errors. What is left is usually
+ * a property of the document or the project: an undecodable update, a
+ * Storage blob that is gone, Storage rules or quota rejecting the fold
+ * upload, a permission or size rejection. Each fails identically on every
+ * attempt until something outside this client changes, and every attempt
+ * re-reads the whole backlog first. These do not count:
+ *  - a lost lock or a version race with a concurrent fold or squash:
+ *    another client is compacting, which is progress, not a broken
+ *    document;
+ *  - a transport error that outlasted the retries (offline, deadline,
+ *    `storage/retry-limit-exceeded`): the next attempt may well succeed.
+ *
+ * @param error - The error the failed compaction reported.
+ * @returns true when the failure should escalate the backoff.
+ */
+export function isPersistentCompactionFailure(error: any): boolean {
+    const versionRace = typeof error?.message === 'string' && error.message.includes('Document version changed');
+
+    return !isRetryableCompactionError(error)
+        && !isLockLostError(error)
+        && !versionRace
+        && error?.code !== 'storage/retry-limit-exceeded';
 }
 
 /**
@@ -193,6 +351,28 @@ export function planUpdateDoc(data: Record<string, any> | null | undefined, curr
     return { kind: 'skip' };
 }
 
+/**
+ * The Cloud Storage blob a storage-backed update document points to.
+ *
+ * Every such blob has exactly one pointer document (see largeUpdatePath),
+ * so once a committed transaction deletes the pointer nothing reads the
+ * blob again, unless the writer's SDK re-sends the pointer write.
+ * Compaction and squash reclaim it after the commit (see
+ * reclaimUpdateBlobs); left alone it would stay in billed Storage
+ * forever.
+ *
+ * @param data - Update document data.
+ * @returns The blob's storage path, or null when the payload is inline
+ *   or absent.
+ */
+export function updateBlobPath(data: Record<string, any> | null | undefined): string | null {
+    if (typeof data?.updateStoragePath === 'string' && !data?.update) {
+        return data.updateStoragePath;
+    }
+
+    return null;
+}
+
 /** How compaction should treat one history segment document. */
 export type HistoryDocPlan =
     | { kind: 'stale' }
@@ -218,40 +398,87 @@ export function planHistoryDoc(data: Record<string, any> | null | undefined, cur
  * Whether a merged delta segment is small enough to store inline on a
  * Firestore document.
  *
+ * The segment document also carries the segment's base64 state vector
+ * (~8 bytes per client in the segment), so both count: Firestore rejects
+ * an oversized document with INVALID_ARGUMENT, which is not retryable,
+ * and the same pending updates would re-merge to the same segment on
+ * every later cycle.
+ *
  * Over the limit, delta mode is abandoned for this cycle and compaction
  * folds instead — the segment would not fit, and splitting it would defeat
  * the point of a delta.
  *
  * @param byteLength - Size of the merged segment.
+ * @param stateVectorB64Length - Length of the segment's base64 state vector.
  * @param inlineLimit - The inline payload ceiling.
  * @returns true when the segment fits inline.
  */
-export function deltaSegmentFitsInline(byteLength: number, inlineLimit: number): boolean {
-    return byteLength <= inlineLimit;
+export function deltaSegmentFitsInline(byteLength: number, stateVectorB64Length: number, inlineLimit: number): boolean {
+    return byteLength + stateVectorB64Length <= inlineLimit;
 }
 
 /**
  * Builds the history-segment document a delta compaction writes.
  *
  * `epoch` is omitted entirely at epoch 0 rather than written as 0, so
- * documents from a never-squashed database stay byte-identical to what
- * older clients produced.
+ * documents from a never-squashed database carry no epoch field, as
+ * older clients wrote them.
  *
- * @param params - Segment bytes, its state vector, author and epoch.
+ * `hasDeletions` lets readers apply a segment whose state vector they
+ * already cover: the vector only spans structs and a deletion adds none
+ * (a delete-only segment's vector is empty), so without the flag every
+ * redundancy check would skip the segment and resurrect what it deleted.
+ * It is written even when false: older clients never write it, whatever
+ * the segment holds, so readers treat an absent flag as "may carry
+ * deletions" and skip a covered segment only on an explicit false.
+ *
+ * @param params - Segment bytes, its state vector, whether it carries
+ * deletions, author and epoch.
  * @returns The document fields, minus server-generated timestamps.
  */
 export function buildDeltaSegmentDoc(params: {
     stateVectorB64: string;
+    hasDeletions: boolean;
     uid: string;
     epoch: number;
 }): Record<string, unknown> {
-    const { stateVectorB64, uid, epoch } = params;
+    const { stateVectorB64, hasDeletions, uid, epoch } = params;
 
     return {
         stateVector: stateVectorB64,
+        hasDeletions,
         createdBy: uid,
         ...(epoch > 0 ? { epoch } : {}),
     };
+}
+
+/**
+ * Whether a snapshot's delete-set fingerprint can be stored inline on the
+ * main document, or must be offloaded to Cloud Storage.
+ *
+ * The per-field cap alone does not keep the main document under the
+ * Firestore limit: the fingerprint shares it with the base64 state vector
+ * (~8 bytes per client ever seen), which has no offload path. On an aged
+ * many-client document the two together exceed the limit, Firestore
+ * rejects the snapshot write with a non-retryable INVALID_ARGUMENT, and
+ * every later fold recomputes the same fields — compaction stops for
+ * good. So the fingerprint must also fit in the room the state vector
+ * leaves.
+ *
+ * @param params - Fingerprint size, base64 state vector length, the
+ * per-field cap and the inline payload ceiling.
+ * @returns true to store the fingerprint inline, false to offload it.
+ */
+export function deleteSetFitsInline(params: {
+    deleteSetBytes: number;
+    stateVectorB64Length: number;
+    maxFieldBytes: number;
+    inlineLimit: number;
+}): boolean {
+    const { deleteSetBytes, stateVectorB64Length, maxFieldBytes, inlineLimit } = params;
+
+    return deleteSetBytes <= maxFieldBytes
+        && deleteSetBytes + stateVectorB64Length <= inlineLimit;
 }
 
 /**
@@ -309,6 +536,36 @@ export function buildSnapshotResult(params: {
 }
 
 /**
+ * The Storage blobs a committed fold replaced, which it should then delete.
+ *
+ * These are the paths stored on the replaced main document, never names
+ * rebuilt from its version: blob names carry a per-attempt id (see
+ * foldSnapshotPath / squashSnapshotPath), and squash writes
+ * `snapshot_e{E}_v{V}_{id}.bin`, which a rebuilt `snapshot_v{n}.bin` never
+ * matched, so every squash blob would leak. The fold's transaction verified the version, and every writer of
+ * these paths bumps it, so the stored paths are exactly what the fold
+ * replaced. A path the fold itself just wrote is never returned: deleting
+ * it would destroy the live snapshot.
+ *
+ * The previous fold's tail goes too: the committed fold replaced (or
+ * cleared) the pointer to it, and a tail only ever describes the snapshot
+ * it was published with. So do the blobs an older client's fold orphaned
+ * (see MainDocState.orphanedBlobPaths): the committed fold replaces the
+ * record of them.
+ *
+ * @param previous - The main document state read before the fold.
+ * @param written - The Storage paths the fold committed.
+ * @returns The paths to delete.
+ */
+export function blobsReplacedByFold(
+    previous: Pick<MainDocState, 'baseStoragePath' | 'baseDeleteSetStoragePath' | 'baseFoldTailStoragePath' | 'orphanedBlobPaths'>,
+    written: (string | null)[],
+): string[] {
+    return [previous.baseStoragePath, previous.baseDeleteSetStoragePath, previous.baseFoldTailStoragePath, ...previous.orphanedBlobPaths]
+        .filter((p): p is string => p !== null && !written.includes(p));
+}
+
+/**
  * The next snapshot version.
  *
  * @param currentVersion - The version read before the transaction.
@@ -316,4 +573,106 @@ export function buildSnapshotResult(params: {
  */
 export function nextSnapshotVersion(currentVersion: number): number {
     return currentVersion + 1;
+}
+
+/**
+ * The Cloud Storage path for a fold's candidate snapshot.
+ *
+ * The candidate is uploaded BEFORE the lock-checked commit, and the lock
+ * is a lease with no fencing token: a compactor that stalls past it can
+ * still be uploading after another client folded the same version and
+ * committed. The per-attempt id gives every candidate its own object, so
+ * such a late upload lands where nothing points instead of replacing the
+ * snapshot the winner committed.
+ *
+ * @param basePath - The document's base path.
+ * @param version - The version the fold will commit.
+ * @param attemptId - Unique to this compaction attempt.
+ * @returns The storage object path.
+ */
+export function foldSnapshotPath(basePath: string, version: number, attemptId: string): string {
+    return `${basePath}/snapshot_v${version}_${attemptId}.bin`;
+}
+
+/**
+ * The Cloud Storage path for a fold's offloaded delete-set fingerprint.
+ * Attempt-unique for the same reason as foldSnapshotPath.
+ *
+ * @param basePath - The document's base path.
+ * @param version - The version the fold will commit.
+ * @param attemptId - Unique to this compaction attempt.
+ * @returns The storage object path.
+ */
+export function foldDeleteSetPath(basePath: string, version: number, attemptId: string): string {
+    return `${basePath}/ds_v${version}_${attemptId}.bin`;
+}
+
+/**
+ * The Cloud Storage path for a fold's tail. Attempt-unique for the same
+ * reason as foldSnapshotPath.
+ *
+ * @param basePath - The document's base path.
+ * @param version - The version the fold will commit.
+ * @param attemptId - Unique to this compaction attempt.
+ * @returns The storage object path.
+ */
+export function foldTailPath(basePath: string, version: number, attemptId: string): string {
+    return `${basePath}/tail_v${version}_${attemptId}.bin`;
+}
+
+/**
+ * The base clocks a fold's tail is published with: the replaced snapshot's
+ * state vector, restricted to the clients the tail touches (0 for a client
+ * the base never saw).
+ *
+ * A reader that holds the replaced snapshot lacks only the tail, but the
+ * full vector is O(every client ever seen) and shares the main document's
+ * size budget with the new one. The restriction loses nothing: a client
+ * the tail does not touch has the same clock in both snapshots, so "covers
+ * the new snapshot wherever it is behind, and every client it is behind on
+ * is listed here at a clock it covers" is exactly "covers the replaced
+ * snapshot".
+ *
+ * @param baseSV - The replaced snapshot's state vector.
+ * @param tailSV - The tail's state vector (clock ends per client).
+ * @returns client -> base clock, for every client in the tail.
+ */
+export function foldTailBaseClocks(baseSV: Map<number, number>, tailSV: Map<number, number>): Map<number, number> {
+    const clocks = new Map<number, number>();
+    for (const client of tailSV.keys()) {
+        clocks.set(client, baseSV.get(client) ?? 0);
+    }
+    return clocks;
+}
+
+/**
+ * Whether a fold should publish its tail beside the new snapshot.
+ *
+ * The tail is un-GC'd, so early in a document's life it can be nearly the
+ * size of the snapshot (the first fold over a small base) — a reader would
+ * gain little, and pay for both when the tail does not suffice. Publish it
+ * only when it is at most half the snapshot.
+ *
+ * Its base clocks are stored on the main document, which already carries
+ * the state vector and possibly the inline delete-set fingerprint (see
+ * deleteSetFitsInline). The tail is the optional one: when its fields do
+ * not fit in the room those two leave, the fold publishes none.
+ *
+ * @param params - Tail and snapshot sizes, the length of the tail's main
+ * document fields, the state vector and inline fingerprint they share the
+ * budget with, and the inline payload ceiling.
+ * @returns true to publish the tail.
+ */
+export function shouldPublishFoldTail(params: {
+    tailBytes: number;
+    snapshotBytes: number;
+    tailFieldsLength: number;
+    stateVectorB64Length: number;
+    inlineDeleteSetBytes: number;
+    inlineLimit: number;
+}): boolean {
+    const { tailBytes, snapshotBytes, tailFieldsLength, stateVectorB64Length, inlineDeleteSetBytes, inlineLimit } = params;
+
+    return tailBytes * 2 <= snapshotBytes
+        && tailFieldsLength + stateVectorB64Length + inlineDeleteSetBytes <= inlineLimit;
 }

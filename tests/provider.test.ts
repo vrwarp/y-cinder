@@ -51,6 +51,15 @@ describe('FireProvider', () => {
         vi.clearAllMocks();
     });
 
+    /**
+     * Resolves once initial sync has completed (every Firestore call is
+     * mocked, so no timer is involved). The tests below feed handleUpdate
+     * a synthetic update that is not in the doc: fed earlier, initial sync
+     * would count it as covered by its push and never save it.
+     */
+    const initialSync = (provider: FireProvider) =>
+        new Promise<void>(resolve => provider.on('sync', () => resolve()));
+
     it('should initialize and start sync', async () => {
         const provider = new FireProvider({ firebaseApp, ydoc, path });
 
@@ -69,6 +78,7 @@ describe('FireProvider', () => {
     it('should debounce updates and save to firestore', async () => {
         vi.useFakeTimers();
         const provider = new FireProvider({ firebaseApp, ydoc, path, maxWaitTime: 100 });
+        await initialSync(provider);
 
         // Mock addDoc
         const addDocSpy = vi.spyOn(firestore, 'addDoc');
@@ -92,6 +102,7 @@ describe('FireProvider', () => {
     it("should emit 'saved' with the commit time after a successful save", async () => {
         vi.useFakeTimers();
         const provider = new FireProvider({ firebaseApp, ydoc, path, maxWaitTime: 100 });
+        await initialSync(provider);
         (firestore.addDoc as any).mockResolvedValue({ id: 'doc-id' });
 
         const savedAts: number[] = [];
@@ -115,6 +126,7 @@ describe('FireProvider', () => {
     it("should NOT emit 'saved' when the save fails", async () => {
         vi.useFakeTimers();
         const provider = new FireProvider({ firebaseApp, ydoc, path, maxWaitTime: 100 });
+        await initialSync(provider);
         (firestore.addDoc as any).mockRejectedValue(new Error('transient network failure'));
 
         const savedAts: number[] = [];

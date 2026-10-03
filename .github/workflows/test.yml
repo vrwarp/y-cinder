@@ -15,6 +15,10 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        # The old-release compatibility tests rebuild a previous release's
+        # sources with `git archive`, so they need the full history.
+        fetch-depth: 0
 
     - name: Setup Node.js
       uses: actions/setup-node@v4

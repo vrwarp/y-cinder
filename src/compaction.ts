@@ -30,6 +30,22 @@
  * - **Locking**: Distributed lock prevents concurrent compaction
  * - **Retry**: Exponential backoff handles transient failures
  * - **Chunking**: Large data is split to stay under Firestore limits
+ * - **Deletion**: Update and history documents are immutable and created
+ *   under unique auto IDs, and only a transaction that reads
+ *   LOCK_COMPACTION and finds itself the owner deletes them (delta, fold
+ *   and stale-epoch cleanup here, the squash in squash.ts). These
+ *   transactions delete the refs their queries returned WITHOUT re-reading
+ *   them: each deleted document's payload is already in what the
+ *   transaction commits (or is stale-epoch data), deleting a missing
+ *   document is a no-op, and another deleter committing in between would
+ *   have changed the lock and failed our commit. A re-read would cost a
+ *   billed read of the full payload and one RPC per document, on every
+ *   transaction attempt. A lockless deleter, or IDs that are reused or
+ *   rewritten in place, would break this (an existence re-read would not
+ *   catch those either). The queries also return this client's own
+ *   unacknowledged writes, which a blind delete misses: compaction skips
+ *   them (once a squash commits they are stale-epoch data, deleted
+ *   unread).
  *
  * @module compaction
  */
@@ -44,30 +60,46 @@ import {
     orderBy,
     getDocs,
     getDoc,
+    getCountFromServer,
     serverTimestamp,
     deleteField,
     limit,
     DocumentReference,
     Timestamp,
 } from "@firebase/firestore";
-import { ref, uploadBytes, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
-import { toBase64 } from "lib0/buffer";
+import { ref, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
+import * as Y from "yjs";
+import { fromBase64, toBase64 } from "lib0/buffer";
 import {
+    blobsReplacedByFold,
     buildDeltaSegmentDoc,
     buildSnapshotResult,
+    deleteSetFitsInline,
     deltaSegmentFitsInline,
+    effectiveFoldThreshold,
     epochOf,
+    foldDeleteSetPath,
+    foldSnapshotPath,
+    foldTailBaseClocks,
+    foldTailPath,
     nextSnapshotVersion,
     planHistoryDoc,
     planUpdateDoc,
     readMainDocState,
+    shouldDeferCompaction,
+    shouldFoldWithoutUpdates,
+    shouldPublishFoldTail,
     shouldRetryCompaction,
     shouldUseDelta,
+    updateBlobPath,
 } from './compaction-policy';
 import { DEFAULTS, FIRESTORE_PATHS, TestHooks } from "./types";
-import { wait, calculateBackoff } from "./utils";
+import { wait, calculateBackoff, generateSessionId, writeStateVector } from "./utils";
 import { acquireLock, releaseLock } from "./locking";
 import { mergeUpdatesWithMetaAsync } from "./merge-utils";
+import { uploadBlob, deleteUpdateBlobs, UpdateBlobReclaim } from "./storage-blobs";
+import { updateHasDeletions } from "./update-metadata";
+import { isPermanentDownloadError } from "./sync-policy";
 
 /**
  * Context required for compaction operations.
@@ -102,8 +134,35 @@ export interface CompactionContext {
      * (updates -> one history segment, O(new data)); at the threshold it
      * folds (snapshot + history + updates -> new snapshot, O(document)).
      * Defaults to DEFAULTS.HISTORY_FOLD_THRESHOLD; 1 = always fold.
+     * Capped at DEFAULTS.MAX_COMPACTION_HISTORY + 1: one fold merges at
+     * most MAX_COMPACTION_HISTORY segments.
      */
     historyFoldThreshold?: number;
+    /**
+     * Set for the cycle squash() runs first. That cycle only has to bring
+     * the backlog within the squash transaction's limits: the squash
+     * snapshot supersedes the base and every history segment moments
+     * later, so a fold that is merely due would be thrown away. It
+     * tolerates one segment past historyFoldThreshold instead (the squash
+     * deletes them all; should it fail, the next cycle folds).
+     */
+    beforeSquash?: boolean;
+    /**
+     * Smallest update backlog worth a cycle, set by the update listener's
+     * threshold trigger: fewer pending updates are left for the next
+     * crossing unless a fold is due (see shouldDeferCompaction). Defaults
+     * to 0, which drains everything (manual and squash compactions).
+     */
+    minUpdates?: number;
+    /**
+     * Storage blobs of pointer documents this client's earlier cycles (or
+     * its squash) deleted, kept by the provider across cycles: each cycle
+     * reclaims them before its own work and leaves its own for the next
+     * (see reclaimUpdateBlobs). Without it, a cycle reclaims its own right
+     * after its commit. A merged pointer's entry keeps its payload until
+     * then (see deleteUpdateBlobs).
+     */
+    deferredUpdateBlobs?: UpdateBlobReclaim[];
     /**
      * Test seam: inline cap for the delete-set fingerprint field.
      * Defaults to DEFAULTS.MAX_DELETE_SET_FIELD_BYTES.
@@ -128,6 +187,15 @@ export interface CompactionResult {
     error?: Error;
     /** Version number of the snapshot that was replaced (for garbage collection) */
     previousVersion?: number;
+}
+
+/**
+ * What a committed compaction transaction did: its result, and the
+ * documents it deleted (whose Storage blobs the cycle then reclaims).
+ */
+interface CommittedCompaction {
+    result: CompactionResult;
+    deletedRefs: DocumentReference[];
 }
 
 /**
@@ -161,7 +229,16 @@ export async function compact(
     attempt: number = 1
 ): Promise<CompactionResult> {
     const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, cachedClockOffset, storage } = ctx;
-    const historyFoldThreshold = ctx.historyFoldThreshold ?? DEFAULTS.HISTORY_FOLD_THRESHOLD;
+    const historyFoldThreshold = (ctx.historyFoldThreshold ?? DEFAULTS.HISTORY_FOLD_THRESHOLD) + (ctx.beforeSquash ? 1 : 0);
+
+    // The blobs earlier cycles left for this one: a peer's download that
+    // raced their commit has had until now to finish (see
+    // reclaimUpdateBlobs). Awaited before the updates are listed, so a
+    // pointer re-sent meanwhile has its blob back first (see
+    // deleteUpdateBlobs).
+    if (ctx.deferredUpdateBlobs?.length) {
+        await deleteUpdateBlobs(storage, ctx.deferredUpdateBlobs.splice(0));
+    }
 
     // 1. Distributed Gate: Try to become the Leader
     // P0.3 FIX: Pass cached clock offset to avoid re-measuring (saves 3 Firestore ops)
@@ -175,26 +252,58 @@ export async function compact(
         // Limits are clamped so deletes (updates + history) plus the snapshot
         // write stay within Firestore's 500-op transaction budget. Anything
         // left over is picked up by the next compaction cycle.
+        const updateLimit = Math.min(compactionLimit, DEFAULTS.MAX_COMPACTION_UPDATES);
         const updatesQ = query(
             collection(db, path, FIRESTORE_PATHS.UPDATES),
             orderBy('createdAt', 'asc'),
-            limit(Math.min(compactionLimit, DEFAULTS.MAX_COMPACTION_UPDATES))
+            limit(updateLimit)
         );
         const updatesSnap = await getDocs(updatesQ);
 
+        // One row past the cap: it is never merged, it only reveals that
+        // history extends beyond what this cycle can fold.
         const historyQ = query(
             collection(db, path, FIRESTORE_PATHS.HISTORY),
             orderBy('startTime', 'asc'),
-            limit(DEFAULTS.MAX_COMPACTION_HISTORY)
+            limit(DEFAULTS.MAX_COMPACTION_HISTORY + 1)
         );
-        const historySnaps = await getDocs(historyQ);
+        // Segment payloads are only merged by a fold, so the fold path
+        // fetches them; a delta cycle just counts the segments (STEP 3).
+        // With no update documents there is nothing to delta: fetch them
+        // now, which also detects a cycle with nothing to do.
+        const prefetchedHistory = updatesSnap.empty ? await getDocs(historyQ) : null;
 
-        if (updatesSnap.empty && historySnaps.empty) {
+        // The number of history segments, for the decisions that need only
+        // that: from the prefetched payloads when there are any, otherwise
+        // counted (countHistory, one billed read) at most once per cycle.
+        let historyCountRead: Promise<number> | null = null;
+        const historyCount = (): Promise<number> => historyCountRead ??= prefetchedHistory
+            ? Promise.resolve(prefetchedHistory.size)
+            : countHistory(db, path, historyFoldThreshold);
+
+        // A threshold-triggered cycle that lost the crossing to another
+        // client finds only its leftovers. Skip before the main-document
+        // read: with no updates the code below would fold base + history
+        // (shouldUseDelta needs updates), and a few would make a tiny
+        // segment that brings the next fold closer. A longer history only
+        // makes deferring less likely, so history is counted only when an
+        // empty one would defer.
+        const deferParams = { minUpdates: ctx.minUpdates ?? 0, updateCount: updatesSnap.size, updateLimit, historyFoldThreshold };
+        if (shouldDeferCompaction({ ...deferParams, historyCount: 0 })
+            && shouldDeferCompaction({ ...deferParams, historyCount: await historyCount() })) {
             return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
         }
 
-        const updateDocs = updatesSnap.docs;
-        const historyDocs = historySnaps.docs;
+        if (updatesSnap.empty && prefetchedHistory.empty) {
+            return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
+        }
+
+        // Only committed documents. The query also returns this client's
+        // own writes the server has not acknowledged yet (latency
+        // compensation, or a queue held while the write stream is down):
+        // deleting one is a no-op on the server, and once it commits it
+        // would point to the blob reclaimed below. A later cycle takes it.
+        const updateDocs = updatesSnap.docs.filter(uDoc => !uDoc.metadata.hasPendingWrites);
 
         // Test hook for simulating concurrent modifications
         if (testHooks?.beforeTransaction) {
@@ -217,15 +326,23 @@ export async function compact(
         // missing dependencies, which also disables GC compaction), so
         // they are deleted without merging.
         const staleRefs: DocumentReference[] = [];
+        // The Storage blob of every pointer document read above, by
+        // document path: reclaimed once a committed transaction deletes
+        // the pointer (see reclaimUpdateBlobs).
+        const updateBlobs = new Map<string, string>();
 
-        // Use the data already returned by the queries above. Update and
+        // Use the data already returned by the queries. Update and
         // history documents are immutable (only ever created or deleted),
-        // and the transaction below re-verifies existence before deleting,
-        // so re-fetching each document individually would only double the
-        // read cost. Storage-backed payloads are downloaded in parallel.
+        // so neither this step nor the commit transaction re-fetches them
+        // (see "Deletion" in the module header): that would only double
+        // the read cost. Storage-backed payloads are downloaded in parallel.
         const updateResults = await Promise.all(updateDocs.map(async (uDoc) => {
             const data = uDoc.data() as Record<string, any>;
             const plan = planUpdateDoc(data, currentEpoch);
+            const blobPath = updateBlobPath(data);
+            if (blobPath !== null) {
+                updateBlobs.set(uDoc.ref.path, blobPath);
+            }
 
             if (plan.kind === 'stale') {
                 staleRefs.push(uDoc.ref);
@@ -241,8 +358,15 @@ export async function compact(
                         createdAt: data.createdAt,
                     };
                 } catch (e) {
-                    console.error(`Compaction skipped storage-backed update ${uDoc.id} due to download failure`, e);
-                    return null;
+                    // Cannot safely compact around a missing payload: the
+                    // same client's later updates (and anything built on
+                    // them) would merge past a clock gap, and the result's
+                    // state vector (clock ends) would claim the skipped
+                    // range — clients would then drop the update document
+                    // still holding it as redundant. Abort; a later cycle
+                    // retries once the download succeeds.
+                    console.error(`Compaction failed to download storage-backed update ${uDoc.id}`, e);
+                    throw await blobDownloadError(db, e, uDoc.ref, updateBlobPath, plan.storagePath);
                 }
             }
             if (plan.kind === 'inline') {
@@ -255,6 +379,49 @@ export async function compact(
             return null;
         }));
         const updatesToProcess = updateResults.filter((u): u is { ref: DocumentReference; data: Uint8Array; createdAt: Timestamp } => u !== null);
+
+        // === STEP 3: Choose compaction mode ===
+        //
+        // DELTA (the steady-state cycle on aged documents): merge ONLY the
+        // pending update documents into one history segment. O(new data)
+        // CPU and bandwidth — the multi-MB base snapshot is neither
+        // downloaded nor re-uploaded.
+        //
+        // FOLD (amortized): everything (base + history + updates) merges
+        // into a fresh GC'd snapshot. Runs when history has accumulated to
+        // the fold threshold, when there is no base yet, or when a delta
+        // segment would not fit inline in a Firestore document.
+        //
+        // The choice needs only how many history segments exist, so they
+        // are counted (countHistory), not downloaded: the k-th delta after
+        // a fold would otherwise re-download the k segments every client
+        // already holds. shouldUseDelta only grows stricter as history
+        // grows, so when even an empty history would fold (no base, nothing
+        // new, a threshold of 1) the fold is certain and the count skipped.
+        const modeParams = { hasBase, updateCount: updatesToProcess.length, historyFoldThreshold };
+        const wantDelta = shouldUseDelta({ ...modeParams, historyCount: 0 })
+            && shouldUseDelta({ ...modeParams, historyCount: await historyCount() });
+
+        if (wantDelta) {
+            const delta = await tryDeltaCompaction({
+                db,
+                path,
+                uid,
+                updatesToProcess,
+                staleRefs,
+                epoch: currentEpoch,
+            });
+            if (delta !== null) {
+                await reclaimUpdateBlobs(ctx, blobsOf(updateBlobs, delta.deletedRefs, updatesToProcess));
+                return delta.result;
+            }
+            // Segment would not fit inline — fall through to a full fold.
+        }
+
+        // A fold merges the segments themselves, so it needs their payloads.
+        const historySnaps = prefetchedHistory ?? await getDocs(historyQ);
+        const historyTruncated = historySnaps.docs.length > DEFAULTS.MAX_COMPACTION_HISTORY;
+        const historyDocs = historySnaps.docs.slice(0, DEFAULTS.MAX_COMPACTION_HISTORY);
 
         const historyToMerge = historyDocs
             .map((hDoc) => {
@@ -275,46 +442,33 @@ export async function compact(
             })
             .filter((h): h is { ref: DocumentReference; val: Uint8Array } => h !== null);
 
-        if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
+        // Nothing new to add: a fold would only re-merge base + history at
+        // O(document) cost, so unless one is due the cycle ends here (late
+        // lock winners, app compact() calls and squash() arrive with
+        // nothing pending). Old-epoch documents are still removed.
+        if (updatesToProcess.length === 0 && !shouldFoldWithoutUpdates({
+            hasBase,
+            historyCount: historyToMerge.length,
+            historyTruncated,
+            historyFoldThreshold,
+        })) {
             if (staleRefs.length > 0) {
-                await deleteStaleEpochDocs(db, path, uid, staleRefs);
+                const deletedRefs = await deleteStaleEpochDocs(db, path, uid, staleRefs);
+                await reclaimUpdateBlobs(ctx, blobsOf(updateBlobs, deletedRefs, updatesToProcess));
                 return { success: true, type: 'none' as const, updatesCompacted: staleRefs.length, historySegmentsMerged: 0 };
             }
             return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
         }
 
-        // === STEP 3: Choose compaction mode ===
-        //
-        // DELTA (the steady-state cycle on aged documents): merge ONLY the
-        // pending update documents into one history segment. O(new data)
-        // CPU and bandwidth — the multi-MB base snapshot is neither
-        // downloaded nor re-uploaded.
-        //
-        // FOLD (amortized): everything (base + history + updates) merges
-        // into a fresh GC'd snapshot. Runs when history has accumulated to
-        // the fold threshold, when there is no base yet, or when a delta
-        // segment would not fit inline in a Firestore document.
-        const wantDelta = shouldUseDelta({
-            hasBase,
-            updateCount: updatesToProcess.length,
-            historyCount: historyToMerge.length,
-            historyFoldThreshold,
-        });
-
-        if (wantDelta) {
-            const deltaResult = await tryDeltaCompaction({
-                db,
-                path,
-                uid,
-                updatesToProcess,
-                staleRefs,
-                epoch: currentEpoch,
-            });
-            if (deltaResult !== null) {
-                return deltaResult;
-            }
-            // Segment would not fit inline — fall through to a full fold.
-        }
+        // A fold must merge a per-client prefix of the document. When
+        // history extends past what one fold can merge, the pending updates
+        // are newer than the segments left behind, so folding them in would
+        // leave gaps in the snapshot: its state vector would stop at the
+        // first one (see below), the GC rebuild would fail, and every
+        // reader would park the structs past the gaps until a later fold.
+        // Such a fold takes base + the oldest history only; the updates
+        // wait for a later cycle.
+        const updatesToFold = historyTruncated ? [] : updatesToProcess;
 
         // === FOLD: download base, merge all, upload new snapshot ===
         let baseSnapshot: Uint8Array | null = null;
@@ -325,7 +479,8 @@ export async function compact(
                 baseSnapshot = new Uint8Array(buffer);
             } catch (e) {
                 console.error("Compaction failed to download base snapshot from storage", e);
-                throw e; // Cannot safely compact without base state
+                // Cannot safely compact without base state
+                throw await blobDownloadError(db, e, mainRef, (data) => readMainDocState(data).baseStoragePath, baseStoragePath);
             }
         } else if (baseInline) {
             baseSnapshot = baseInline.toUint8Array();
@@ -342,13 +497,21 @@ export async function compact(
         // keeps compaction's main-thread cost near zero. A validation
         // failure rejects, and a corrupted merge must never overwrite the
         // canonical snapshot.
-        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...historyToMerge.map(h => h.val), ...updatesToProcess.map(u => u.data)];
+        //
+        // The state vector is what the snapshot holds contiguously from
+        // clock 0 (snapshot: true), not its clock ends: the push guard
+        // reads it as the range [0, sv) the server holds, so a fold that
+        // merges across a server-side gap (an update document written
+        // without the same client's earlier structs) must not claim the
+        // gap, or the client holding the missing range never pushes it.
+        const tailSources = [...historyToMerge.map(h => h.val), ...updatesToFold.map(u => u.data)];
+        const allContent = [...(baseSnapshot ? [baseSnapshot] : []), ...tailSources];
         let candidate: Uint8Array;
         let stateVectorB64: string;
         let deleteSetUpdate: Uint8Array | null = null;
         let oversizedDeleteSet: Uint8Array | null = null;
         try {
-            const merged = await mergeUpdatesWithMetaAsync(allContent, { gc: ctx.gc !== false });
+            const merged = await mergeUpdatesWithMetaAsync(allContent, { gc: ctx.gc !== false, snapshot: true });
             candidate = merged.result;
             stateVectorB64 = toBase64(merged.stateVector);
 
@@ -356,14 +519,20 @@ export async function compact(
             // the main document: it lets clients that already cover the
             // snapshot's state vector skip downloading the blob while still
             // proving their deletions are on the server.
-            if (merged.dsUpdate.byteLength <= (ctx.maxDeleteSetFieldBytes ?? DEFAULTS.MAX_DELETE_SET_FIELD_BYTES)) {
+            if (deleteSetFitsInline({
+                deleteSetBytes: merged.dsUpdate.byteLength,
+                stateVectorB64Length: stateVectorB64.length,
+                maxFieldBytes: ctx.maxDeleteSetFieldBytes ?? DEFAULTS.MAX_DELETE_SET_FIELD_BYTES,
+                inlineLimit: DEFAULTS.INLINE_UPDATE_LIMIT,
+            })) {
                 deleteSetUpdate = merged.dsUpdate;
             } else {
-                // Too large to inline (very old, deletion-heavy document).
-                // Offload to Cloud Storage instead of dropping it: without a
-                // fingerprint every reconnecting client fails the push-guard
-                // coverage proof and writes a spurious O(delete-set) update
-                // document on every boot, forever.
+                // Too large to inline beside the state vector (very old,
+                // deletion-heavy or many-client document). Offload to Cloud
+                // Storage instead of dropping it: without a fingerprint
+                // every reconnecting client fails the push-guard coverage
+                // proof and writes a spurious O(delete-set) update document
+                // on every boot, forever.
                 oversizedDeleteSet = merged.dsUpdate;
             }
         } catch (decodeErr) {
@@ -373,26 +542,45 @@ export async function compact(
         }
 
         const nextVersion = currentVersion + 1;
-        const snapshotFilename = `snapshot_v${nextVersion}.bin`;
-        const storagePath = `${path}/${snapshotFilename}`;
-        const storageRef = ref(storage, storagePath);
+        const attemptId = generateSessionId();
+        const storagePath = foldSnapshotPath(path, nextVersion, attemptId);
 
         // Upload candidate blob to Cloud Storage first
         // It is safe to upload first because if transaction fails, it just leaves an orphaned file that we ignore.
-        await uploadBytes(storageRef, candidate);
+        // The path is unique to this attempt: if we lose the lock while
+        // uploading, another client may commit the same version, and a
+        // version-derived name would let our late upload replace its blob.
+        // The blob is gzipped in the merge worker (about 3x smaller); the
+        // metadata above was derived from the raw candidate.
+        await uploadBlob(storage, storagePath, candidate);
 
         let deleteSetStoragePath: string | null = null;
         if (oversizedDeleteSet) {
-            deleteSetStoragePath = `${path}/ds_v${nextVersion}.bin`;
-            await uploadBytes(ref(storage, deleteSetStoragePath), oversizedDeleteSet);
+            deleteSetStoragePath = foldDeleteSetPath(path, nextVersion, attemptId);
+            await uploadBlob(storage, deleteSetStoragePath, oversizedDeleteSet);
         }
 
+        // A client that held the replaced snapshot lacks only what this
+        // fold merges on top of it. Publish that tail beside the snapshot
+        // so such a client can catch up without downloading the snapshot.
+        const foldTail = baseSnapshot && mainState.baseStateVector
+            ? await publishFoldTail({
+                storage,
+                storagePath: foldTailPath(path, nextVersion, attemptId),
+                sources: tailSources,
+                baseStateVector: mainState.baseStateVector,
+                snapshotBytes: candidate.byteLength,
+                stateVectorB64Length: stateVectorB64.length,
+                inlineDeleteSetBytes: deleteSetUpdate?.byteLength ?? 0,
+            })
+            : null;
+
         // === STEP 4: Transaction ===
-        const result = await performCompactionTransaction({
+        const { result, deletedRefs } = await performCompactionTransaction({
             db,
             path,
             uid,
-            verifiedUpdateRefs: updatesToProcess.map(u => u.ref),
+            verifiedUpdateRefs: updatesToFold.map(u => u.ref),
             verifiedHistoryRefs: historyToMerge.map(h => h.ref),
             staleRefs,
             storagePath,
@@ -400,23 +588,27 @@ export async function compact(
             stateVectorB64,
             deleteSetUpdate,
             deleteSetStoragePath,
+            foldTail,
             expectedVersion: currentVersion,
         });
+        await reclaimUpdateBlobs(ctx, blobsOf(updateBlobs, deletedRefs, updatesToProcess));
 
-        // Garbage Collect Old Storage Snapshot (and its delete-set blob)
-        if (result.success && result.type === 'snapshot' && result.previousVersion !== undefined && result.previousVersion > 0) {
-            try {
-                const oldSnapshotPath = `${path}/snapshot_v${result.previousVersion}.bin`;
-                const oldStorageRef = ref(storage, oldSnapshotPath);
-                await deleteObject(oldStorageRef);
-                console.log(`Garbage collected old snapshot: ${oldSnapshotPath}`);
-            } catch (err) {
-                console.warn(`Failed to garbage collect old snapshot for ${path}`, err);
-            }
-            try {
-                await deleteObject(ref(storage, `${path}/ds_v${result.previousVersion}.bin`));
-            } catch (err) {
-                // Normal case: no offloaded delete-set existed for that version
+        // Garbage Collect Old Storage Snapshot (and its delete-set and tail blobs,
+        // plus any an older client's fold replaced without deleting them).
+        // Delete the paths the replaced main document stored: blob names are
+        // attempt-unique (and a squash snapshot is named
+        // snapshot_e{E}_v{V}_{id}.bin), so they cannot be rebuilt from the
+        // version. The transaction verified the version is unchanged, and
+        // every writer of these fields bumps it, so they still describe what
+        // we replaced.
+        if (result.success && result.type === 'snapshot') {
+            for (const oldPath of blobsReplacedByFold(mainState, [storagePath, deleteSetStoragePath, foldTail?.storagePath ?? null])) {
+                try {
+                    await deleteObject(ref(storage, oldPath));
+                    console.log(`Garbage collected old blob: ${oldPath}`);
+                } catch (err) {
+                    console.warn(`Failed to garbage collect old blob ${oldPath} for ${path}`, err);
+                }
             }
         }
 
@@ -427,6 +619,25 @@ export async function compact(
     } finally {
         await releaseLock({ db, path, uid });
     }
+}
+
+/**
+ * Counts history segments for the DELTA/FOLD choice without downloading
+ * them. The count stops at the effective fold threshold (every count from
+ * there on folds), so it bills one read however long history is.
+ *
+ * It counts what the fold's history query reads, stale-epoch segments
+ * included: a fold that comes sooner for them is still correct, and it
+ * deletes them. Only the lock holder creates or deletes segments, so the
+ * count holds until this cycle's transaction.
+ */
+async function countHistory(db: Firestore, path: string, historyFoldThreshold: number): Promise<number> {
+    const snap = await getCountFromServer(query(
+        collection(db, path, FIRESTORE_PATHS.HISTORY),
+        orderBy('startTime', 'asc'),
+        limit(effectiveFoldThreshold(historyFoldThreshold))
+    ));
+    return snap.data().count;
 }
 
 /**
@@ -444,7 +655,7 @@ async function tryDeltaCompaction(params: {
     updatesToProcess: { ref: DocumentReference; data: Uint8Array }[];
     staleRefs: DocumentReference[];
     epoch: number;
-}): Promise<CompactionResult | null> {
+}): Promise<CommittedCompaction | null> {
     const { db, path, uid, updatesToProcess, staleRefs, epoch } = params;
 
     // Merge + validate + derive the segment's state vector (clock ends per
@@ -455,11 +666,15 @@ async function tryDeltaCompaction(params: {
     // attempt.
     const merged = await mergeUpdatesWithMetaAsync(updatesToProcess.map(u => u.data), { gc: false });
 
-    if (!deltaSegmentFitsInline(merged.result.byteLength, DEFAULTS.INLINE_UPDATE_LIMIT)) {
+    const segmentB64Sv = toBase64(merged.stateVector);
+
+    if (!deltaSegmentFitsInline(merged.result.byteLength, segmentB64Sv.length, DEFAULTS.INLINE_UPDATE_LIMIT)) {
         return null;
     }
 
-    const segmentB64Sv = toBase64(merged.stateVector);
+    // The state vector cannot show deletions; flag them so readers never
+    // skip this segment as covered (see buildDeltaSegmentDoc).
+    const hasDeletions = updateHasDeletions(merged.dsUpdate);
 
     return await runTransaction(db, async (transaction) => {
         // Kill switch: bail if the lock was lost (another client may be
@@ -470,31 +685,96 @@ async function tryDeltaCompaction(params: {
             throw new Error("Lock lost or expired during compaction phase - Aborting write.");
         }
 
-        // Verify updates still exist before deleting (zombie protection)
-        const updateSnaps = await Promise.all(updatesToProcess.map(u => transaction.get(u.ref)));
-        const survivors = updateSnaps.filter(snap => snap.exists());
-        if (survivors.length === 0) {
-            return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
-        }
-
         const segmentRef = doc(collection(db, path, FIRESTORE_PATHS.HISTORY));
         transaction.set(segmentRef, {
-            ...buildDeltaSegmentDoc({ stateVectorB64: segmentB64Sv, uid, epoch }),
+            ...buildDeltaSegmentDoc({ stateVectorB64: segmentB64Sv, hasDeletions, uid, epoch }),
             segment: Bytes.fromUint8Array(merged.result),
             startTime: serverTimestamp(),
         });
-        survivors.forEach(snap => transaction.delete(snap.ref));
+        // Deleted without re-reading: the segment holds every one of them,
+        // and only lock holders delete update documents (see "Deletion" in
+        // the module header).
+        updatesToProcess.forEach(u => transaction.delete(u.ref));
         staleRefs.forEach(ref => transaction.delete(ref));
 
-        console.log(`Delta-compacted ${survivors.length} updates into history segment (${merged.result.byteLength} bytes)`);
+        console.log(`Delta-compacted ${updatesToProcess.length} updates into history segment (${merged.result.byteLength} bytes)`);
 
         return {
-            success: true,
-            type: 'history' as const,
-            updatesCompacted: survivors.length,
-            historySegmentsMerged: 0,
+            result: {
+                success: true,
+                type: 'history' as const,
+                updatesCompacted: updatesToProcess.length,
+                historySegmentsMerged: 0,
+            },
+            deletedRefs: [...updatesToProcess.map(u => u.ref), ...staleRefs],
         };
     });
+}
+
+/** A fold's published tail, as stored on the main document. */
+interface FoldTail {
+    /** Cloud Storage path of the tail blob */
+    storagePath: string;
+    /** Base64 base clocks of the tail (see foldTailBaseClocks) */
+    baseClocks: string;
+}
+
+/**
+ * Publishes a fold's tail: everything the fold merges on top of the base
+ * (its history segments and update documents, un-GC'd) as one blob.
+ *
+ * A fold deletes its sources, so afterwards the data a lagging client
+ * lacks exists only inside the new snapshot — multi-MB on an aged
+ * document, and growing with its age. A client that held the replaced
+ * snapshot (typically a device that was away while another one crossed a
+ * fold) lacks only this tail, a few percent of the snapshot, and the sync
+ * layer downloads it instead (see foldTailMayCatchUp).
+ *
+ * Uploaded before the commit, like the snapshot, so the pointer never
+ * names a missing blob. Never throws: the tail is a shortcut, and a fold
+ * without one is complete — readers then download the snapshot.
+ *
+ * @returns The tail's main-document fields, or null when none is published.
+ */
+async function publishFoldTail(params: {
+    storage: FirebaseStorage;
+    storagePath: string;
+    sources: Uint8Array[];
+    baseStateVector: string;
+    snapshotBytes: number;
+    stateVectorB64Length: number;
+    inlineDeleteSetBytes: number;
+}): Promise<FoldTail | null> {
+    const { storage, storagePath, sources, baseStateVector, snapshotBytes, stateVectorB64Length, inlineDeleteSetBytes } = params;
+
+    if (sources.length === 0) {
+        return null;
+    }
+    try {
+        // gc off, as for a delta segment: the tail references structs that
+        // live in the base. The merge also validates it and yields the
+        // clients it touches, worker-side.
+        const tail = await mergeUpdatesWithMetaAsync(sources, { gc: false });
+        const baseClocks = toBase64(writeStateVector(foldTailBaseClocks(
+            Y.decodeStateVector(fromBase64(baseStateVector)),
+            Y.decodeStateVector(tail.stateVector),
+        )));
+        if (!shouldPublishFoldTail({
+            tailBytes: tail.result.byteLength,
+            snapshotBytes,
+            tailFieldsLength: baseClocks.length + storagePath.length,
+            stateVectorB64Length,
+            inlineDeleteSetBytes,
+            inlineLimit: DEFAULTS.INLINE_UPDATE_LIMIT,
+        })) {
+            return null;
+        }
+        await uploadBlob(storage, storagePath, tail.result);
+        return { storagePath, baseClocks };
+    } catch (e) {
+        console.warn(`Failed to publish fold tail ${storagePath}; readers will download the snapshot`, e);
+        return null;
+    }
 }
 
 /**
@@ -514,9 +794,10 @@ async function performCompactionTransaction(params: {
     stateVectorB64: string;
     deleteSetUpdate: Uint8Array | null;
     deleteSetStoragePath: string | null;
+    foldTail: FoldTail | null;
     expectedVersion: number;
-}): Promise<CompactionResult> {
-    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, staleRefs, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, expectedVersion } = params;
+}): Promise<CommittedCompaction> {
+    const { db, path, uid, verifiedUpdateRefs, verifiedHistoryRefs, staleRefs, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, foldTail, expectedVersion } = params;
 
     return await runTransaction(db, async (transaction) => {
         // === STEP A: THE KILL SWITCH ===
@@ -543,23 +824,17 @@ async function performCompactionTransaction(params: {
             throw new Error("Document version changed during compaction upload. Aborting to retry.");
         }
 
-        // Verify updates still exist (avoid zombie bugs) before deleting
-        // P1.1 Optimization: Use parallel transaction.get to eliminate N+1 queries
-        const [updateSnaps, historySnaps] = await Promise.all([
-            Promise.all(verifiedUpdateRefs.map(ref => transaction.get(ref))),
-            Promise.all(verifiedHistoryRefs.map(ref => transaction.get(ref)))
-        ]);
-
-        const updatesToProcess = updateSnaps
-            .filter(snap => snap.exists())
-            .map(snap => ({ ref: snap.ref }));
-
-        const historyToMerge = historySnaps
-            .filter(snap => snap.exists())
-            .map(snap => ({ ref: snap.ref }));
+        // Deleted without re-reading: the candidate holds every one of
+        // them, and only lock holders delete update/history documents (see
+        // "Deletion" in the module header).
+        const updatesToProcess = verifiedUpdateRefs.map(ref => ({ ref }));
+        const historyToMerge = verifiedHistoryRefs.map(ref => ({ ref }));
 
         if (updatesToProcess.length === 0 && historyToMerge.length === 0) {
-            return { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 };
+            return {
+                result: { success: true, type: 'none' as const, updatesCompacted: 0, historySegmentsMerged: 0 },
+                deletedRefs: [],
+            };
         }
 
         // === STEP C: Commit Pointers ===
@@ -572,6 +847,7 @@ async function performCompactionTransaction(params: {
             stateVectorB64,
             deleteSetUpdate,
             deleteSetStoragePath,
+            foldTail,
             currentVersion,
             updatesToProcess,
             historyToMerge,
@@ -579,29 +855,135 @@ async function performCompactionTransaction(params: {
         // Old-epoch documents ride along in the same transaction: they are
         // never merged, only removed.
         staleRefs.forEach(ref => transaction.delete(ref));
-        return result;
+        return {
+            result,
+            deletedRefs: [...updatesToProcess.map(u => u.ref), ...historyToMerge.map(h => h.ref), ...staleRefs],
+        };
     });
 }
 
 /**
  * Deletes stale-epoch update/history documents when there is nothing else
- * to compact. Existence is re-verified inside the transaction.
+ * to compact. They are deleted without re-reading (see "Deletion" in the
+ * module header).
+ *
+ * @returns The documents the committed transaction deleted.
  */
 async function deleteStaleEpochDocs(
     db: Firestore,
     path: string,
     uid: string,
     staleRefs: DocumentReference[]
-): Promise<void> {
-    await runTransaction(db, async (transaction) => {
+): Promise<DocumentReference[]> {
+    return await runTransaction(db, async (transaction) => {
         const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
         const lockSnap = await transaction.get(lockRef);
         if (!lockSnap.exists() || lockSnap.data().owner !== uid) {
             throw new Error("Lock lost or expired during compaction phase - Aborting write.");
         }
-        const snaps = await Promise.all(staleRefs.map(r => transaction.get(r)));
-        snaps.forEach(s => { if (s.exists()) transaction.delete(s.ref); });
+        staleRefs.forEach(ref => transaction.delete(ref));
+        return staleRefs;
     });
+}
+
+/**
+ * Reclaims the Storage blobs of the pointer documents a committed
+ * transaction deleted (compaction here, squash in squash.ts). With its
+ * pointer gone nothing reads a blob again; left alone, every oversized
+ * save or push stayed in billed Storage forever.
+ *
+ * Must run only after the commit, and only for documents that commit
+ * deleted (the transaction body's return value, so a re-run on
+ * contention reports its own deletes). The deletes are blind (see
+ * "Deletion" in the module header), but compaction only lists committed
+ * pointers, so once the commit lands each one is gone either way, and its
+ * payload is in what the commit wrote.
+ *
+ * The blobs are left for this client's next cycle
+ * (ctx.deferredUpdateBlobs) rather than deleted now: a peer whose update
+ * listener got the pointer just before the commit can still be
+ * downloading one, and by the next cycle (a threshold crossing or
+ * compact() call later) it has finished. Current readers survive the
+ * delete either way (initial sync skips a missing blob, the update
+ * listener one whose pointer is gone, and the data arrives through the
+ * fold or segment), but releases that predate reclaiming quarantine an
+ * update on any failed download and report a false 'corrupted-document'.
+ * Without a deferral list, or once the provider is destroyed (no next
+ * cycle), they are deleted now (see deleteUpdateBlobs).
+ */
+export async function reclaimUpdateBlobs(
+    ctx: Pick<CompactionContext, 'storage' | 'isDestroyed' | 'deferredUpdateBlobs'>,
+    blobs: UpdateBlobReclaim[]
+): Promise<void> {
+    if (ctx.deferredUpdateBlobs && !ctx.isDestroyed()) {
+        ctx.deferredUpdateBlobs.push(...blobs);
+        return;
+    }
+    await deleteUpdateBlobs(ctx.storage, blobs);
+}
+
+/**
+ * The blobs of the pointer documents among `deletedRefs` (from compact's
+ * updateBlobs), with the payload of each one among `merged`.
+ */
+function blobsOf(
+    updateBlobs: Map<string, string>,
+    deletedRefs: DocumentReference[],
+    merged: { ref: DocumentReference; data: Uint8Array }[]
+): UpdateBlobReclaim[] {
+    const payloads = new Map(merged.map(u => [u.ref.path, u.data]));
+    return deletedRefs.flatMap((docRef): UpdateBlobReclaim[] => {
+        const blobPath = updateBlobs.get(docRef.path);
+        if (blobPath === undefined) return [];
+        const payload = payloads.get(docRef.path);
+        return [payload === undefined ? { path: blobPath } : { path: blobPath, pointer: docRef, payload }];
+    });
+}
+
+/**
+ * The error a cycle fails with when it could not download a blob that
+ * one of its reads named.
+ *
+ * Those reads can be stale even though the lock transaction reached the
+ * server: the SDK answers getDoc/getDocs from its cache while it
+ * considers itself offline, and from a live listener's view, which
+ * trails the server. A blob is deleted only after a commit replaced or
+ * deleted the pointer naming it, so a stale pointer can name a blob that
+ * another client's compaction already reclaimed. Storage reports that as
+ * a missing object before our commit could detect the race, and a
+ * missing object is a failure retrying will not fix
+ * (isPersistentCompactionFailure). A missing blob is therefore checked
+ * against the pointer as the server holds it, read in a transaction
+ * (getDoc could answer from the same stale view): a pointer that no
+ * longer names the blob makes the failure contention, which compact()
+ * retries on fresh reads. A blob missing behind a pointer that still
+ * names it is gone for good. A failed check throws its own error.
+ *
+ * @param db - Firestore instance
+ * @param error - The download error
+ * @param pointerRef - The document whose read named the blob
+ * @param namedBlob - The blob a version of that document names, if any
+ * @param blobPath - The blob that could not be downloaded
+ * @returns The error to throw
+ */
+async function blobDownloadError(
+    db: Firestore,
+    error: unknown,
+    pointerRef: DocumentReference,
+    namedBlob: (data: Record<string, any> | null) => string | null,
+    blobPath: string
+): Promise<unknown> {
+    if (!isPermanentDownloadError(error)) {
+        return error;
+    }
+    const pointer = await runTransaction(db, (transaction) => transaction.get(pointerRef));
+    if (namedBlob(pointer.exists() ? pointer.data() : null) === blobPath) {
+        return error;
+    }
+    return Object.assign(
+        new Error(`${blobPath} was reclaimed by another client's compaction after this cycle read ${pointerRef.path}. Aborting to retry.`),
+        { code: 'aborted' }
+    );
 }
 
 /**
@@ -616,11 +998,12 @@ function compactToSnapshot(params: {
     stateVectorB64: string;
     deleteSetUpdate: Uint8Array | null;
     deleteSetStoragePath: string | null;
+    foldTail: FoldTail | null;
     currentVersion: number;
     updatesToProcess: { ref: DocumentReference }[];
     historyToMerge: { ref: DocumentReference }[];
 }): CompactionResult {
-    const { transaction, mainRef, uid, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, currentVersion, updatesToProcess, historyToMerge } = params;
+    const { transaction, mainRef, uid, storagePath, candidate, stateVectorB64, deleteSetUpdate, deleteSetStoragePath, foldTail, currentVersion, updatesToProcess, historyToMerge } = params;
 
     console.log(`Compacted to Snapshot (Size: ${candidate.byteLength})`);
 
@@ -643,9 +1026,20 @@ function compactToSnapshot(params: {
         // the spurious-push slow path).
         deleteSet: deleteSetUpdate ? Bytes.fromUint8Array(deleteSetUpdate) : deleteField(),
         deleteSetStoragePath: deleteSetStoragePath ?? deleteField(),
+        // The record of the blobs above, which an older client's fold
+        // leaves alone while it replaces them without deleting them (see
+        // MainDocState.orphanedBlobPaths).
+        snapshotBlobPaths: deleteSetStoragePath ? [storagePath, deleteSetStoragePath] : [storagePath],
+        // The tail is bound to the version it was folded into: a writer
+        // that predates tails bumps the version without touching these
+        // fields, and readers must then ignore them. No tail clears them.
+        foldTailStoragePath: foldTail?.storagePath ?? deleteField(),
+        foldTailBaseClocks: foldTail?.baseClocks ?? deleteField(),
+        foldTailVersion: foldTail ? nextSnapshotVersion(currentVersion) : deleteField(),
         version: nextSnapshotVersion(currentVersion),
         updatedAt: serverTimestamp(),
-        // Lets the compacting client's own snapshot listener skip this write
+        // Identifies the compacting client. Its own snapshot listener still
+        // runs the coverage check: the fold may hold data it lacks.
         origin: uid,
     }, { merge: true });
 

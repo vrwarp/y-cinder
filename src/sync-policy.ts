@@ -20,7 +20,7 @@ export type IncomingUpdatePlan =
     | { kind: 'drop-foreign-epoch' }
     /** This client wrote it; the local doc already has it. */
     | { kind: 'skip-own' }
-    /** Already covered by the local state vector. */
+    /** Already covered by the local state vector, and not flagged hasDeletions. */
     | { kind: 'skip-redundant' }
     /** Previously failed to apply; quarantined to avoid a retry loop. */
     | { kind: 'skip-quarantined' }
@@ -62,7 +62,8 @@ export function planIncomingUpdate(
     if (data?.createdBy === uid) {
         return { kind: 'skip-own' };
     }
-    if (data?.clientIDs?.length > 0 && data?.clientClocks?.length > 0
+    // Clocks cannot prove deletions are known (see update-metadata)
+    if (!data?.hasDeletions && data?.clientIDs?.length > 0 && data?.clientClocks?.length > 0
         && isUpdateRedundant(localSVMap, data.clientIDs, data.clientClocks)) {
         return { kind: 'skip-redundant' };
     }
@@ -80,6 +81,77 @@ export function planIncomingUpdate(
 }
 
 /**
+ * Whether a failed download of a storage-backed update (or of a snapshot)
+ * can never succeed.
+ *
+ * Update documents are immutable and are not delivered again, so giving up
+ * on one drops the update for the session — and parks every later update
+ * from the same author as pending. Only a missing object qualifies: the
+ * writer uploads the blob before the pointer document exists (a fold, before
+ * the main document), so a blob missing behind a visible pointer is gone
+ * for good. Everything else — notably `storage/retry-limit-exceeded`,
+ * which is what the SDK surfaces once its own retries on network errors,
+ * 5xx and 429 run out — may succeed on a later attempt and must be
+ * retried, never skipped or quarantined.
+ *
+ * @param error - The value `getBytes` rejected with.
+ * @returns true when retrying is pointless.
+ */
+export function isPermanentDownloadError(error: any): boolean {
+    return error?.code === 'storage/object-not-found';
+}
+
+/**
+ * Whether a rejected `addDoc` committed after all.
+ *
+ * The SDK re-sends every write it holds no ack for once its write stream
+ * reconnects, and `addDoc` creates a fresh auto-id document under the
+ * precondition `exists: false`. ALREADY_EXISTS therefore means an earlier
+ * send of this very write committed and only its ack was lost: the
+ * document is live, and a pointer's blob must not be deleted as
+ * unreferenced.
+ *
+ * @param error - The value `addDoc` rejected with.
+ * @returns true when the document the write created exists.
+ */
+export function isLostAckCommit(error: any): boolean {
+    return error?.code === 'already-exists';
+}
+
+/** Error code initial sync fails with when the client is offline */
+export const CLIENT_OFFLINE = 'client-offline';
+
+/**
+ * Whether a read was answered from the local cache instead of the server.
+ *
+ * The SDK serves getDocs/getDoc from its cache only once it considers the
+ * client offline. Initial sync must not complete on such a read: it would
+ * report 'sync' while offline, and its Updates → History → Snapshot read
+ * order only rules out missed data when each tier reflects the server at
+ * the time it is read.
+ *
+ * @param snapshot - A query or document snapshot. Test doubles of the SDK
+ *   may omit its metadata.
+ * @returns true when the read did not reach the server.
+ */
+export function isServedFromCache(snapshot: { metadata?: { fromCache?: boolean } }): boolean {
+    return snapshot.metadata?.fromCache === true;
+}
+
+/**
+ * Whether initial sync failed only because the client is offline.
+ *
+ * The provider then waits for the connection without spending its retry
+ * budget. Thrown errors, 'unavailable' included, remain failures.
+ *
+ * @param error - The error initial sync failed with.
+ * @returns true for the CLIENT_OFFLINE error.
+ */
+export function isClientOfflineError(error: any): boolean {
+    return error?.code === CLIENT_OFFLINE;
+}
+
+/**
  * Whether this snapshot delivery should trigger a compaction.
  *
  * Above the threshold every client would otherwise fire a mostly futile
@@ -88,7 +160,14 @@ export function planIncomingUpdate(
  * collection has reached the realtime hard cap, where falling further
  * behind is worse than the wasted contention.
  *
- * @param params - Delivery size, threshold, clock and cooldown state.
+ * A backoff after a compaction failure that retrying cannot fix overrides
+ * even the hard cap. A document compaction cannot get past (e.g. an
+ * undecodable update) never drains, so it stays at the hard cap, and
+ * every delivery would start another attempt that re-reads the whole
+ * backlog and fails the same way.
+ *
+ * @param params - Delivery size, threshold, clock, cooldown state, and
+ * when the provider's failure backoff ends (0 when none is running).
  * @returns true to trigger a compaction now.
  */
 export function shouldTriggerCompaction(params: {
@@ -98,10 +177,11 @@ export function shouldTriggerCompaction(params: {
     lastTriggerAt: number;
     cooldownMs: number;
     hardCap: number;
+    backoffUntil?: number;
 }): boolean {
-    const { size, maxUpdatesThreshold, now, lastTriggerAt, cooldownMs, hardCap } = params;
+    const { size, maxUpdatesThreshold, now, lastTriggerAt, cooldownMs, hardCap, backoffUntil = 0 } = params;
 
-    if (size <= maxUpdatesThreshold) {
+    if (size <= maxUpdatesThreshold || now < backoffUntil) {
         return false;
     }
 
@@ -182,7 +262,8 @@ export function hasMorePages(pageSize: number, batchSize: number): boolean {
  * anything.
  *
  * @param localSV - The local document's exact state vector.
- * @param serverSVMap - Clock ends the server is known to hold.
+ * @param serverSVMap - Per client, the clock up to which the server holds
+ *   every struct (not merely its highest clock — see buildServerCoverage).
  * @returns true when no local struct is missing server-side.
  */
 export function serverCoversLocalStructs(
@@ -253,11 +334,22 @@ export function orderByApplyPriority<T extends { priority: number }>(items: T[])
 /**
  * The Cloud Storage path for an oversized local diff.
  *
+ * Writers pass a per-attempt id: compaction and squash delete a blob once
+ * the transaction deleting its pointer document commits, which is only
+ * safe while every blob has exactly one pointer. Millis alone can repeat
+ * (a save and the initial-sync push of the same client in the same
+ * millisecond), and a second pointer to the same object would then
+ * dangle once the first is consumed.
+ *
  * @param basePath - The document's base path.
  * @param uid - This client's id.
- * @param timestamp - Millis, to keep concurrent pushes distinct.
+ * @param timestamp - Millis (keeps names time-ordered).
+ * @param attemptId - Unique to this upload attempt; every library
+ *   writer passes one.
  * @returns The storage object path.
  */
-export function largeUpdatePath(basePath: string, uid: string, timestamp: number): string {
-    return `${basePath}/large_updates/${uid}_${timestamp}.bin`;
+export function largeUpdatePath(basePath: string, uid: string, timestamp: number, attemptId?: string): string {
+    const suffix = attemptId === undefined ? '' : `_${attemptId}`;
+
+    return `${basePath}/large_updates/${uid}_${timestamp}${suffix}.bin`;
 }

@@ -10,19 +10,31 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+    blobsReplacedByFold,
     buildDeltaSegmentDoc,
     buildSnapshotResult,
     chooseDeleteSetField,
+    deleteSetFitsInline,
     deltaSegmentFitsInline,
+    effectiveFoldThreshold,
     epochOf,
+    foldDeleteSetPath,
+    foldSnapshotPath,
+    foldTailBaseClocks,
+    foldTailPath,
     nextSnapshotVersion,
     isLockLostError,
+    isPersistentCompactionFailure,
     isRetryableCompactionError,
     planHistoryDoc,
     planUpdateDoc,
     readMainDocState,
+    shouldDeferCompaction,
+    shouldFoldWithoutUpdates,
+    shouldPublishFoldTail,
     shouldRetryCompaction,
     shouldUseDelta,
+    updateBlobPath,
 } from '../../src/compaction-policy';
 import { DEFAULTS } from '../../src/types';
 
@@ -55,6 +67,10 @@ describe('readMainDocState', () => {
         expect(readMainDocState(null)).toEqual({
             hasBase: false,
             baseStoragePath: null,
+            baseDeleteSetStoragePath: null,
+            baseFoldTailStoragePath: null,
+            orphanedBlobPaths: [],
+            baseStateVector: null,
             baseInline: null,
             currentVersion: 0,
             currentEpoch: 0,
@@ -92,6 +108,13 @@ describe('readMainDocState', () => {
         expect(state.baseInline).toBeNull();
     });
 
+    it('reads an offloaded delete-set path', () => {
+        const state = readMainDocState({ snapshotStoragePath: 'gs://snap', deleteSetStoragePath: 'gs://ds' });
+
+        expect(state.baseDeleteSetStoragePath).toBe('gs://ds');
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap' }).baseDeleteSetStoragePath).toBeNull();
+    });
+
     it('reports no base when the document exists but carries neither field', () => {
         const state = readMainDocState({ version: 9 });
 
@@ -99,11 +122,79 @@ describe('readMainDocState', () => {
         expect(state.currentVersion).toBe(9);
     });
 
+    /* Fold GC deletes the replaced blobs through these stored paths. */
+    it('reads the offloaded delete-set path alongside the snapshot path', () => {
+        const state = readMainDocState({ snapshotStoragePath: 'gs://snap', deleteSetStoragePath: 'gs://ds' });
+
+        expect(state.baseStoragePath).toBe('gs://snap');
+        expect(state.baseDeleteSetStoragePath).toBe('gs://ds');
+    });
+
+    it('reports no delete-set path when the fingerprint is inline', () => {
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap', deleteSet: {} }).baseDeleteSetStoragePath)
+            .toBeNull();
+    });
+
     it('ignores a non-numeric version or epoch', () => {
         const state = readMainDocState({ version: 'four', epoch: {} });
 
         expect(state.currentVersion).toBe(0);
         expect(state.currentEpoch).toBe(0);
+    });
+
+    /* The fold builds its tail's base clocks from the replaced vector. */
+    it('reads the base state vector', () => {
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap', stateVector: 'AQID' }).baseStateVector).toBe('AQID');
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap' }).baseStateVector).toBeNull();
+    });
+
+    /*
+     * Fold GC deletes the previous tail through this path — whatever
+     * version it is bound to: an older client's fold leaves a stale one.
+     */
+    it('reads the fold tail path regardless of the version it is bound to', () => {
+        const state = readMainDocState({
+            snapshotStoragePath: 'gs://snap', foldTailStoragePath: 'gs://tail', foldTailVersion: 3, version: 4,
+        });
+
+        expect(state.baseFoldTailStoragePath).toBe('gs://tail');
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap' }).baseFoldTailStoragePath).toBeNull();
+    });
+
+    /*
+     * An older client's fold overwrites the path fields and deletes
+     * snapshot_v{V}.bin / ds_v{V}.bin, never the attempt-unique blobs it
+     * replaced; the record a current fold wrote is all that still names them.
+     */
+    it('reports the recorded blobs an older client\'s fold stopped referencing', () => {
+        const state = readMainDocState({
+            snapshotStoragePath: 'docs/a/snapshot_v2.bin',
+            deleteSetStoragePath: 'docs/a/ds_v2.bin',
+            snapshotBlobPaths: ['docs/a/snapshot_v1_k9.bin', 'docs/a/ds_v1_k9.bin'],
+        });
+
+        expect(state.orphanedBlobPaths).toEqual(['docs/a/snapshot_v1_k9.bin', 'docs/a/ds_v1_k9.bin']);
+    });
+
+    /* Deleting a referenced blob would destroy the live snapshot. */
+    it('reports no orphan for a recorded blob the path fields still reference', () => {
+        expect(readMainDocState({
+            snapshotStoragePath: 'docs/a/snapshot_v1_k9.bin',
+            deleteSetStoragePath: 'docs/a/ds_v1_k9.bin',
+            snapshotBlobPaths: ['docs/a/snapshot_v1_k9.bin', 'docs/a/ds_v1_k9.bin'],
+        }).orphanedBlobPaths).toEqual([]);
+        expect(readMainDocState({
+            snapshotStoragePath: 'docs/a/snapshot_v2.bin',
+            snapshotBlobPaths: ['docs/a/snapshot_v1_k9.bin'],
+        }).orphanedBlobPaths).toEqual(['docs/a/snapshot_v1_k9.bin']);
+    });
+
+    it('ignores a malformed blob record', () => {
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap' }).orphanedBlobPaths).toEqual([]);
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap', snapshotBlobPaths: 'gs://old' }).orphanedBlobPaths)
+            .toEqual([]);
+        expect(readMainDocState({ snapshotStoragePath: 'gs://snap', snapshotBlobPaths: [null, 7, 'gs://old'] }).orphanedBlobPaths)
+            .toEqual(['gs://old']);
     });
 });
 
@@ -139,6 +230,206 @@ describe('shouldUseDelta', () => {
     it('never goes negative on the comparison', () => {
         expect(shouldUseDelta({ ...base, historyCount: 0, historyFoldThreshold: 0 })).toBe(false);
     });
+
+    /*
+     * Compaction reads (and one fold merges) at most MAX_COMPACTION_HISTORY
+     * segments, so historyCount never exceeds it. A larger threshold must
+     * still fold once that window is full, or it never folds at all.
+     */
+    it('caps the threshold at what one compaction can read', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        for (const historyFoldThreshold of [max + 1, max + 2, 150]) {
+            expect(shouldUseDelta({ ...base, historyCount: max - 1, historyFoldThreshold })).toBe(true);
+            expect(shouldUseDelta({ ...base, historyCount: max, historyFoldThreshold })).toBe(false);
+        }
+    });
+
+    it('takes the cap from maxHistory when given', () => {
+        expect(shouldUseDelta({ ...base, historyCount: 3, historyFoldThreshold: 8, maxHistory: 4 })).toBe(true);
+        expect(shouldUseDelta({ ...base, historyCount: 4, historyFoldThreshold: 8, maxHistory: 4 })).toBe(false);
+    });
+
+    /*
+     * compact() does not count history when an empty history already folds
+     * (no base, nothing new, threshold 1): that is only sound if a longer
+     * history never brings DELTA back.
+     */
+    it('never prefers delta for a longer history', () => {
+        for (const hasBase of [true, false]) {
+            for (const updateCount of [0, 3]) {
+                for (const historyFoldThreshold of [0, 1, 2, 8, 150]) {
+                    let folded = false;
+                    for (let historyCount = 0; historyCount <= DEFAULTS.MAX_COMPACTION_HISTORY + 1; historyCount++) {
+                        const delta = shouldUseDelta({ hasBase, updateCount, historyCount, historyFoldThreshold });
+                        if (folded) {
+                            expect(delta).toBe(false);
+                        }
+                        folded = folded || !delta;
+                    }
+                }
+            }
+        }
+    });
+});
+
+describe('effectiveFoldThreshold', () => {
+    it('keeps a threshold one fold can reach', () => {
+        expect(effectiveFoldThreshold(1)).toBe(1);
+        expect(effectiveFoldThreshold(8)).toBe(8);
+        expect(effectiveFoldThreshold(DEFAULTS.MAX_COMPACTION_HISTORY + 1)).toBe(DEFAULTS.MAX_COMPACTION_HISTORY + 1);
+    });
+
+    it('caps the threshold at what one compaction can read', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        for (const historyFoldThreshold of [max + 2, 150]) {
+            expect(effectiveFoldThreshold(historyFoldThreshold)).toBe(max + 1);
+        }
+    });
+
+    /*
+     * compact() counts history only up to this value: a count that stops
+     * there must already fold, however long history really is.
+     */
+    it('is a history count at which shouldUseDelta folds', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        for (const historyFoldThreshold of [1, 2, 8, max + 1, max + 2, 150]) {
+            const historyCount = effectiveFoldThreshold(historyFoldThreshold);
+            expect(shouldUseDelta({ hasBase: true, updateCount: 3, historyCount, historyFoldThreshold })).toBe(false);
+        }
+    });
+
+    it('takes the cap from maxHistory when given', () => {
+        expect(effectiveFoldThreshold(8, 4)).toBe(5);
+    });
+});
+
+describe('shouldFoldWithoutUpdates', () => {
+    const base = { hasBase: true, historyCount: 1, historyTruncated: false, historyFoldThreshold: 8 };
+
+    /*
+     * A late lock winner, an app compact() call or squash()'s first cycle:
+     * re-merging base + history adds nothing, and readers apply history.
+     */
+    it('does not fold history below the threshold', () => {
+        expect(shouldFoldWithoutUpdates(base)).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 6 })).toBe(false);
+    });
+
+    it('has nothing to fold without history', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 0 })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 0, hasBase: false })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 0, historyTruncated: true })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 0, historyFoldThreshold: 1 })).toBe(false);
+    });
+
+    it('folds when there is no base snapshot to build on', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, hasBase: false })).toBe(true);
+    });
+
+    /* Only the oldest-prefix fold drains history past one fold's window. */
+    it('folds when history extends past what one fold can merge', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyTruncated: true })).toBe(true);
+    });
+
+    /* The count shouldUseDelta uses: a cycle with updates folds here too. */
+    it('folds once history sits where a cycle with updates would fold', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 6, historyFoldThreshold: 8 })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 7, historyFoldThreshold: 8 })).toBe(true);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 8, historyFoldThreshold: 8 })).toBe(true);
+        for (const historyFoldThreshold of [1, 2, 8, 9]) {
+            for (let historyCount = 1; historyCount <= 10; historyCount++) {
+                expect(shouldFoldWithoutUpdates({ ...base, historyCount, historyFoldThreshold }))
+                    .toBe(!shouldUseDelta({ hasBase: true, updateCount: 1, historyCount, historyFoldThreshold }));
+            }
+        }
+    });
+
+    it('always folds history when the threshold is 1', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 1, historyFoldThreshold: 1 })).toBe(true);
+    });
+
+    it('caps the threshold at what one compaction can read', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        for (const historyFoldThreshold of [max + 1, max + 2, 150]) {
+            expect(shouldFoldWithoutUpdates({ ...base, historyCount: max - 1, historyFoldThreshold })).toBe(false);
+            expect(shouldFoldWithoutUpdates({ ...base, historyCount: max, historyFoldThreshold })).toBe(true);
+        }
+    });
+
+    it('takes the cap from maxHistory when given', () => {
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 3, historyFoldThreshold: 8, maxHistory: 4 })).toBe(false);
+        expect(shouldFoldWithoutUpdates({ ...base, historyCount: 4, historyFoldThreshold: 8, maxHistory: 4 })).toBe(true);
+    });
+});
+
+describe('shouldDeferCompaction', () => {
+    // A triggered cycle (threshold 10 -> minimum 5) that lost the crossing.
+    const base = { minUpdates: 5, updateCount: 3, updateLimit: 200, historyCount: 1, historyFoldThreshold: 8 };
+
+    it('defers a few leftover updates instead of writing a tiny segment', () => {
+        expect(shouldDeferCompaction(base)).toBe(true);
+    });
+
+    /*
+     * The costly case: with no updates shouldUseDelta folds, so a late
+     * lock winner would rebuild the snapshot from base + history for
+     * nothing new.
+     */
+    it('defers when nothing is pending rather than folding history early', () => {
+        expect(shouldDeferCompaction({ ...base, updateCount: 0 })).toBe(true);
+    });
+
+    it('runs once the minimum is reached', () => {
+        expect(shouldDeferCompaction({ ...base, updateCount: 4 })).toBe(true);
+        expect(shouldDeferCompaction({ ...base, updateCount: 5 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, updateCount: 6 })).toBe(false);
+    });
+
+    it('never defers manual or squash compactions, which pass no minimum', () => {
+        expect(shouldDeferCompaction({ ...base, minUpdates: 0, updateCount: 0 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, minUpdates: 0, updateCount: 0, historyCount: 0 })).toBe(false);
+    });
+
+    /*
+     * Same boundary as shouldUseDelta: once the segment this cycle would
+     * add reaches the threshold, the fold is due on cadence and runs.
+     */
+    it('runs when a fold is due', () => {
+        expect(shouldDeferCompaction({ ...base, historyCount: 6 })).toBe(true);
+        expect(shouldDeferCompaction({ ...base, historyCount: 7 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, historyCount: 8 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, updateCount: 0, historyCount: 7 })).toBe(false);
+    });
+
+    it('never defers in always-fold mode', () => {
+        expect(shouldDeferCompaction({ ...base, historyCount: 0, historyFoldThreshold: 1 })).toBe(false);
+    });
+
+    it('runs when history extends past what one cycle reads', () => {
+        const max = DEFAULTS.MAX_COMPACTION_HISTORY;
+        expect(shouldDeferCompaction({ ...base, historyCount: max + 1, historyFoldThreshold: 150 })).toBe(false);
+        expect(shouldDeferCompaction({ ...base, historyCount: max - 1, historyFoldThreshold: 150 })).toBe(true);
+        expect(shouldDeferCompaction({ ...base, historyCount: 3, historyFoldThreshold: 8, maxHistory: 3 })).toBe(false);
+    });
+
+    /*
+     * A threshold far above the per-cycle read limit would otherwise ask
+     * for more updates than a cycle can ever see, deferring every trigger
+     * while the updates collection grows without bound.
+     */
+    it('clamps the minimum to what one cycle reads', () => {
+        const triggered = { ...base, minUpdates: 500, updateLimit: 150 };
+        expect(shouldDeferCompaction({ ...triggered, updateCount: 150 })).toBe(false);
+        expect(shouldDeferCompaction({ ...triggered, updateCount: 149 })).toBe(true);
+    });
+
+    it('clamps the minimum to the realtime hard cap', () => {
+        const triggered = { ...base, minUpdates: 300, updateLimit: 400 };
+        expect(shouldDeferCompaction({ ...triggered, updateCount: DEFAULTS.REALTIME_LIMIT })).toBe(false);
+        expect(shouldDeferCompaction({ ...triggered, updateCount: DEFAULTS.REALTIME_LIMIT - 1 })).toBe(true);
+        expect(shouldDeferCompaction({ ...triggered, updateCount: 20, hardCap: 20 })).toBe(false);
+        expect(shouldDeferCompaction({ ...triggered, updateCount: 19, hardCap: 20 })).toBe(true);
+    });
 });
 
 describe('isRetryableCompactionError', () => {
@@ -173,6 +464,56 @@ describe('isLockLostError', () => {
         expect(isLockLostError({})).toBe(false);
         expect(isLockLostError({ message: 42 })).toBe(false);
         expect(isLockLostError(null)).toBe(false);
+    });
+});
+
+describe('isPersistentCompactionFailure', () => {
+    /*
+     * Each of these fails identically on every attempt until something
+     * outside the client changes, and every attempt re-reads the backlog.
+     */
+    it.each([
+        ['an undecodable update (merge validation)', new Error('Compaction candidate failed validation: Error: Unexpected end of array')],
+        ['a raw decode error from the delta merge', new Error('Integer out of Range')],
+        ['a storage-backed update whose blob is gone', { code: 'storage/object-not-found' }],
+        ['Storage rules rejecting the fold upload', { code: 'storage/unauthorized' }],
+        ['a Storage quota', { code: 'storage/quota-exceeded' }],
+        ['Firestore rules', { code: 'permission-denied' }],
+        ['an oversized write', { code: 'invalid-argument' }],
+        ['a Firestore quota', { code: 'resource-exhausted' }],
+    ])('counts %s', (_label, error) => {
+        expect(isPersistentCompactionFailure(error)).toBe(true);
+    });
+
+    it.each(['aborted', 'unavailable', 'deadline-exceeded', 'storage/retry-limit-exceeded'])(
+        'does not count the transport error %s: the next attempt may succeed',
+        (code) => {
+            expect(isPersistentCompactionFailure({ code })).toBe(false);
+        },
+    );
+
+    it('does not count the SDK being offline', () => {
+        expect(isPersistentCompactionFailure(Object.assign(
+            new Error('Failed to get document because the client is offline.'),
+            { code: 'unavailable' },
+        ))).toBe(false);
+    });
+
+    /*
+     * Another client holds the lock or folded first: that is progress, not
+     * a broken document.
+     */
+    it('does not count a lost lock', () => {
+        expect(isPersistentCompactionFailure(new Error('Lock lost or expired during compaction phase - Aborting write.'))).toBe(false);
+    });
+
+    it('does not count a version race with a concurrent fold or squash', () => {
+        expect(isPersistentCompactionFailure(new Error('Document version changed during compaction upload. Aborting to retry.'))).toBe(false);
+    });
+
+    it('counts an error it cannot classify', () => {
+        expect(isPersistentCompactionFailure(undefined)).toBe(true);
+        expect(isPersistentCompactionFailure({ message: 42 })).toBe(true);
     });
 });
 
@@ -258,6 +599,32 @@ describe('planUpdateDoc', () => {
     });
 });
 
+describe('updateBlobPath', () => {
+    it('returns the blob of a storage-backed update', () => {
+        expect(updateBlobPath({ updateStoragePath: 'd/large_updates/u.bin' })).toBe('d/large_updates/u.bin');
+    });
+
+    /*
+     * A foreign-epoch pointer is deleted without merging, but its blob is
+     * just as unreferenced afterwards.
+     */
+    it('ignores the epoch', () => {
+        expect(updateBlobPath({ epoch: 3, updateStoragePath: 'p' })).toBe('p');
+    });
+
+    it('returns null when the payload is inline (readers never use the path)', () => {
+        expect(updateBlobPath({ update: 'bytes', updateStoragePath: 'p' })).toBeNull();
+        expect(updateBlobPath({ update: 'bytes' })).toBeNull();
+    });
+
+    it('returns null when there is no usable path', () => {
+        expect(updateBlobPath({ updateStoragePath: 42 })).toBeNull();
+        expect(updateBlobPath({})).toBeNull();
+        expect(updateBlobPath(null)).toBeNull();
+        expect(updateBlobPath(undefined)).toBeNull();
+    });
+});
+
 describe('planHistoryDoc', () => {
     it('merges a segment from the current epoch', () => {
         expect(planHistoryDoc({ epoch: 1, segment: 'bytes' }, 1)).toEqual({ kind: 'merge' });
@@ -275,36 +642,98 @@ describe('planHistoryDoc', () => {
 
 describe('deltaSegmentFitsInline', () => {
     it('fits below and at the limit', () => {
-        expect(deltaSegmentFitsInline(999, 1_000)).toBe(true);
-        expect(deltaSegmentFitsInline(1_000, 1_000)).toBe(true);
+        expect(deltaSegmentFitsInline(999, 0, 1_000)).toBe(true);
+        expect(deltaSegmentFitsInline(1_000, 0, 1_000)).toBe(true);
     });
 
     it('does not fit one byte over', () => {
-        expect(deltaSegmentFitsInline(1_001, 1_000)).toBe(false);
+        expect(deltaSegmentFitsInline(1_001, 0, 1_000)).toBe(false);
     });
 
     it('fits an empty segment', () => {
-        expect(deltaSegmentFitsInline(0, 1_000)).toBe(true);
+        expect(deltaSegmentFitsInline(0, 0, 1_000)).toBe(true);
+    });
+
+    /*
+     * The state vector rides on the same history document. A segment just
+     * under the limit plus a many-client state vector is rejected by
+     * Firestore with a non-retryable INVALID_ARGUMENT.
+     */
+    it('counts the state vector stored beside the segment', () => {
+        expect(deltaSegmentFitsInline(900, 100, 1_000)).toBe(true);
+        expect(deltaSegmentFitsInline(900, 101, 1_000)).toBe(false);
+    });
+});
+
+describe('deleteSetFitsInline', () => {
+    const fits = (deleteSetBytes: number, stateVectorB64Length: number) =>
+        deleteSetFitsInline({ deleteSetBytes, stateVectorB64Length, maxFieldBytes: 700, inlineLimit: 1_000 });
+
+    it('inlines a fingerprint under the field cap with room beside the state vector', () => {
+        expect(fits(700, 300)).toBe(true);
+        expect(fits(0, 0)).toBe(true);
+    });
+
+    it('offloads a fingerprint over the field cap', () => {
+        expect(fits(701, 0)).toBe(false);
+    });
+
+    /*
+     * Under the field cap is not enough: on an aged many-client document
+     * the state vector and the fingerprint together pass the Firestore
+     * limit, and the snapshot write would fail permanently.
+     */
+    it('offloads a fingerprint that would not fit beside the state vector', () => {
+        expect(fits(600, 401)).toBe(false);
+        expect(fits(1, 1_000)).toBe(false);
+    });
+
+    it('applies the real defaults to the regression scenario', () => {
+        // ~75k clients: base64 state vector ~600 KB, fingerprint ~600 KB.
+        expect(deleteSetFitsInline({
+            deleteSetBytes: 599_996,
+            stateVectorB64Length: 600_004,
+            maxFieldBytes: DEFAULTS.MAX_DELETE_SET_FIELD_BYTES,
+            inlineLimit: DEFAULTS.INLINE_UPDATE_LIMIT,
+        })).toBe(false);
     });
 });
 
 describe('buildDeltaSegmentDoc', () => {
     it('carries the state vector and author', () => {
-        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', uid: 'me', epoch: 0 }))
-            .toEqual({ stateVector: 'sv', createdBy: 'me' });
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 0 }))
+            .toEqual({ stateVector: 'sv', hasDeletions: false, createdBy: 'me' });
     });
 
     /*
      * Omitted rather than written as 0, so a never-squashed database keeps
-     * producing documents identical to what older clients wrote.
+     * producing documents without the field, as older clients wrote them.
      */
     it('omits the epoch field entirely at epoch 0', () => {
-        expect('epoch' in buildDeltaSegmentDoc({ stateVectorB64: 'sv', uid: 'me', epoch: 0 })).toBe(false);
+        expect('epoch' in buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 0 })).toBe(false);
     });
 
     it('writes the epoch once past 0', () => {
-        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', uid: 'me', epoch: 3 }))
-            .toEqual({ stateVector: 'sv', createdBy: 'me', epoch: 3 });
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 3 }))
+            .toEqual({ stateVector: 'sv', hasDeletions: false, createdBy: 'me', epoch: 3 });
+    });
+
+    /*
+     * The state vector cannot show deletions, so readers rely on this flag
+     * to apply a segment whose structs they already hold.
+     */
+    it('flags a segment that carries deletions', () => {
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: true, uid: 'me', epoch: 0 }))
+            .toEqual({ stateVector: 'sv', hasDeletions: true, createdBy: 'me' });
+    });
+
+    /*
+     * Older clients never write the flag, so readers must treat an absent
+     * one as "may carry deletions": only an explicit false lets them skip
+     * a segment whose structs they already hold.
+     */
+    it('writes the deletions flag as false when there are none', () => {
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 3 }).hasDeletions).toBe(false);
     });
 });
 
@@ -358,5 +787,138 @@ describe('nextSnapshotVersion', () => {
     it('increments by one', () => {
         expect(nextSnapshotVersion(0)).toBe(1);
         expect(nextSnapshotVersion(41)).toBe(42);
+    });
+});
+
+/*
+ * Candidates are uploaded before the lock-checked commit. Two attempts
+ * folding the same version must never share an object, or a compactor
+ * whose lease lapsed mid-upload replaces the winner's committed snapshot.
+ */
+describe('foldSnapshotPath / foldDeleteSetPath / foldTailPath', () => {
+    it('names the blobs by version and attempt', () => {
+        expect(foldSnapshotPath('docs/a', 3, 'x1')).toBe('docs/a/snapshot_v3_x1.bin');
+        expect(foldDeleteSetPath('docs/a', 3, 'x1')).toBe('docs/a/ds_v3_x1.bin');
+        expect(foldTailPath('docs/a', 3, 'x1')).toBe('docs/a/tail_v3_x1.bin');
+    });
+
+    it('distinguishes attempts folding the same version', () => {
+        expect(foldSnapshotPath('docs/a', 3, 'x1')).not.toBe(foldSnapshotPath('docs/a', 3, 'x2'));
+        expect(foldDeleteSetPath('docs/a', 3, 'x1')).not.toBe(foldDeleteSetPath('docs/a', 3, 'x2'));
+        expect(foldTailPath('docs/a', 3, 'x1')).not.toBe(foldTailPath('docs/a', 3, 'x2'));
+    });
+
+    it('distinguishes versions', () => {
+        expect(foldSnapshotPath('docs/a', 3, 'x1')).not.toBe(foldSnapshotPath('docs/a', 4, 'x1'));
+        expect(foldDeleteSetPath('docs/a', 3, 'x1')).not.toBe(foldDeleteSetPath('docs/a', 4, 'x1'));
+        expect(foldTailPath('docs/a', 3, 'x1')).not.toBe(foldTailPath('docs/a', 4, 'x1'));
+    });
+});
+
+describe('foldTailBaseClocks', () => {
+    it('lists every client the tail touches at its base clock', () => {
+        const base = new Map([[1, 10], [2, 20], [3, 30]]);
+        const tail = new Map([[2, 25], [3, 31]]);
+
+        expect(foldTailBaseClocks(base, tail)).toEqual(new Map([[2, 20], [3, 30]]));
+    });
+
+    /* A session client minted after the base: listed, at clock 0. */
+    it('lists a client the base never saw at clock 0', () => {
+        expect(foldTailBaseClocks(new Map([[1, 10]]), new Map([[9, 4]]))).toEqual(new Map([[9, 0]]));
+    });
+
+    /* O(tail clients): the full base vector does not fit the main document. */
+    it('leaves out clients the tail does not touch', () => {
+        expect(foldTailBaseClocks(new Map([[1, 10], [2, 20]]), new Map()).size).toBe(0);
+    });
+});
+
+describe('shouldPublishFoldTail', () => {
+    const fits = {
+        tailBytes: 50_000,
+        snapshotBytes: 1_000_000,
+        tailFieldsLength: 200,
+        stateVectorB64Length: 10_000,
+        inlineDeleteSetBytes: 100_000,
+        inlineLimit: DEFAULTS.INLINE_UPDATE_LIMIT,
+    };
+
+    it('publishes a small tail that fits beside the other fields', () => {
+        expect(shouldPublishFoldTail(fits)).toBe(true);
+    });
+
+    /* A tail near the snapshot's size saves little and risks paying for both. */
+    it('publishes only a tail of at most half the snapshot', () => {
+        expect(shouldPublishFoldTail({ ...fits, tailBytes: 500_000 })).toBe(true);
+        expect(shouldPublishFoldTail({ ...fits, tailBytes: 500_001 })).toBe(false);
+    });
+
+    /*
+     * The base clocks share the main document with the state vector and the
+     * inline fingerprint. Overflowing it is a non-retryable INVALID_ARGUMENT
+     * that stops compaction for good, so the optional tail yields.
+     */
+    it('publishes nothing when the tail fields would overflow the main document', () => {
+        const room = fits.inlineLimit - fits.stateVectorB64Length - fits.inlineDeleteSetBytes;
+
+        expect(shouldPublishFoldTail({ ...fits, tailFieldsLength: room })).toBe(true);
+        expect(shouldPublishFoldTail({ ...fits, tailFieldsLength: room + 1 })).toBe(false);
+    });
+});
+
+describe('blobsReplacedByFold', () => {
+    const written = ['docs/a/snapshot_v4.bin', null];
+
+    /*
+     * squash() names its blob snapshot_e{E}_v{V}_{id}.bin. Rebuilding the old
+     * name from the version (snapshot_v3.bin) leaked it forever.
+     */
+    it('returns the stored squash snapshot path, not a name rebuilt from the version', () => {
+        expect(blobsReplacedByFold(
+            { baseStoragePath: 'docs/a/snapshot_e1_v3_k9.bin', baseDeleteSetStoragePath: null, baseFoldTailStoragePath: null, orphanedBlobPaths: [] },
+            written,
+        )).toEqual(['docs/a/snapshot_e1_v3_k9.bin']);
+    });
+
+    it('returns the stored snapshot and offloaded delete-set paths', () => {
+        expect(blobsReplacedByFold(
+            { baseStoragePath: 'docs/a/snapshot_v3.bin', baseDeleteSetStoragePath: 'docs/a/ds_v3.bin', baseFoldTailStoragePath: null, orphanedBlobPaths: [] },
+            ['docs/a/snapshot_v4.bin', 'docs/a/ds_v4.bin'],
+        )).toEqual(['docs/a/snapshot_v3.bin', 'docs/a/ds_v3.bin']);
+    });
+
+    /* A tail describes only the snapshot it was published with. */
+    it('returns the previous fold tail', () => {
+        expect(blobsReplacedByFold(
+            { baseStoragePath: 'docs/a/snapshot_v3.bin', baseDeleteSetStoragePath: null, baseFoldTailStoragePath: 'docs/a/tail_v3.bin', orphanedBlobPaths: [] },
+            ['docs/a/snapshot_v4.bin', null, 'docs/a/tail_v4.bin'],
+        )).toEqual(['docs/a/snapshot_v3.bin', 'docs/a/tail_v3.bin']);
+    });
+
+    it('returns nothing when the replaced document had no Storage blobs', () => {
+        expect(blobsReplacedByFold({ baseStoragePath: null, baseDeleteSetStoragePath: null, baseFoldTailStoragePath: null, orphanedBlobPaths: [] }, written))
+            .toEqual([]);
+    });
+
+    /* An older client's fold replaced them without deleting them. */
+    it('returns the blobs an older client\'s fold orphaned', () => {
+        expect(blobsReplacedByFold(
+            {
+                baseStoragePath: 'docs/a/snapshot_v3.bin',
+                baseDeleteSetStoragePath: 'docs/a/ds_v3.bin',
+                baseFoldTailStoragePath: null,
+                orphanedBlobPaths: ['docs/a/snapshot_v2_k9.bin', 'docs/a/ds_v2_k9.bin'],
+            },
+            ['docs/a/snapshot_v4_m1.bin', null],
+        )).toEqual(['docs/a/snapshot_v3.bin', 'docs/a/ds_v3.bin', 'docs/a/snapshot_v2_k9.bin', 'docs/a/ds_v2_k9.bin']);
+    });
+
+    /* Deleting a path the fold just committed would destroy the live snapshot. */
+    it('never returns a path the fold itself wrote', () => {
+        expect(blobsReplacedByFold(
+            { baseStoragePath: 'docs/a/snapshot_v4.bin', baseDeleteSetStoragePath: 'docs/a/ds_v4.bin', baseFoldTailStoragePath: 'docs/a/tail_v4.bin', orphanedBlobPaths: [] },
+            ['docs/a/snapshot_v4.bin', 'docs/a/ds_v4.bin', 'docs/a/tail_v4.bin'],
+        )).toEqual([]);
     });
 });

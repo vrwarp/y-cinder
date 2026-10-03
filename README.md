@@ -100,6 +100,18 @@ const provider = new FireProvider({
 // provider.destroy();
 ```
 
+### Local persistence (y-indexeddb / y-idb)
+
+The simplest correct ordering is to construct the provider once local persistence has loaded the document:
+
+```typescript
+const persistence = new IndexeddbPersistence("my-doc", ydoc);
+await persistence.whenSynced;
+const provider = new FireProvider({ firebaseApp, ydoc, path: "documents/my-doc" });
+```
+
+Initial sync then compares the server with the loaded state, and the provider never sees the load as a local edit. If the provider must be constructed first, pass `localReady: persistence.whenSynced`: initial sync still reads the server meanwhile, but waits for the load before comparing. Without it, a load that lands after initial sync has read the main document makes it download the whole Storage snapshot the device already holds, and lets old-epoch local state slip past the epoch fence (the new epoch's content is applied on top of it, duplicating it). On a fast connection, initial sync can complete slightly later with `localReady`, since it waits for the load.
+
 ## Configuration
 
 The `FireProvider` constructor accepts the following configuration options:
@@ -111,23 +123,24 @@ The `FireProvider` constructor accepts the following configuration options:
 | `path` | `string` | Yes | - | Firestore document path (e.g., `users/alice/notes/note-1`). |
 | `maxUpdatesThreshold` | `number` | No | `50` | Number of updates before triggering compaction. |
 | `maxWaitTime` | `number` | No | `500` | Debounce time (ms) for writing updates to Firestore. |
-| `maxAggregationTime` | `number` | No | `maxWaitTime * 10` | Hard cap (ms) on how long the sliding debounce may defer a save during continuous editing. |
+| `maxAggregationTime` | `number` | No | `maxWaitTime * 10` | Hard cap (ms) on how long the sliding debounce may defer a save during continuous editing, or while initial sync runs. |
 | `gcCompaction` | `boolean` | No | `true` | Garbage-collect deleted content when compacting snapshots. Keeps long-lived documents proportional to live content instead of total historical churn. See [docs/performance.md](docs/performance.md). |
-| `historyFoldThreshold` | `number` | No | `8` | History segments accumulated before compaction folds everything into the base snapshot. Between folds, compaction runs in cheap **delta mode** (pending updates → one history segment, `O(new data)`) instead of downloading/re-merging/re-uploading the whole snapshot every `maxUpdatesThreshold` updates. `1` restores the old always-fold behavior. |
+| `historyFoldThreshold` | `number` | No | `8` | History segments accumulated before compaction folds everything into the base snapshot. Between folds, compaction runs in cheap **delta mode** (pending updates → one history segment, `O(new data)`) instead of downloading/re-merging/re-uploading the whole snapshot every `maxUpdatesThreshold` updates. `1` restores the old always-fold behavior. Values above `100` behave like `100`: one fold merges at most 99 history segments (Firestore's 500-write transaction limit). |
 | `subdocLoadingMode` | `'eager' \| 'lazy'` | No | `'eager'` | `'lazy'` defers syncing remote subdocuments until `subdoc.load()` is called (Yjs convention), avoiding N initial syncs + 3N listeners at startup for documents with many subdocs. |
+| `localReady` | `Promise<unknown>` | No | - | Settles once local persistence has loaded `ydoc` (y-indexeddb / y-idb: `persistence.whenSynced`). Initial sync waits for it before comparing the local doc with the server; see [Local persistence](#local-persistence-y-indexeddb--y-idb). A rejection, or no settlement within 10 seconds, lets sync proceed without it. Not passed on to subdocument providers. |
 
 ### API Methods
 
 - **`provider.destroy()`**:
-  Stops synchronization and cleans up resources. Call this when the provider is no longer needed (e.g., component unmount) to prevent memory leaks and duplicate connections. Waits for any in-flight save and flushes pending updates.
+  Stops synchronization and cleans up resources. Call this when the provider is no longer needed (e.g., component unmount) to prevent memory leaks and duplicate connections. Waits for any in-flight save and flushes pending updates. Online, the returned promise resolves once Firestore has committed those writes; if they are not acknowledged within 5 seconds (e.g. offline) it settles anyway, leaving the writes queued in the Firestore SDK to be sent on reconnect.
 - **`provider.compact()`**:
-  Manually triggers the compaction process. Usually handled automatically.
+  Manually triggers the compaction process. Usually handled automatically. Runs even while automatic compaction is backing off after a `compaction-failed` event.
 - **`provider.squash()`**:
-  Rebuilds the document into a brand-new **epoch**: content is cloned into a fresh Yjs id space, resetting the three things garbage-collected compaction cannot reclaim — tombstone structure, the delete-set, and the state vector (one entry per client that ever wrote). This is the floor reset for documents used for years; see [docs/performance.md](docs/performance.md) for the model, the safety fences, and the application contract (`epoch-changed` handling is required before any client calls this).
+  Rebuilds the document into a brand-new **epoch**: content is cloned into a fresh Yjs id space, resetting the three things garbage-collected compaction cannot reclaim — tombstone structure, the delete-set, and the state vector (one entry per client that ever wrote). This is the floor reset for documents used for years; see [docs/performance.md](docs/performance.md) for the model, the safety fences, and the application contract (`epoch-changed` handling is required before any client calls this). If the local document changes while the squash is uploading or committing, nothing is committed and the result's `skippedReason` is `'local-changed'`; retry once the document is idle.
 - **`provider.epoch`** (property):
   The epoch this provider is syncing (`0` for documents never squashed).
 - **`provider.synced`** (property):
-  `true` once initial sync has completed and real-time listeners are active.
+  `true` once initial sync has completed and real-time listeners are active. Drops back to `false` while the provider recovers from a listener error.
 
 ### Events
 
@@ -135,13 +148,14 @@ The provider extends `ObservableV2` and emits the following events:
 
 | Event | Payload | Description |
 | :--- | :--- | :--- |
-| `sync` | `boolean` | Emitted when initial sync completes and real-time listeners are attached. Follows the y-fire / y-* provider convention. |
-| `saved` | `number` | Emitted after a local update batch is committed to Firestore, with the commit wall-clock time (`Date.now()`). The success counterpart to `save-rejected`. |
-| `connection-error` | `{ code: string, message: string, error: Error }` | Emitted when a Firestore listener encounters an error. |
-| `sync-failure` | `Error` | Emitted when initial sync fails after all retry attempts. |
+| `sync` | `boolean` | Emitted when initial sync completes and real-time listeners are attached, and again each time a re-sync after a listener error completes. Follows the y-fire / y-* provider convention. |
+| `saved` | `number` | Emitted after a local update batch is committed to Firestore, with the commit wall-clock time (`Date.now()`). The success counterpart to `save-rejected`. Updates made before initial sync read the local document (including local persistence loading into it) are committed by initial sync itself rather than saved again; `saved` is emitted for them once it succeeds. |
+| `connection-error` | `{ code: string, message: string, error: Error }` | Emitted when a Firestore listener encounters an error. Firestore ends a listener once it errors, so the provider sets `synced` to `false`, detaches its listeners and re-syncs with backoff, which re-attaches them. |
+| `sync-failure` | `Error` | Emitted when a sync (initial, or a re-sync after a listener error) fails after all retry attempts, or when listeners keep failing right after each re-sync. Remote changes are no longer received. |
 | `corrupted-document` | `{ docId: string, error: Error }` | Emitted when a corrupted Firestore document is quarantined. |
-| `save-rejected` | See below | Emitted when a local update **cannot** be persisted to Firestore. |
-| `squashed` | `{ epoch: number }` | Emitted on the client that successfully ran `squash()`. The provider has stopped syncing; rebuild the local document from the new epoch's snapshot and recreate providers. |
+| `compaction-failed` | `{ error: Error, consecutiveFailures: number, retryInMs: number }` | Emitted when a compaction fails in a way retrying will not fix (e.g. an undecodable update document, a storage-backed update whose blob is gone, Storage rules or quota rejecting the snapshot upload). Pending updates stay in the `updates` collection and keep syncing, but the backlog stops shrinking, so initial sync reads more of it until the cause is fixed. Automatic compaction pauses for `retryInMs` (10 s, doubling per consecutive failure up to 30 min, plus jitter); the pause ends early once this client sees compaction progress, and `provider.compact()` still runs immediately. |
+| `save-rejected` | See below | Emitted when a local update **cannot** be persisted to Firestore. The update is not dropped: it stays queued ahead of newer edits and is retried with the next save (or the `destroy()` flush). |
+| `squashed` | `{ epoch: number, localState: Uint8Array \| null }` | Emitted on the client that successfully ran `squash()`. The provider has stopped syncing; rebuild the local document from the new epoch's snapshot and recreate providers. `localState` is the full old-epoch local state, as for `epoch-changed`: the new snapshot holds all of it except a local edit that raced the commit itself, which the application can re-apply. |
 | `epoch-changed` | `{ previousEpoch: number, epoch: number, localState: Uint8Array \| null }` | Emitted when the server was squashed past this client's epoch. The provider has stopped syncing (nothing was applied — applying would duplicate content). `localState` is the full old-epoch local state for the application to inspect/merge; rebuild the local doc from the new snapshot and recreate providers. |
 
 **`save-rejected` payload:**
@@ -185,9 +199,15 @@ y-cinder writes to the following subcollections:
 - `metadata` (compaction lock)
 - `subdocs` (if using subdocuments)
 
+Compaction deletes `updates` and `history` documents without reading them
+first, so delete rules there should not depend on `resource.data`: such a
+rule denies deleting a document that is already gone.
+
 Cloud Storage rules must also allow read/write under the same path prefix —
 compacted snapshots (`snapshot_v*.bin`) and oversized updates
-(`large_updates/*.bin`) are stored there:
+(`large_updates/*.bin`) are stored there, gzip-compressed with
+`Content-Encoding: gzip` (served compressed and inflated by the HTTP
+stack, so `getBytes` returns the raw Yjs update):
 
 ```
 match /path/to/your/document/{allPaths=**} {
@@ -206,7 +226,7 @@ However, users should evaluate their specific constraints:
 - **Latency**: Firestore snapshot listeners typically have higher latency (500ms - 1s) compared to dedicated WebSocket servers (< 50ms). This makes `y-cinder` excellent for collaborative editing (docs, notes) but unsuitable for high-frequency real-time applications like gaming or cursor tracking.
 - **Cost vs. Scale**: While `y-cinder` is highly optimized, every keystroke debounced to a write is still a Firestore operation. Documents with extreme concurrency (50+ active users simultaneously) may still incur significant costs or hit Firestore's write rate limits on specific index ranges.
 - **Client-Side Maintenance**: Compaction tasks are distributed among clients. While this keeps the architecture "serverless," it means active clients must burn some CPU and bandwidth to maintain database health.
-- **Storage Limits**: Firestore has a strict 1MB limit per document. Updates and snapshots that exceed the inline limit are automatically offloaded to Cloud Storage with a lightweight pointer document, so large payloads do not fail. A `save-rejected` event (`code: 'document-too-large'`) is only emitted in the rare case of a server-side size rejection; `code: 'max-retries-exceeded'` covers persistent write failures (with exponential backoff between attempts). Both payloads include the affected update for consumer recovery.
+- **Storage Limits**: Firestore has a strict 1MB limit per document. Updates and snapshots that exceed the inline limit are automatically offloaded to Cloud Storage with a lightweight pointer document, so large payloads do not fail. A `save-rejected` event (`code: 'document-too-large'`) is only emitted in the rare case of a server-side size rejection; `code: 'max-retries-exceeded'` covers persistent write failures (with exponential backoff between attempts). Both payloads include the affected update for consumer recovery; the provider also keeps it queued and retries it with the next save, because later edits from the same client cannot be integrated by peers without it.
 
 ## Contributors
 

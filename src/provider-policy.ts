@@ -22,16 +22,21 @@ import { FIREBASE_ORIGINS } from './types';
 export function validateProviderConfig(config: {
     path: string;
     maxUpdatesThreshold: number;
+    maxWaitTime: number;
     maxAggregationTime: number;
     depth: number;
 }): void {
-    const { path, maxUpdatesThreshold, maxAggregationTime, depth } = config;
+    const { path, maxUpdatesThreshold, maxWaitTime, maxAggregationTime, depth } = config;
 
     if (!path || path.includes('//') || path.startsWith('/') || path.endsWith('/')) {
         throw new Error(`Invalid Firestore path: '${path}'. Path must not be empty, start/end with '/', or contain '//'`);
     }
     if (maxUpdatesThreshold <= 0) {
         throw new Error(`Invalid maxUpdatesThreshold: ${maxUpdatesThreshold}. Must be positive.`);
+    }
+    // Checked before maxAggregationTime, whose default derives from it.
+    if (maxWaitTime < 0) {
+        throw new Error(`Invalid maxWaitTime: ${maxWaitTime}. Must not be negative.`);
     }
     if (maxAggregationTime <= 0) {
         throw new Error(`Invalid maxAggregationTime: ${maxAggregationTime}. Must be positive.`);
@@ -88,6 +93,89 @@ export function computeSaveDelay(params: {
     return Math.max(0, Math.min(maxWaitTime, deadline - now));
 }
 
+/**
+ * How much longer a due save should wait for the initial sync in flight.
+ *
+ * Initial sync's push covers every update buffered before it reads the
+ * local doc. On a cold start that includes local persistence's hydration
+ * (the whole document), so saving the buffer meanwhile would upload it a
+ * second time. The save still goes out at `maxAggregationTime` from the
+ * first buffered update, the same ceiling as for continuous typing: the
+ * sync can stall (offline, its push is never acknowledged), and buffered
+ * edits must not wait on it indefinitely.
+ *
+ * @param params - Whether initial sync is running, the ceiling, buffer start and now.
+ * @returns 0 to save now, else the delay until the ceiling.
+ */
+export function initialSyncSaveHold(params: {
+    syncInFlight: boolean;
+    maxAggregationTime: number;
+    pendingSince: number | null;
+    now: number;
+}): number {
+    const { syncInFlight, maxAggregationTime, pendingSince, now } = params;
+
+    if (!syncInFlight || pendingSince === null) {
+        return 0;
+    }
+
+    return Math.max(0, pendingSince + maxAggregationTime - now);
+}
+
+/**
+ * How to recover from a real-time listener error.
+ *
+ * Firestore ends a listener for good once its error callback fires, so the
+ * provider re-syncs to attach fresh ones. Listeners that stayed up for
+ * `healthyMs` were healthy, so the count starts over. Errors in quick
+ * succession (the re-sync's reads succeed but the listen keeps being
+ * rejected) escalate the backoff and, like initial sync, give up after
+ * `maxRetries` instead of re-reading the whole document forever.
+ *
+ * @param state - Errors so far, when the listeners were attached, now and the limits.
+ * @returns The new error count, and whether to stop re-syncing.
+ */
+export function planListenerRecovery(state: {
+    retryCount: number;
+    attachedAt: number;
+    now: number;
+    healthyMs: number;
+    maxRetries: number;
+}): { retryCount: number; giveUp: boolean } {
+    const healthy = state.now - state.attachedAt >= state.healthyMs;
+    const retryCount = (healthy ? 0 : state.retryCount) + 1;
+
+    return { retryCount, giveUp: retryCount >= state.maxRetries };
+}
+
+/**
+ * How long automatic compaction waits after a failure that retrying cannot
+ * fix (see isPersistentCompactionFailure).
+ *
+ * Every attempt on such a document takes the lock and re-reads the whole
+ * backlog before failing the same way again, and at the realtime hard cap
+ * the update listener would start one on every delivery. The first delay
+ * is one trigger cooldown, so a single failure costs no more triggers than
+ * a healthy document does; it doubles per consecutive failure up to
+ * `maxMs`. Up to a quarter of jitter is added on top so clients that failed
+ * together do not retry together.
+ *
+ * @param params - Consecutive failures (at least 1), the first delay, the
+ * cap, and a random number in [0, 1).
+ * @returns The delay in milliseconds.
+ */
+export function compactionBackoffMs(params: {
+    failures: number;
+    baseMs: number;
+    maxMs: number;
+    random: number;
+}): number {
+    const { failures, baseMs, maxMs, random } = params;
+    const step = Math.min(maxMs, baseMs * 2 ** Math.max(0, failures - 1));
+
+    return step + step * random / 4;
+}
+
 /** Why a squash cannot run right now. */
 export type SquashBlock =
     | { kind: 'destroyed' }
@@ -101,7 +189,9 @@ export type SquashBlock =
  * Each block exists for a different reason: a destroyed provider has no
  * connection, an unsynced or epoch-fenced one would squash a document it
  * does not fully hold (silently dropping other clients' data), and
- * subdocuments would be orphaned in the old epoch.
+ * subdocuments would be orphaned in the old epoch. A subdocument counts
+ * whether or not a provider was started for it (lazy mode leaves
+ * unloaded subdocuments without one).
  *
  * @param state - The provider's current lifecycle flags.
  * @returns The blocking reason, or null when a squash may proceed.
@@ -111,6 +201,7 @@ export function squashBlockedBy(state: {
     synced: boolean;
     epochFenced: boolean;
     subProviderCount: number;
+    subdocCount: number;
     depth: number;
 }): SquashBlock {
     if (state.isDestroyed) {
@@ -122,7 +213,7 @@ export function squashBlockedBy(state: {
     if (state.epochFenced) {
         return { kind: 'local-behind' };
     }
-    if (state.subProviderCount > 0 || state.depth > 0) {
+    if (state.subProviderCount > 0 || state.subdocCount > 0 || state.depth > 0) {
         return { kind: 'subdocs-unsupported' };
     }
 

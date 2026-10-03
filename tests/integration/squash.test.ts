@@ -12,6 +12,8 @@
  *    applies the new snapshot onto its old doc)
  *  - stale old-epoch update documents are ignored by new-epoch clients
  *    and deleted by compaction without merging
+ *  - a squasher that never received a server-side deletion does not
+ *    publish an epoch that resurrects the deleted content
  *
  * @file squash.test.ts
  */
@@ -201,5 +203,58 @@ describe('FireProvider Epoch Squash', () => {
         await providerC.destroy();
         await providerE.destroy();
         ydocA.destroy(); ydocC.destroy(); ydocE.destroy();
+    });
+
+    it('does not resurrect a deletion the squasher never received', { timeout: 90000 }, async () => {
+        const waitForUpdates = () => waitForConditionTruthy(async () =>
+            (await getDocs(collection(db, path, 'updates'))).size >= 1,
+            { timeout: 20000, message: 'update persisted' });
+
+        // A: content folded into the snapshot, then a delete-only change
+        // delta-compacted into a history segment. Neither moves a state
+        // vector for the deletion.
+        const ydocA = new Y.Doc();
+        const providerA = new FireProvider({
+            firebaseApp: app, ydoc: ydocA, path, maxUpdatesThreshold: 1000, maxWaitTime: 50,
+        });
+        await waitForConditionTruthy(() => providerA.synced, { timeout: 30000, message: 'A synced' });
+        ydocA.getText('t').insert(0, 'hello world');
+        ydocA.getMap('m').set('book1', 'x');
+        ydocA.getMap('m').set('book2', 'y');
+        await waitForUpdates();
+        await providerA.compact();
+        ydocA.getText('t').delete(5, 6);
+        ydocA.getMap('m').delete('book1');
+        await waitForUpdates();
+        await providerA.compact();
+        expect((await getDocs(collection(db, path, 'history'))).size).toBe(1);
+
+        // B connects and squashes. Whether it refuses (local-behind) or
+        // publishes an epoch that reflects the deletion, the deleted
+        // content must not come back.
+        const ydocB = new Y.Doc();
+        ydocB.getText('t');
+        ydocB.getMap('m');
+        const providerB = new FireProvider({
+            firebaseApp: app, ydoc: ydocB, path, maxUpdatesThreshold: 1000,
+        });
+        await waitForConditionTruthy(() => providerB.synced, { timeout: 30000, message: 'B synced' });
+        const result = await providerB.squash();
+        expect(result.error).toBeUndefined();
+
+        const ydocD = new Y.Doc();
+        const providerD = new FireProvider({
+            firebaseApp: app, ydoc: ydocD, path, maxUpdatesThreshold: 1000,
+        });
+        await waitForConditionTruthy(() => providerD.synced, { timeout: 30000, message: 'D synced' });
+        expect(
+            { t: ydocD.getText('t').toString(), m: ydocD.getMap('m').toJSON() },
+            `squash returned ${JSON.stringify(result)}`,
+        ).toEqual({ t: 'hello', m: { book2: 'y' } });
+
+        await providerA.destroy();
+        await providerB.destroy();
+        await providerD.destroy();
+        ydocA.destroy(); ydocB.destroy(); ydocD.destroy();
     });
 });

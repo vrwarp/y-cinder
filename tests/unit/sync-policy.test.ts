@@ -8,10 +8,15 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+    CLIENT_OFFLINE,
     diffHasPayload,
     diffNeedsStorage,
     epochTag,
     hasMorePages,
+    isClientOfflineError,
+    isLostAckCommit,
+    isPermanentDownloadError,
+    isServedFromCache,
     largeUpdatePath,
     orderByApplyPriority,
     serverCoversLocalStructs,
@@ -79,6 +84,16 @@ describe('planIncomingUpdate', () => {
         expect(plan).toEqual({ kind: 'skip-redundant' });
     });
 
+    it('applies a covered update flagged as carrying deletions', () => {
+        // Clocks span structs only: they cannot show the deletions are known
+        const plan = planIncomingUpdate(
+            { createdBy: 'other', clientIDs: [1], clientClocks: [5], hasDeletions: true, update: 'b' },
+            ctx({ localSVMap: new Map([[1, 10]]) }),
+        );
+
+        expect(plan).toEqual({ kind: 'apply-inline' });
+    });
+
     it('applies an update carrying a clock beyond the local one', () => {
         const plan = planIncomingUpdate(
             { createdBy: 'other', clientIDs: [1], clientClocks: [50], update: 'b' },
@@ -112,6 +127,87 @@ describe('planIncomingUpdate', () => {
     it('skips a document with no payload at all', () => {
         expect(planIncomingUpdate({ createdBy: 'other' }, ctx())).toEqual({ kind: 'skip-empty' });
         expect(planIncomingUpdate(null, ctx())).toEqual({ kind: 'skip-empty' });
+    });
+});
+
+/*
+ * A download failure classified as permanent drops the update for the
+ * session (skipped in initial sync, quarantined by the listener). Only a
+ * missing blob may be; anything that can succeed later must be retried.
+ */
+describe('isPermanentDownloadError', () => {
+    it('treats a missing blob as permanent', () => {
+        expect(isPermanentDownloadError({ code: 'storage/object-not-found' })).toBe(true);
+    });
+
+    it.each([
+        'storage/retry-limit-exceeded',
+        'storage/unknown',
+        'storage/unauthenticated',
+        'storage/quota-exceeded',
+    ])('retries %s', (code) => {
+        expect(isPermanentDownloadError({ code })).toBe(false);
+    });
+
+    it('retries an error without a code', () => {
+        expect(isPermanentDownloadError(new Error('fetch failed'))).toBe(false);
+        expect(isPermanentDownloadError(undefined)).toBe(false);
+    });
+});
+
+/**
+ * A pointer write the SDK re-sent after a lost ack is rejected
+ * ALREADY_EXISTS although it committed: its blob must stay. Every other
+ * rejection never committed, and the writer reclaims the blob.
+ */
+describe('isLostAckCommit', () => {
+    it('recognizes a re-sent create that had already committed', () => {
+        expect(isLostAckCommit(Object.assign(new Error('6 ALREADY_EXISTS'), { code: 'already-exists' }))).toBe(true);
+    });
+
+    it.each(['unavailable', 'permission-denied', 'failed-precondition', 'aborted'])(
+        'treats a %s rejection as never committed', (code) => {
+            expect(isLostAckCommit(Object.assign(new Error(code), { code }))).toBe(false);
+        });
+
+    it('treats an error without a code as never committed', () => {
+        expect(isLostAckCommit(new Error('Simulated failure'))).toBe(false);
+        expect(isLostAckCommit(undefined)).toBe(false);
+    });
+});
+
+/**
+ * Initial sync must not complete on reads the SDK answered from its cache
+ * (it does so only offline); such a failure waits for the connection
+ * instead of spending the retry budget, unlike every thrown error.
+ */
+describe('isServedFromCache', () => {
+    it('flags a read answered from the local cache', () => {
+        expect(isServedFromCache({ metadata: { fromCache: true } })).toBe(true);
+    });
+
+    it('accepts a read that reached the server', () => {
+        expect(isServedFromCache({ metadata: { fromCache: false } })).toBe(false);
+    });
+
+    it('accepts a snapshot without metadata (SDK test doubles)', () => {
+        expect(isServedFromCache({})).toBe(false);
+    });
+});
+
+describe('isClientOfflineError', () => {
+    it('recognizes the offline failure', () => {
+        expect(isClientOfflineError(Object.assign(new Error('offline'), { code: CLIENT_OFFLINE }))).toBe(true);
+    });
+
+    it.each(['unavailable', 'deadline-exceeded', 'permission-denied'])(
+        'keeps a thrown %s error on the retry budget', (code) => {
+            expect(isClientOfflineError(Object.assign(new Error(code), { code }))).toBe(false);
+        });
+
+    it('keeps an error without a code on the retry budget', () => {
+        expect(isClientOfflineError(new Error('Initial sync failed'))).toBe(false);
+        expect(isClientOfflineError(undefined)).toBe(false);
     });
 });
 
@@ -153,6 +249,30 @@ describe('shouldTriggerCompaction', () => {
 
     it('still respects the cooldown just below the hard cap', () => {
         expect(shouldTriggerCompaction({ ...base, size: 499, lastTriggerAt: 99_999 })).toBe(false);
+    });
+
+    /*
+     * A document compaction cannot get past never drains, so it sits at
+     * the hard cap: without this, every delivery re-reads the whole backlog
+     * just to fail the same way.
+     */
+    it('triggers nothing while a failure backoff runs, not even at the hard cap', () => {
+        expect(shouldTriggerCompaction({ ...base, backoffUntil: 100_001 })).toBe(false);
+        expect(shouldTriggerCompaction({ ...base, size: 500, lastTriggerAt: 99_999, backoffUntil: 100_001 })).toBe(false);
+    });
+
+    it('triggers again once the backoff has ended', () => {
+        expect(shouldTriggerCompaction({ ...base, backoffUntil: 100_000 })).toBe(true);
+        expect(shouldTriggerCompaction({ ...base, size: 500, lastTriggerAt: 99_999, backoffUntil: 100_000 })).toBe(true);
+    });
+
+    it('treats no backoff (0) as none', () => {
+        expect(shouldTriggerCompaction({ ...base, backoffUntil: 0 })).toBe(true);
+    });
+
+    it('still respects the threshold and cooldown after a backoff ends', () => {
+        expect(shouldTriggerCompaction({ ...base, size: 50, backoffUntil: 1 })).toBe(false);
+        expect(shouldTriggerCompaction({ ...base, lastTriggerAt: 95_000, backoffUntil: 1 })).toBe(false);
     });
 });
 
@@ -329,6 +449,16 @@ describe('largeUpdatePath', () => {
 
     it('keeps successive pushes from one client distinct', () => {
         expect(largeUpdatePath('docs/a', 'c1', 5)).not.toBe(largeUpdatePath('docs/a', 'c1', 6));
+    });
+
+    it('appends the attempt id when given', () => {
+        expect(largeUpdatePath('docs/a', 'client7', 1_700_000, 'att9'))
+            .toBe('docs/a/large_updates/client7_1700000_att9.bin');
+    });
+
+    it('keeps two attempts of one client in the same millisecond distinct', () => {
+        expect(largeUpdatePath('docs/a', 'c1', 5, 'x')).not.toBe(largeUpdatePath('docs/a', 'c1', 5, 'y'));
+        expect(largeUpdatePath('docs/a', 'c1', 5, 'x')).not.toBe(largeUpdatePath('docs/a', 'c1', 5));
     });
 });
 

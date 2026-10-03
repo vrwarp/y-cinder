@@ -215,6 +215,38 @@ describe('mergeUpdatesWithMeta', () => {
         expect(decoded.size).toBeGreaterThan(0);
     });
 
+    it('reports only what a snapshot holds contiguously from clock 0 when it merges across a gap', () => {
+        // One client: U1 = X:[0,4), U2 = X:[4,8), U3 = X:[8,12); a fold
+        // over a server that lacks U2, and one that lacks U1 as well
+        const doc = new Y.Doc();
+        doc.clientID = 7;
+        const updates: Uint8Array[] = [];
+        doc.on('update', (u: Uint8Array) => updates.push(u));
+        doc.getText('t').insert(0, 'aaaa');
+        doc.getText('t').insert(4, 'bbbb');
+        doc.getText('t').insert(8, 'cccc');
+        doc.getText('t').delete(9, 1);
+        doc.destroy();
+        const [u1, , u3, del] = updates;
+
+        for (const gc of [true, false]) {
+            const gapped = mergeUpdatesWithMeta([u1, u3, del], { gc, snapshot: true });
+            expect(gapped.result).toEqual(Y.mergeUpdates([u1, u3, del]));
+            expect(Y.decodeStateVector(gapped.stateVector)).toEqual(new Map([[7, 4]]));
+            // The fingerprint still carries the whole delete-set, no structs
+            const decodedDs = Y.decodeUpdate(gapped.dsUpdate);
+            expect(decodedDs.structs).toHaveLength(0);
+            expect(Y.equalDeleteSets(decodedDs.ds, Y.decodeUpdate(gapped.result).ds)).toBe(true);
+
+            const noPrefix = mergeUpdatesWithMeta([u3], { gc, snapshot: true });
+            expect(Y.decodeStateVector(noPrefix.stateVector).size).toBe(0);
+
+            // Without a gap a snapshot's state vector is its clock ends
+            const whole = mergeUpdatesWithMeta(updates, { gc, snapshot: true });
+            expect(Y.decodeStateVector(whole.stateVector)).toEqual(new Map([[7, 12]]));
+        }
+    });
+
     it('reports true clock ends for partial merges (delta-compaction segments)', () => {
         // A mid-life batch of updates: structs start well past clock 0
         const doc = new Y.Doc();

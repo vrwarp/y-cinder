@@ -42,7 +42,10 @@
  *   billed read of the full payload and one RPC per document, on every
  *   transaction attempt. A lockless deleter, or IDs that are reused or
  *   rewritten in place, would break this (an existence re-read would not
- *   catch those either).
+ *   catch those either). The queries also return this client's own
+ *   unacknowledged writes, which a blind delete misses: compaction skips
+ *   them (once a squash commits they are stale-epoch data, deleted
+ *   unread).
  *
  * @module compaction
  */
@@ -277,7 +280,12 @@ export async function compact(
             return { success: true, type: 'none', updatesCompacted: 0, historySegmentsMerged: 0 };
         }
 
-        const updateDocs = updatesSnap.docs;
+        // Only committed documents. The query also returns this client's
+        // own writes the server has not acknowledged yet (latency
+        // compensation, or a queue held while the write stream is down):
+        // deleting one is a no-op on the server, and once it commits it
+        // would point to the blob reclaimed below. A later cycle takes it.
+        const updateDocs = updatesSnap.docs.filter(uDoc => !uDoc.metadata.hasPendingWrites);
 
         // Test hook for simulating concurrent modifications
         if (testHooks?.beforeTransaction) {
@@ -867,9 +875,9 @@ async function deleteStaleEpochDocs(
  * Must run only after the commit, and only for documents that commit
  * deleted (the transaction body's return value, so a re-run on
  * contention reports its own deletes). The deletes are blind (see
- * "Deletion" in the module header), but once the commit lands each
- * pointer is gone either way, and its payload is in what the commit
- * wrote. Readers racing the delete are
+ * "Deletion" in the module header), but compaction only lists committed
+ * pointers, so once the commit lands each one is gone either way, and its
+ * payload is in what the commit wrote. Readers racing the delete are
  * safe: initial sync skips a missing blob and reads the snapshot after
  * the updates, and the update listener skips one whose pointer is gone,
  * receiving the data through the fold or segment instead.

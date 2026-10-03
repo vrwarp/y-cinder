@@ -871,7 +871,7 @@ export function createUpdateListener(ctx: SyncContext, startAfterDoc: QueryDocum
                 if (plan.kind === 'download') {
                     (async () => {
                         try {
-                            const buffer = await downloadUpdateWithRetry(ctx.storage, data.updateStoragePath, isStopped);
+                            const buffer = await downloadWithRetry(ctx.storage, data.updateStoragePath, isStopped);
                             // Listener may have stopped (or the provider been destroyed) while downloading
                             if (buffer === null || isStopped()) return;
                             const update = new Uint8Array(buffer);
@@ -973,6 +973,11 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
     // provider unsubscribed the listener (e.g. at an epoch fence).
     let stopped = false;
 
+    // Bumped by each delivery past the version gate. A snapshot download
+    // still retrying for an older delivery gives up once a newer one takes
+    // over: a later fold covers it (and deletes its blob).
+    let latestDelivery = 0;
+
     // Each new fold carries the whole delete-set again; when the local doc
     // already holds every deletion in it, applying it is an O(delete-set)
     // no-op (see fingerprintIsRedundant).
@@ -1012,6 +1017,7 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
         if (typeof data.version === 'number' && data.version === lastProcessedVersion) {
             return;
         }
+        const delivery = ++latestDelivery;
 
         // A new version means a fold committed (ours or another client's).
         ctx.onCompactionProgress?.();
@@ -1069,19 +1075,25 @@ export function createSnapshotListener(ctx: SyncContext, initialVersion: number 
                 return;
             }
 
+            const snapshotStopped = () =>
+                stopped || isDestroyed() || (ctx.getEpoch?.() ?? 0) !== snapEpoch || delivery !== latestDelivery;
             try {
-                const storageRef = ref(storage, data.snapshotStoragePath);
-                const buffer = await getBytes(storageRef);
-                // Provider may have been destroyed while downloading
-                if (isDestroyed()) return;
+                // Transient failures are retried: an unchanged main document
+                // is not delivered again (see downloadWithRetry)
+                const buffer = await downloadWithRetry(storage, data.snapshotStoragePath, snapshotStopped);
+                // Stopped, destroyed or superseded while downloading
+                if (buffer === null || snapshotStopped()) return;
                 // Only what the local doc lacks (see diffSnapshotForLocal)
                 const content = await diffSnapshotForLocal(new Uint8Array(buffer), data, ydoc);
-                if (stopped || isDestroyed() || (ctx.getEpoch?.() ?? 0) !== snapEpoch) return;
+                if (snapshotStopped()) return;
                 Y.applyUpdate(ydoc, content, FIREBASE_ORIGINS.SNAPSHOT);
                 if (typeof data.version === 'number') {
                     lastProcessedVersion = data.version;
                 }
             } catch (storageErr) {
+                // A newer fold deletes this blob once it commits; only a
+                // failure of the current delivery is a corrupted snapshot.
+                if (snapshotStopped()) return;
                 console.error(`Failed to apply snapshot ${snapshotKey} (quarantined)`, storageErr);
                 ctx.corruptedDocIds?.add(snapshotKey);
                 lastQuarantinedPath = snapshotKey;
@@ -1268,21 +1280,22 @@ async function updateDocExists(docRef: DocumentReference): Promise<boolean> {
 }
 
 /**
- * Downloads a storage-backed update for the update listener, retrying
- * failures that may be transient.
+ * Downloads a blob for a listener (a storage-backed update or a snapshot),
+ * retrying failures that may be transient.
  *
- * The update document is never delivered again, so giving up on a network
- * error would drop the update for the rest of the session. Failures are
- * retried for as long as the listener runs, with a backoff that stops
- * growing after DEFAULTS.MAX_RETRIES attempts; a permanent failure is
- * rethrown so the caller quarantines the document.
+ * An update document is never delivered again, and neither is an unchanged
+ * main document, so giving up on a network error would drop the update or
+ * fold for the rest of the session. Failures are retried for as long as
+ * the listener runs, with a backoff that stops growing after
+ * DEFAULTS.MAX_RETRIES attempts; a permanent failure is rethrown so the
+ * caller quarantines the document.
  *
  * @param storage - Firebase Storage instance
- * @param storagePath - The update's blob path
+ * @param storagePath - The blob path
  * @param isStopped - Whether the listener has stopped
  * @returns The blob, or null when the listener stopped first
  */
-async function downloadUpdateWithRetry(
+async function downloadWithRetry(
     storage: FirebaseStorage,
     storagePath: string,
     isStopped: () => boolean
@@ -1293,7 +1306,7 @@ async function downloadUpdateWithRetry(
         } catch (e) {
             if (isPermanentDownloadError(e)) throw e;
             const backoff = calculateBackoff(Math.min(attempt, DEFAULTS.MAX_RETRIES));
-            console.warn(`Failed to download storage-backed update ${storagePath} (attempt ${attempt}). Retrying in ${Math.floor(backoff)}ms...`, e);
+            console.warn(`Failed to download ${storagePath} (attempt ${attempt}). Retrying in ${Math.floor(backoff)}ms...`, e);
             await wait(backoff);
         }
     }

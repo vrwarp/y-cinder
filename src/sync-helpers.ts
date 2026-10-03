@@ -31,6 +31,12 @@ export interface PendingUpdate {
      * that only carries deletions (see `fingerprintIsRedundant`).
      */
     fingerprint?: boolean;
+    /**
+     * Marks an update document that is this client's own unacknowledged
+     * write: latency compensation lists it among the server's documents,
+     * but the server may still reject it.
+     */
+    unacknowledged?: boolean;
 }
 
 /**

@@ -999,7 +999,8 @@ export class FireProvider extends ObservableV2<any> {
    * A save that started since then took the buffer with it (the array was
    * replaced), so nothing is dropped and the worst case is that save's
    * duplicate. A save that started before may fail and put its batch back
-   * at the front, but that batch was buffered before the capture as well.
+   * at the front, but that batch is inside the push as well: initial sync
+   * does not count a write the server has not acknowledged as server data.
    *
    * @param captured - The buffer and its length when the doc was read
    */

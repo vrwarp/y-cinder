@@ -344,7 +344,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         // Metadata is folded into the server state vector
                         // only after the epoch is known (main doc read) —
                         // foreign-epoch documents must not contribute.
-                        pendingUpdates.push({ type: 'update', data, priority: 3 });
+                        pendingUpdates.push({ type: 'update', data, priority: 3, unacknowledged: snap.metadata.hasPendingWrites });
                     }
                 }
 
@@ -551,7 +551,13 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // written without what precedes it (e.g. a save that committed
         // before initial sync pushed the doc's pre-existing content) ends
         // at the client's full clock although the server lacks its start.
-        const serverSVMap = buildServerCoverage(snapshotSVMap, pendingUpdates);
+        //
+        // Only committed documents count as server evidence. This client's
+        // unacknowledged saves are applied like the rest, but the server
+        // may reject one after the push left its content out, and the
+        // provider retires the batch it put back along with the push's.
+        const serverItems = pendingUpdates.filter(item => !item.unacknowledged);
+        const serverSVMap = buildServerCoverage(snapshotSVMap, serverItems);
 
         // 4. Apply missing data with state vector refresh (P0.4 fix)
         let localSVMap = Y.decodeStateVector(Y.encodeStateVector(ydoc));
@@ -627,7 +633,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
         // The fingerprint stands in for the snapshot, whose content is
         // O(document) and never decoded just to trim the push.
         const deletionProofBlobs = () =>
-            collectServerBlobs(pendingUpdates.filter(item => item.type !== 'snapshot'));
+            collectServerBlobs(serverItems.filter(item => item.type !== 'snapshot'));
 
         let shouldPush: boolean;
         let localDiff: Uint8Array | null = null;
@@ -638,7 +644,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
             const localDs = fingerprintLocalDs !== null && !transactionChangedDoc(applyTransaction)
                 ? fingerprintLocalDs
                 : Y.createDeleteSetFromStructStore((ydoc as any).store);
-            shouldPush = !deleteSetCoveredByBlobs(localDs, () => collectServerBlobs(pendingUpdates));
+            shouldPush = !deleteSetCoveredByBlobs(localDs, () => collectServerBlobs(serverItems));
             if (shouldPush) {
                 // Rare: local deletion-only changes the server lacks.
                 localDiff = withoutServerDeletions(Y.encodeStateAsUpdate(ydoc, serverSV), deletionProofBlobs);

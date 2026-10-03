@@ -1029,7 +1029,11 @@ that comes due while initial sync runs waits for it, but never past
 (`initialSyncSaveHold`), so a stalled sync (offline, its push never
 acknowledged) cannot keep edits out of the SDK's write queue. Entries
 buffered after the capture are saved normally, a failed attempt drops nothing, and a save that
-started since the capture keeps its batch (a harmless duplicate at worst). Such a batch can pair
+started since the capture keeps its batch (a harmless duplicate at worst).
+"Already" means committed: a save still unacknowledged when the attempt
+reads the updates collection proves nothing, since the server may yet
+reject it and the batch it puts back would be dropped with the rest. The
+push carries that batch too, again a harmless duplicate at worst. Such a batch can pair
 structs the push already carries with a later deletion, so update documents that delete anything
 are flagged `hasDeletions` like segments, and readers never skip them as covered by their clocks.
 The `destroy()`, unload and `squash()` flushes are unchanged.

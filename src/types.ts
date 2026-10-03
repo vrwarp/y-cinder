@@ -241,6 +241,13 @@ export const DEFAULTS = {
      */
     LOCAL_READY_TIMEOUT_MS: 10_000,
     /**
+     * How long compaction and squash wait for the clock-skew probe before
+     * their first lock. Its write resolves only when the server
+     * acknowledges it, which never happens while offline; past this, the
+     * operation gives up as a lock transaction would offline.
+     */
+    CLOCK_SKEW_PROBE_TIMEOUT_MS: 10_000,
+    /**
      * Caps on documents deleted per compaction transaction. Firestore
      * transactions allow at most 500 writes; updates + history + 1 snapshot
      * set must stay within that budget (400 + 99 + 1 = 500).

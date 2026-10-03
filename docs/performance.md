@@ -324,6 +324,10 @@ The offset is now measured once per Firestore instance
 (`sharedClockOffset`) on the first lock need: compaction and squash await
 it before building their lock context, so `acquireLock` still always gets
 a measured offset (never `undefined`, which re-measures on every lock).
+That wait is capped at `CLOCK_SKEW_PROBE_TIMEOUT_MS`: offline the probe
+write is never acknowledged, so `compact()` and `squash()` give up, as
+their lock transaction does offline, instead of staying pending until
+reconnect (`tests/integration/offline_compact_squash_settle.test.ts`).
 The awaited probe write had also been the only thing making an offline
 launch wait for connectivity. Initial sync now rejects reads the SDK
 answered from its cache (`metadata.fromCache`, i.e. offline) and retries

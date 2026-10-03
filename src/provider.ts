@@ -403,6 +403,36 @@ export class FireProvider extends ObservableV2<any> {
   }
 
   /**
+   * Waits for the clock offset before a lock, at most
+   * CLOCK_SKEW_PROBE_TIMEOUT_MS.
+   *
+   * The probe's write resolves only once the server acknowledges it, so
+   * offline the offset never arrives: compact() and squash() would stay
+   * pending until the connection returns, then run long after their
+   * caller gave up. They give up instead, as their lock transaction does
+   * offline. The probe keeps running and caches the offset once
+   * acknowledged, so a later lock need finds it.
+   *
+   * @returns Whether the offset is known.
+   */
+  private async _awaitClockOffset(): Promise<boolean> {
+    let timerId: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>(resolve => {
+      timerId = setTimeout(resolve, DEFAULTS.CLOCK_SKEW_PROBE_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([this._clockOffset(), deadline]);
+    } finally {
+      clearTimeout(timerId);
+    }
+    if (this._cachedClockOffset === undefined) {
+      console.warn(`Clock skew not measured after ${DEFAULTS.CLOCK_SKEW_PROBE_TIMEOUT_MS}ms (client offline?), skipping the lock`);
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Compaction requested by the update listener's threshold trigger.
    *
    * Every online client's listener fires on the same crossing, and a
@@ -418,9 +448,10 @@ export class FireProvider extends ObservableV2<any> {
   private async _executeCompaction(attempt: number, beforeSquash: boolean, minUpdates: number): Promise<void> {
     // acquireLock needs the measured offset: given none, it would measure
     // again on every call. Only the first compaction waits for it, before
-    // the history listener is paused.
+    // the history listener is paused; offline, the cycle is skipped (see
+    // _awaitClockOffset).
     if (this._cachedClockOffset === undefined) {
-      await this._clockOffset();
+      if (!(await this._awaitClockOffset())) return;
       if (this._isDestroyed || this._epochFenced) return;
     }
 
@@ -576,6 +607,18 @@ export class FireProvider extends ObservableV2<any> {
       return { success: false, error: new Error('squash() does not support subdocuments') };
     }
 
+    // Both locks below need the measured offset. Awaited once, up front:
+    // offline, the squash is reported as not done (see _awaitClockOffset)
+    // instead of waiting for the probe in the compaction and again before
+    // its own lock. The wait for in-flight operations below also stays the
+    // last await before squashDocument, so no compaction starts between.
+    if (this._cachedClockOffset === undefined && !(await this._awaitClockOffset())) {
+      return {
+        success: false,
+        error: Object.assign(new Error('Clock skew not measured: client is offline'), { code: 'unavailable' }),
+      };
+    }
+
     // Compact the backlog first so the squash transaction stays within
     // Firestore's write budget. This also removes old-epoch documents and
     // drains update documents too old to carry redundancy metadata into a
@@ -589,13 +632,6 @@ export class FireProvider extends ObservableV2<any> {
     }
     if (this._pendingUpdates.length > 0) {
       await this.saveToFirestore();
-    }
-
-    // The lock needs the measured offset (normally measured by the
-    // compaction above). Awaited before the wait below, so no compaction
-    // can start between that wait and squashDocument.
-    if (this._cachedClockOffset === undefined) {
-      await this._clockOffset();
     }
 
     // compact() returns at once while a compaction (or another squash) is

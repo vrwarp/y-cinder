@@ -111,6 +111,9 @@ function segmentDoc(segment: Uint8Array, startTimeMs: number) {
     return {
         // Same derivation as merge-core's partial merge: clock ends per client.
         stateVector: toBase64(Y.encodeStateVector(Y.parseUpdateMeta(segment).to)),
+        // Inserts only. An unflagged segment is always applied, which
+        // would hide a wrong redundancy skip.
+        hasDeletions: false,
         createdBy: 'compactor',
         segment: Bytes.fromUint8Array(segment),
         startTime: Timestamp.fromMillis(startTimeMs),

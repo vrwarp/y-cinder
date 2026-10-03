@@ -665,12 +665,12 @@ describe('deleteSetFitsInline', () => {
 describe('buildDeltaSegmentDoc', () => {
     it('carries the state vector and author', () => {
         expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 0 }))
-            .toEqual({ stateVector: 'sv', createdBy: 'me' });
+            .toEqual({ stateVector: 'sv', hasDeletions: false, createdBy: 'me' });
     });
 
     /*
      * Omitted rather than written as 0, so a never-squashed database keeps
-     * producing documents identical to what older clients wrote.
+     * producing documents without the field, as older clients wrote them.
      */
     it('omits the epoch field entirely at epoch 0', () => {
         expect('epoch' in buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 0 })).toBe(false);
@@ -678,7 +678,7 @@ describe('buildDeltaSegmentDoc', () => {
 
     it('writes the epoch once past 0', () => {
         expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 3 }))
-            .toEqual({ stateVector: 'sv', createdBy: 'me', epoch: 3 });
+            .toEqual({ stateVector: 'sv', hasDeletions: false, createdBy: 'me', epoch: 3 });
     });
 
     /*
@@ -690,8 +690,13 @@ describe('buildDeltaSegmentDoc', () => {
             .toEqual({ stateVector: 'sv', hasDeletions: true, createdBy: 'me' });
     });
 
-    it('omits the deletions flag entirely when there are none', () => {
-        expect('hasDeletions' in buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 3 })).toBe(false);
+    /*
+     * Older clients never write the flag, so readers must treat an absent
+     * one as "may carry deletions": only an explicit false lets them skip
+     * a segment whose structs they already hold.
+     */
+    it('writes the deletions flag as false when there are none', () => {
+        expect(buildDeltaSegmentDoc({ stateVectorB64: 'sv', hasDeletions: false, uid: 'me', epoch: 3 }).hasDeletions).toBe(false);
     });
 });
 

@@ -255,7 +255,7 @@ function buildServer(fingerprint: 'inline' | 'offloaded'): Fixture {
     const seg = mergeUpdatesWithMeta(segBlobs, { gc: false });
     server.history.push({
         stateVector: toBase64(seg.stateVector),
-        ...(updateHasDeletions(seg.dsUpdate) ? { hasDeletions: true } : {}),
+        hasDeletions: updateHasDeletions(seg.dsUpdate),
         createdBy: 'device-b',
         segment: inlineBytes(seg.result),
     });

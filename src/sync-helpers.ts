@@ -507,13 +507,13 @@ export function isItemRedundant(item: PendingUpdate, localSVMap: Map<number, num
     if (item.type === 'history' && item.data.stateVector) {
         // A state vector only spans structs and deletions add none, so it
         // can never prove a segment's deletions are known: a segment that
-        // carries any is always applied (idempotent).
-        if (item.data.hasDeletions) return false;
+        // carries any is always applied (idempotent). Only an explicit
+        // `false` rules them out: older clients never write the flag, so a
+        // segment without it may carry deletions whatever its vector says
+        // (a delete-only one's vector is even empty, covered by anything).
+        if (item.data.hasDeletions !== false) return false;
         try {
             const map = ensureDecodedSV(item.data);
-            // An empty vector proves nothing either: such a segment holds
-            // only deletions (written before the hasDeletions flag existed).
-            if (map.size === 0) return false;
             for (const [client, clock] of map) {
                 const localClock = localSVMap.get(client) || 0;
                 if (clock > localClock) return false;

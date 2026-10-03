@@ -776,7 +776,7 @@ describe('isItemRedundant', () => {
         const doc = makeDoc(1, 3);
 
         expect(isItemRedundant(
-            { type: 'history', priority: 2, data: { stateVector: svBase64(doc) } },
+            { type: 'history', priority: 2, data: { stateVector: svBase64(doc), hasDeletions: false } },
             local,
         )).toBe(true);
     });
@@ -785,7 +785,7 @@ describe('isItemRedundant', () => {
         const doc = makeDoc(1, 99);
 
         expect(isItemRedundant(
-            { type: 'history', priority: 2, data: { stateVector: svBase64(doc) } },
+            { type: 'history', priority: 2, data: { stateVector: svBase64(doc), hasDeletions: false } },
             local,
         )).toBe(false);
     });
@@ -804,6 +804,19 @@ describe('isItemRedundant', () => {
         )).toBe(false);
     });
 
+    /*
+     * Older clients never write the flag, whatever the segment holds: a
+     * covered segment without it may still carry deletions.
+     */
+    it('is false for a covered history segment without the deletions flag', () => {
+        const doc = makeDoc(1, 3);
+
+        expect(isItemRedundant(
+            { type: 'history', priority: 2, data: { stateVector: svBase64(doc) } },
+            local,
+        )).toBe(false);
+    });
+
     it('is false for a history segment with an empty stateVector (deletions only)', () => {
         // What a delete-only segment carried before the hasDeletions flag:
         // an empty vector, which every local state "covers" vacuously.
@@ -815,7 +828,7 @@ describe('isItemRedundant', () => {
 
     it('is false — never skip — when a history stateVector fails to parse', () => {
         expect(isItemRedundant(
-            { type: 'history', priority: 2, data: { stateVector: 'garbage!!' } },
+            { type: 'history', priority: 2, data: { stateVector: 'garbage!!', hasDeletions: false } },
             local,
         )).toBe(false);
     });

@@ -405,7 +405,9 @@ of true clock ends so every redundancy check works unchanged. A state
 vector cannot show deletions, though (they add no structs), so a segment
 that carries any is also flagged `hasDeletions` and always applied rather
 than skipped as covered — otherwise deleted content would reappear on
-fresh and returning clients until the next fold.
+fresh and returning clients until the next fold. The flag is written as
+`false` otherwise: older clients never write it, so a segment without it
+may carry deletions and is applied too.
 
 Measured (240 sessions, identical workload): steady-state cycle cost
 631 ms → **0.6 ms**; per-cycle transfer ~6.6 MB → **~6 KB**; total

@@ -407,13 +407,16 @@ export function deltaSegmentFitsInline(byteLength: number, stateVectorB64Length:
  * Builds the history-segment document a delta compaction writes.
  *
  * `epoch` is omitted entirely at epoch 0 rather than written as 0, so
- * documents from a never-squashed database stay byte-identical to what
- * older clients produced; `hasDeletions` is likewise omitted when false.
+ * documents from a never-squashed database carry no epoch field, as
+ * older clients wrote them.
  *
  * `hasDeletions` lets readers apply a segment whose state vector they
  * already cover: the vector only spans structs and a deletion adds none
  * (a delete-only segment's vector is empty), so without the flag every
  * redundancy check would skip the segment and resurrect what it deleted.
+ * It is written even when false: older clients never write it, whatever
+ * the segment holds, so readers treat an absent flag as "may carry
+ * deletions" and skip a covered segment only on an explicit false.
  *
  * @param params - Segment bytes, its state vector, whether it carries
  * deletions, author and epoch.
@@ -429,7 +432,7 @@ export function buildDeltaSegmentDoc(params: {
 
     return {
         stateVector: stateVectorB64,
-        ...(hasDeletions ? { hasDeletions: true } : {}),
+        hasDeletions,
         createdBy: uid,
         ...(epoch > 0 ? { epoch } : {}),
     };

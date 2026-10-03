@@ -874,8 +874,11 @@ export class FireProvider extends ObservableV2<any> {
       // constructor's value can be stale — local persistence may hydrate
       // an epoch-N doc after construction — and saves that start while
       // the initial-sync push is in flight must carry the push's epoch.
+      // A fenced provider keeps its epoch: a re-sync that read the main
+      // document before this client's squash committed must not roll it
+      // back to the old one.
       onEpochAdopted: (serverEpoch) => {
-        this._epoch = serverEpoch;
+        if (!this._epochFenced) this._epoch = serverEpoch;
       },
       // Everything buffered so far is in the doc the push is computed from
       onLocalStateCaptured: () => {
@@ -902,7 +905,10 @@ export class FireProvider extends ObservableV2<any> {
       if (this._pendingUpdates.length > 0) {
         this._scheduleSave();
       }
-      if (this._isDestroyed) return;
+      // A re-sync (e.g. after a listener error) can still be running when
+      // the provider is epoch-fenced (see _stopSyncing): attaching its
+      // listeners would undo the fence.
+      if (this._isDestroyed || this._epochFenced) return;
 
       // The server was squashed past this document's history — do not
       // retry (the state cannot converge); surface the event and stop.
@@ -954,15 +960,17 @@ export class FireProvider extends ObservableV2<any> {
       this.emit('sync', [true]);
 
     } catch (err) {
+      // No retry once fenced either: _stopSyncing already ran and could
+      // not cancel a retry scheduled after it.
       if (isClientOfflineError(err)) {
-        if (!this._isDestroyed) this._retrySyncWhenOnline();
+        if (!this._isDestroyed && !this._epochFenced) this._retrySyncWhenOnline();
         return;
       }
 
       console.error("Sync failed", err);
 
       // Circuit breaker - stop retrying after MAX_RETRIES
-      if (!this._isDestroyed) {
+      if (!this._isDestroyed && !this._epochFenced) {
         this._syncRetryCount++;
 
         if (this._syncRetryCount >= DEFAULTS.MAX_RETRIES) {

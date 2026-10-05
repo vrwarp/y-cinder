@@ -151,6 +151,9 @@ function publishFold(updates: Uint8Array[], version: number): { snapshot: Uint8A
         version,
         epoch: 0,
         stateVector: toBase64(stateVector),
+        // Current folds mark their vector as contiguous from clock 0 (see
+        // snapshotStateVectorIsContiguous); an unmarked one is legacy.
+        stateVectorContiguous: true,
         snapshotStoragePath: storagePath,
         deleteSet: Bytes.fromBase64String(toBase64(fingerprint)),
     };
@@ -236,6 +239,28 @@ describe('delete-set fingerprint re-apply', () => {
         expect(updateEvents).toBe(0); // nothing changed...
         // ...yet today the whole fingerprint (every range) is re-applied.
         expect(probe.dsRanges, `re-applied ${probe.dsRanges} of ${fpRanges} fingerprint ranges`).toBe(0);
+        reader.destroy();
+    });
+
+    it("a legacy (unmarked) snapshot is downloaded once to verify coverage, and a client holding it all pushes nothing", async () => {
+        const { snapshot } = publishFold(updates, 3);
+        // As a pre-marker fold left it: same vector, no marker.
+        delete (server.main as Record<string, unknown>).stateVectorContiguous;
+
+        const reader = new Y.Doc();
+        Y.applyUpdate(reader, snapshot);
+        let updateEvents = 0;
+        reader.on('update', () => { updateEvents++; });
+
+        const result = await measure(() => performInitialSync(ctxFor(reader)));
+
+        expect(result.success).toBe(true);
+        // The stored vector is not trusted for push coverage: the blob is
+        // fetched (although the local doc covers it) to derive coverage...
+        expect(server.downloads).toBe(1);
+        // ...which proves the server holds everything: no push, no change.
+        expect(server.added).toBe(0);
+        expect(updateEvents).toBe(0);
         reader.destroy();
     });
 

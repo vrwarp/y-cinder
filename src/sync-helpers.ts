@@ -340,6 +340,40 @@ export function processSnapshotMetadata(data: any, serverSVMap: Map<number, numb
 }
 
 /**
+ * Whether a snapshot's stored state vector may be read as the range
+ * [0, sv) the snapshot holds CONTIGUOUSLY — what the initial-sync push
+ * guard needs.
+ *
+ * Only writers that store exactly that set `stateVectorContiguous: true`:
+ * the fold (snapshot-mode merge, fee33ab) and squash (a freshly built
+ * doc). Snapshots folded by older clients stored the merge's clock ENDS,
+ * which claim any gap the merge spans; that stored data outlives the
+ * writer fix, so an unmarked vector is not trusted for coverage (see
+ * contiguousSnapshotCoverage). The fold and squash replace the whole main
+ * document, so an older client's fold drops the marker along with the
+ * rest and is distrusted again.
+ */
+export function snapshotStateVectorIsContiguous(data: any): boolean {
+    return data?.stateVectorContiguous === true;
+}
+
+/**
+ * Folds into `serverSVMap` what a snapshot blob holds contiguously from
+ * clock 0, per client (Y.encodeStateVectorFromUpdate stops at the first
+ * gap). Used instead of an untrusted stored state vector: O(snapshot), so
+ * only for legacy snapshots, until the next fold rewrites them marked.
+ */
+export function contiguousSnapshotCoverage(content: Uint8Array, serverSVMap: Map<number, number>): void {
+    const sv = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(content));
+    for (const [client, clock] of sv) {
+        const current = serverSVMap.get(client) || 0;
+        if (clock > current) {
+            serverSVMap.set(client, clock);
+        }
+    }
+}
+
+/**
  * Builds the state vector the initial-sync push diffs against: for each
  * client, the clock up to which the server holds EVERY struct.
  *

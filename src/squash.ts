@@ -399,6 +399,10 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
                 snapshotStoragePath: storagePath,
                 content: deleteField(),
                 stateVector: stateVectorB64,
+                // The vector above is what the snapshot holds contiguously from
+                // clock 0; unmarked (legacy) vectors are not trusted for push
+                // coverage (see snapshotStateVectorIsContiguous).
+                stateVectorContiguous: true,
                 // A squashed document has no deletions yet
                 deleteSet: Bytes.fromUint8Array(dsUpdate),
                 deleteSetStoragePath: deleteField(),

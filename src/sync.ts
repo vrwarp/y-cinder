@@ -69,6 +69,8 @@ import {
     foldTailMayCatchUp,
     localCoversSnapshot,
     processSnapshotMetadata,
+    snapshotStateVectorIsContiguous,
+    contiguousSnapshotCoverage,
     buildServerCoverage,
     refreshLocalClocks,
     rebaseIfPending,
@@ -455,7 +457,14 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     };
                 }
 
-                processSnapshotMetadata(data, snapshotSVMap);
+                // A legacy snapshot's stored vector may claim a clock gap
+                // (pre-fee33ab folds stored clock ends): its coverage is
+                // derived from the content below instead.
+                const svTrusted = snapshotStateVectorIsContiguous(data);
+                if (svTrusted) {
+                    processSnapshotMetadata(data, snapshotSVMap);
+                }
+                let legacySnapshotBlob: Uint8Array | null = null;
 
                 // The delete-set fingerprint written by compaction is a
                 // structs-empty update. Treating it as a regular update both
@@ -504,6 +513,7 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                         try {
                             const storageRef = ref(ctx.storage, data.snapshotStoragePath);
                             const buffer = await getBytes(storageRef);
+                            if (!svTrusted) legacySnapshotBlob = new Uint8Array(buffer);
                             // A local doc behind the snapshot gets only what
                             // it lacks (diffed off the main thread when
                             // possible); a fresh one gets the whole blob.
@@ -522,7 +532,30 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
                     }
                 } else if (data.stateVector || data.content) {
                     // Fallback for older documents that haven't been compacted into Cloud Storage yet
+                    if (!svTrusted && data.content) legacySnapshotBlob = blobOf(data.content);
                     pendingUpdates.push({ type: 'snapshot', data, priority: 1 });
+                }
+
+                // Push coverage for a snapshot whose stored vector is not
+                // trusted. A client that covers the snapshot skipped the
+                // download above, so fetch it here: O(snapshot), once per
+                // session, only until the next fold rewrites it marked.
+                if (!svTrusted && data.stateVector) {
+                    try {
+                        if (!legacySnapshotBlob && data.snapshotStoragePath) {
+                            legacySnapshotBlob = new Uint8Array(await getBytes(ref(ctx.storage, data.snapshotStoragePath)));
+                        }
+                        if (legacySnapshotBlob) {
+                            contiguousSnapshotCoverage(legacySnapshotBlob, snapshotSVMap);
+                        } else {
+                            processSnapshotMetadata(data, snapshotSVMap);
+                        }
+                    } catch (legacyErr) {
+                        // Fall back to the stored vector (the pre-fix
+                        // behavior); the next session retries.
+                        console.warn("Failed to verify a legacy snapshot's coverage; trusting its stored state vector", legacyErr);
+                        processSnapshotMetadata(data, snapshotSVMap);
+                    }
                 }
             }
         }

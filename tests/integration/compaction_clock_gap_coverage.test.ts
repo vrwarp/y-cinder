@@ -66,7 +66,8 @@ import { FireProvider } from '../../src/provider';
 import { readDocEpoch } from '../../src/squash';
 import * as Y from 'yjs';
 import { setupEmulator } from '../utils/emulator';
-import { addDoc, collection, Bytes, serverTimestamp, getDocs, getDoc, doc } from '@firebase/firestore';
+import { addDoc, collection, Bytes, serverTimestamp, getDocs, getDoc, doc, setDoc, deleteField } from '@firebase/firestore';
+import { toBase64 } from 'lib0/buffer';
 import { waitFor, waitForConditionTruthy } from '../utils/wait';
 import { getStableDate } from '../unit/prng';
 import { extractClockEnds, aggregateClockEnds } from '../../src/update-metadata';
@@ -261,6 +262,64 @@ describe('Compaction across a server-side clock gap', () => {
             await expectFreshClientSees(path, text, 'aaaabbbbcccc');
         }, 120000);
     }
+
+    // Legacy data (field report): snapshots folded by clients from before
+    // fee33ab stored the merge's clock ENDS as the snapshot state vector,
+    // claiming the gap. That stored data outlives the writer fix: a holder
+    // trusting it never pushes the missing range, on any session, and every
+    // other device keeps the holder's later structs parked forever.
+    it("pushes the missing range when a legacy snapshot's stored state vector claims the gap", async () => {
+        const path = newPath('legacy-snapshot-sv');
+
+        const local = new Y.Doc();
+        const updates: Uint8Array[] = [];
+        local.on('update', (u: Uint8Array) => updates.push(u));
+        local.getText('t').insert(0, 'aaaa');
+        local.getText('t').insert(4, 'bbbb');
+        local.getText('t').insert(8, 'cccc');
+        await seedUpdate(path, updates[0]);
+        await seedUpdate(path, updates[2]);
+
+        // A peer folds what the server holds into the first snapshot.
+        const peer = new Y.Doc();
+        const peerProvider = createProvider(peer, path);
+        await waitSynced(peerProvider, 'peer');
+        await peerProvider.compact();
+        const folded = (await getDoc(doc(db, path))).data();
+        expect(folded?.snapshotStoragePath).toBeTruthy();
+
+        // Rewrite the main doc as a pre-fee33ab fold left it: the state
+        // vector is the clock ends (X:12, across the gap) and nothing marks
+        // it as contiguous.
+        const clockEnds = Y.encodeStateVector(Y.parseUpdateMeta(Y.mergeUpdates([updates[0], updates[2]])).to);
+        await setDoc(doc(db, path), {
+            stateVector: toBase64(clockEnds),
+            stateVectorContiguous: deleteField(),
+        }, { merge: true });
+
+        // The holder's next session must push X:[4,8).
+        const holder = createProvider(local, path);
+        await waitSynced(holder, 'holder');
+        await holder.destroy();
+
+        await expectPeerConverges(peer, text, 'aaaabbbbcccc');
+        await expectFreshClientSees(path, text, 'aaaabbbbcccc');
+    }, 120000);
+
+    it('marks a folded snapshot state vector as contiguous', async () => {
+        const path = newPath('snapshot-sv-marker');
+        const writer = new Y.Doc();
+        const updates: Uint8Array[] = [];
+        writer.on('update', (u: Uint8Array) => updates.push(u));
+        writer.getText('t').insert(0, 'abc');
+        await seedUpdate(path, updates[0]);
+        const p = createProvider(new Y.Doc(), path);
+        await waitSynced(p, 'compactor');
+        await p.compact();
+        const main = (await getDoc(doc(db, path))).data();
+        expect(main?.stateVector).toBeTruthy();
+        expect(main?.stateVectorContiguous).toBe(true);
+    }, 60000);
 
     it('pushes edits saved under a stale epoch before initial sync once a peer folded the later, correctly tagged save', async () => {
         const path = newPath('stale-epoch-fold');

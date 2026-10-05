@@ -1019,6 +1019,10 @@ function compactToSnapshot(params: {
         // re-run on contention, and re-walking a large candidate each
         // attempt is wasted CPU.
         stateVector: stateVectorB64,
+        // The vector above is what the snapshot holds contiguously from
+        // clock 0; unmarked (legacy) vectors are not trusted for push
+        // coverage (see snapshotStateVectorIsContiguous).
+        stateVectorContiguous: true,
         // A stale fingerprint would hide newer deletions. Exactly one of
         // the two fingerprint fields survives: inline for the normal case,
         // a Cloud Storage pointer once the delete-set outgrows the inline

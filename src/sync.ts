@@ -48,13 +48,11 @@ import {
     serverTimestamp,
     limit,
     startAfter,
-    limitToLast,
     QueryDocumentSnapshot,
     DocumentReference,
 } from "@firebase/firestore";
 import { getBytes, ref, deleteObject, FirebaseStorage } from "@firebase/storage";
 import * as Y from "yjs";
-import { fromBase64 } from "lib0/buffer";
 import {
     FIREBASE_ORIGINS,
     FIRESTORE_PATHS,
@@ -65,7 +63,6 @@ import { extractClockEnds, aggregateClockEnds, updateEndsWithDeletions, isUpdate
 import {
     PendingUpdate,
     collectServerBlobs,
-    ensureDecodedSV,
     foldTailMayCatchUp,
     localCoversSnapshot,
     processSnapshotMetadata,
@@ -783,9 +780,9 @@ export async function performInitialSync(ctx: SyncContext): Promise<SyncResult> 
 /**
  * Creates a real-time listener for new updates.
  * 
- * P0.2 FIX: Uses limitToLast() to prevent memory explosion when connecting
- * to documents with many pending updates. Only the most recent updates are
- * tracked; older updates were already processed during initial sync.
+ * Listens only from the sync cursor onward: updates before it were already
+ * processed during initial sync, so connecting to a document with many
+ * pending updates does not re-deliver them.
  * 
  * @param ctx - Sync context
  * @param startAfterDoc - Optional cursor to start listening from (prevents gaps)

@@ -54,7 +54,7 @@ import {
     limit,
 } from "@firebase/firestore";
 import { ref, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
-import { toBase64, fromBase64 } from "lib0/buffer";
+import { toBase64 } from "lib0/buffer";
 import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";

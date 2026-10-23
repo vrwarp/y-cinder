@@ -258,13 +258,13 @@ export function aggregateMetadata(metas: UpdateMetadata[]): {
  * 
  * @param localSVMap - Map of client IDs to local clock values
  * @param clientIDs - Array of client IDs in the update
- * @param clockEnd - The maximum clock value in the update
+ * @param clientClocks - Per-client end clocks, paired with `clientIDs`
  * @returns true if all update data is already in the local document
  * 
  * @example
  * ```typescript
  * const localSV = Y.decodeStateVector(Y.encodeStateVector(doc));
- * if (isUpdateRedundant(localSV, data.clientIDs, data.clockEnd)) {
+ * if (isUpdateRedundant(localSV, data.clientIDs, data.clientClocks)) {
  *   return; // Skip - already have this data
  * }
  * ```

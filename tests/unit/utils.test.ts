@@ -203,6 +203,39 @@ describe('utils', () => {
 
             doc.destroy();
         });
+
+        it('should decode to the state vector of the document that produced the update', () => {
+            const doc = new Y.Doc();
+            doc.getText('test').insert(0, 'hello');
+            doc.getMap('map').set('k', 'v');
+            const update = Y.encodeStateAsUpdate(doc);
+
+            const decoded = Y.decodeStateVector(
+                Uint8Array.from(atob(calculateStateVector(update)), c => c.charCodeAt(0))
+            );
+
+            expect(decoded).toEqual(Y.decodeStateVector(Y.encodeStateVector(doc)));
+            expect(decoded.size).toBeGreaterThan(0);
+
+            doc.destroy();
+        });
+
+        it('should report true clock ends for a partial update that does not start at clock 0', () => {
+            const doc = new Y.Doc();
+            doc.getText('test').insert(0, 'hello');
+            const sv = Y.encodeStateVector(doc);
+            doc.getText('test').insert(5, ' world');
+            const partial = Y.encodeStateAsUpdate(doc, sv);
+
+            const decoded = Y.decodeStateVector(
+                Uint8Array.from(atob(calculateStateVector(partial)), c => c.charCodeAt(0))
+            );
+
+            expect(decoded).toEqual(Y.decodeStateVector(Y.encodeStateVector(doc)));
+            expect(decoded.get(doc.clientID)).toBe('hello world'.length);
+
+            doc.destroy();
+        });
     });
 
     describe('generateSessionId', () => {

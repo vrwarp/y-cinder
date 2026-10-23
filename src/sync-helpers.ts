@@ -261,6 +261,13 @@ export async function diffSnapshotForLocal(content: Uint8Array, data: any, ydoc:
     }
 }
 
+/** Raises `client`'s clock in `serverSVMap` to `clock` when that is higher. */
+function raiseClock(serverSVMap: Map<number, number>, client: number, clock: number): void {
+    if (clock > (serverSVMap.get(client) || 0)) {
+        serverSVMap.set(client, clock);
+    }
+}
+
 /**
  * Extracts and aggregates clock values from an update document into the server state vector.
  * Tries stored metadata first, falls back to parsing the update blob.
@@ -271,11 +278,7 @@ export async function diffSnapshotForLocal(content: Uint8Array, data: any, ydoc:
 export function processUpdateMetadata(data: any, serverSVMap: Map<number, number>): void {
     if (data.clientIDs?.length > 0 && data.clientClocks?.length > 0) {
         data.clientIDs.forEach((cid: number, i: number) => {
-            const clock = data.clientClocks[i];
-            const current = serverSVMap.get(cid) || 0;
-            if (clock > current) {
-                serverSVMap.set(cid, clock);
-            }
+            raiseClock(serverSVMap, cid, data.clientClocks[i]);
         });
     } else if (data.update) {
         // Lazy clock extraction — avoids materializing the struct tree of
@@ -283,10 +286,7 @@ export function processUpdateMetadata(data: any, serverSVMap: Map<number, number
         // errors internally by returning an empty map).
         const clockEnds = extractClockEnds(blobOf(data.update));
         for (const [clientID, clock] of clockEnds) {
-            const current = serverSVMap.get(clientID) || 0;
-            if (clock > current) {
-                serverSVMap.set(clientID, clock);
-            }
+            raiseClock(serverSVMap, clientID, clock);
         }
     }
 }
@@ -302,20 +302,14 @@ export function processHistoryMetadata(data: any, serverSVMap: Map<number, numbe
     if (data.stateVector) {
         const map = ensureDecodedSV(data);
         for (const [client, clock] of map.entries()) {
-            const current = serverSVMap.get(client) || 0;
-            if (clock > current) {
-                serverSVMap.set(client, clock);
-            }
+            raiseClock(serverSVMap, client, clock);
         }
     } else if (data.segment) {
         // Lazy clock extraction for history segments, which are large by
         // construction (merged batches of updates).
         const clockEnds = extractClockEnds(blobOf(data.segment));
         for (const [clientID, clock] of clockEnds) {
-            const current = serverSVMap.get(clientID) || 0;
-            if (clock > current) {
-                serverSVMap.set(clientID, clock);
-            }
+            raiseClock(serverSVMap, clientID, clock);
         }
     }
 }
@@ -331,10 +325,7 @@ export function processSnapshotMetadata(data: any, serverSVMap: Map<number, numb
     if (data.stateVector) {
         const map = ensureDecodedSV(data);
         for (const [client, clock] of map.entries()) {
-            const current = serverSVMap.get(client) || 0;
-            if (clock > current) {
-                serverSVMap.set(client, clock);
-            }
+            raiseClock(serverSVMap, client, clock);
         }
     }
 }

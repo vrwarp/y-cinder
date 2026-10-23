@@ -22,14 +22,18 @@ describe('FireProvider Integration (Emulator)', () => {
     let app: any;
     let db: any;
 
+    const providers: FireProvider[] = [];
+
     // Helper to create provider connected to emulator
     const createProvider = (doc: Y.Doc, path: string, config: any = {}) => {
-        return new FireProvider({
+        const provider = new FireProvider({
             firebaseApp: app,
             ydoc: doc,
             path,
             ...config
         });
+        providers.push(provider);
+        return provider;
     }
 
     beforeEach(async () => {
@@ -40,7 +44,10 @@ describe('FireProvider Integration (Emulator)', () => {
     });
 
     afterEach(async () => {
-        // await clearFirestore(db);
+        // Covers providers whose test failed or timed out before reaching destroy()
+        for (const p of providers.splice(0)) {
+            await p.destroy().catch(() => { /* already destroyed */ });
+        }
     });
 
     let counter = 0;
@@ -66,8 +73,8 @@ describe('FireProvider Integration (Emulator)', () => {
 
         expect(doc2.getText('content').toString()).toBe('Hello World');
 
-        provider1.destroy();
-        provider2.destroy();
+        await provider1.destroy();
+        await provider2.destroy();
     });
 
     it('should persist data after restart', async () => {
@@ -81,7 +88,7 @@ describe('FireProvider Integration (Emulator)', () => {
         // Wait for it to verify local update is processed locally? No, waiting for nothing.
         // We wait a bit for save to firestore.
         await new Promise(r => setTimeout(r, 500));
-        provider1.destroy();
+        await provider1.destroy();
 
         // Restart
         const doc2 = new Y.Doc();
@@ -95,7 +102,7 @@ describe('FireProvider Integration (Emulator)', () => {
 
         expect(doc2.getText('content').toString()).toBe('Persisted Data');
 
-        provider2.destroy();
+        await provider2.destroy();
     });
 
     it('should perform compaction on emulator', { timeout: 35000 }, async () => {
@@ -126,7 +133,7 @@ describe('FireProvider Integration (Emulator)', () => {
 
         expect(doc2.getText('content').toString()).toBe('ABC');
 
-        provider.destroy();
-        provider2.destroy();
+        await provider.destroy();
+        await provider2.destroy();
     });
 });

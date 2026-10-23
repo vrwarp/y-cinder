@@ -100,7 +100,7 @@ describe('FireProvider History Compaction', () => {
         expect(historySnap.empty).toBe(true);
         expect(updatesSnap.empty).toBe(true);
 
-        provider.destroy();
+        await provider.destroy();
 
         const ydoc2 = new Y.Doc();
         const provider2 = new FireProvider({
@@ -120,6 +120,6 @@ describe('FireProvider History Compaction', () => {
         expect(text).toContain('History');
         expect(text).toContain('Update');
 
-        provider2.destroy();
+        await provider2.destroy();
     });
 });

@@ -102,7 +102,7 @@ describe('FireProvider Error Recovery (Emulator)', () => {
         // If current code is buggy, this expect will fail.
         expect(doc2.getText('content').toString()).toBe('Critical Data');
 
-        provider1.destroy();
-        provider2.destroy();
+        await provider1.destroy();
+        await provider2.destroy();
     });
 });

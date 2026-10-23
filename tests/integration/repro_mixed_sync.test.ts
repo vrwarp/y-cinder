@@ -78,7 +78,7 @@ describe('FireProvider Sync Reproduction (Non-Empty)', () => {
         const text3 = doc3.getText('content').toString();
         expect(text3).toContain('World');
 
-        provider2.destroy();
-        provider3.destroy();
+        await provider2.destroy();
+        await provider3.destroy();
     });
 });

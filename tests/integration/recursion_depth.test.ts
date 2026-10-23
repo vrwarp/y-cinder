@@ -76,7 +76,7 @@ describe('FireProvider Recursion Depth Guard (Emulator)', () => {
 
         expect(reachedDepth).toBeLessThanOrEqual(50);
 
-        rootProvider.destroy();
+        await rootProvider.destroy();
     }, 60000);
     it('should emit connection-error when recursion depth limit is reached', async () => {
         const path = `depth-tests/signal-${getStableDate()}-${counter++}`;
@@ -124,6 +124,6 @@ describe('FireProvider Recursion Depth Guard (Emulator)', () => {
         expect(errorArgs.code).toBe('recursion-limit');
         expect(errorArgs.path).toContain(subdoc2.guid);
 
-        rootProvider.destroy();
+        await rootProvider.destroy();
     });
 });

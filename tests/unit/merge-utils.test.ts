@@ -399,6 +399,47 @@ describe('worker path', () => {
         expect(worker.terminated).toBe(true);
     });
 
+    it('revokes the worker object URL on termination, once', async () => {
+        const revoke = vi.fn();
+        g.URL.revokeObjectURL = revoke;
+        const mod = await loadModule();
+
+        expect(mod.isWorkerMergeAvailable()).toBe(true);
+        expect(revoke).not.toHaveBeenCalled();
+        mod.terminateMergeWorker();
+        mod.terminateMergeWorker();
+
+        expect(revoke).toHaveBeenCalledTimes(1);
+        expect(revoke).toHaveBeenCalledWith('blob:fake');
+    });
+
+    it('terminates the crashed worker and revokes its object URL', async () => {
+        const revoke = vi.fn();
+        g.URL.revokeObjectURL = revoke;
+        const mod = await loadModule();
+        const promise = mod.mergeUpdatesAsync([makeUpdate(1, 1)]);
+
+        await vi.waitFor(() => { expect(FakeWorker.latest().posted).toHaveLength(1); });
+
+        const worker = FakeWorker.latest();
+
+        worker.onerror?.({ message: 'boom' });
+
+        await expect(promise).rejects.toThrow('Worker crashed');
+        expect(worker.terminated).toBe(true);
+        expect(revoke).toHaveBeenCalledWith('blob:fake');
+    });
+
+    it('rejects, rather than hanging, when the worker answers without a result', async () => {
+        const mod = await loadModule();
+        const promise = mod.mergeUpdatesAsync([makeUpdate(1, 1)]);
+
+        await vi.waitFor(() => { expect(FakeWorker.latest().posted).toHaveLength(1); });
+        FakeWorker.latest().respond({});
+
+        await expect(promise).rejects.toThrow('Worker responded without a result');
+    });
+
     it('can restart after termination', async () => {
         const mod = await loadModule();
 

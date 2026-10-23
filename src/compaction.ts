@@ -77,7 +77,6 @@ import {
     deleteSetFitsInline,
     deltaSegmentFitsInline,
     effectiveFoldThreshold,
-    epochOf,
     foldDeleteSetPath,
     foldSnapshotPath,
     foldTailBaseClocks,
@@ -228,7 +227,7 @@ export async function compact(
     ctx: CompactionContext,
     attempt: number = 1
 ): Promise<CompactionResult> {
-    const { db, path, uid, lockTTL, compactionLimit, isDestroyed, testHooks, cachedClockOffset, storage } = ctx;
+    const { db, path, uid, lockTTL, compactionLimit, testHooks, cachedClockOffset, storage } = ctx;
     const historyFoldThreshold = (ctx.historyFoldThreshold ?? DEFAULTS.HISTORY_FOLD_THRESHOLD) + (ctx.beforeSquash ? 1 : 0);
 
     // The blobs earlier cycles left for this one: a peer's download that
@@ -541,7 +540,7 @@ export async function compact(
             );
         }
 
-        const nextVersion = currentVersion + 1;
+        const nextVersion = nextSnapshotVersion(currentVersion);
         const attemptId = generateSessionId();
         const storagePath = foldSnapshotPath(path, nextVersion, attemptId);
 

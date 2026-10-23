@@ -204,8 +204,8 @@ first, so delete rules there should not depend on `resource.data`: such a
 rule denies deleting a document that is already gone.
 
 Cloud Storage rules must also allow read/write under the same path prefix —
-compacted snapshots (`snapshot_v*.bin`) and oversized updates
-(`large_updates/*.bin`) are stored there, gzip-compressed with
+compacted snapshots (`snapshot_*.bin`, with `ds_*.bin` / `tail_*.bin`
+side blobs) and oversized updates (`large_updates/*.bin`) are stored there, gzip-compressed with
 `Content-Encoding: gzip` (served compressed and inflated by the HTTP
 stack, so `getBytes` returns the raw Yjs update):
 

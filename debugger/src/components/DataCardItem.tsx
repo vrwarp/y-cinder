@@ -3,9 +3,12 @@ import * as Y from 'yjs';
 import { getUint8Array, sanitizeYjsTypes } from '../utils/yjs-utils';
 import { PendingStructsBanner } from './PendingStructsBanner';
 
+/** Structs shown initially, and added per "Load Next" click. */
+const STRUCT_PAGE_SIZE = 250;
+
 export const DataCardItem = ({ data, renderData, theme, preStyle }: any) => {
     const [showRaw, setShowRaw] = useState(false);
-    const [structLimit, setStructLimit] = useState(250);
+    const [structLimit, setStructLimit] = useState(STRUCT_PAGE_SIZE);
 
     // Parse fields
     const createdBy = data.createdBy;
@@ -146,10 +149,10 @@ export const DataCardItem = ({ data, renderData, theme, preStyle }: any) => {
                     {structCount > structLimit && (
                         <div style={{ marginTop: '8px', textAlign: 'center' }}>
                             <button
-                                onClick={() => setStructLimit(prev => prev + 250)}
+                                onClick={() => setStructLimit(prev => prev + STRUCT_PAGE_SIZE)}
                                 style={{ background: theme.primary, border: 'none', borderRadius: '4px', color: '#fff', cursor: 'pointer', padding: '6px 12px', fontSize: '13px', fontWeight: 'bold' }}
                             >
-                                Load Next 250 Structs ({structLimit} / {structCount} shown)
+                                {`Load Next ${STRUCT_PAGE_SIZE} Structs (${structLimit} / ${structCount} shown)`}
                             </button>
                         </div>
                     )}

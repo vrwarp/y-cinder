@@ -167,6 +167,16 @@ export interface LockConfig {
 }
 
 /**
+ * The clock offset a lock operation judges ages with: the pre-measured
+ * `cachedClockOffset` when the caller has one, else a fresh measurement
+ * (which resolves to 0 when it fails, so this never rejects).
+ */
+async function resolveClockOffset(config: Pick<LockConfig, 'db' | 'path' | 'uid' | 'cachedClockOffset'>): Promise<number> {
+    const { db, path, uid, cachedClockOffset } = config;
+    return cachedClockOffset ?? await measureClockSkew(db, path, uid);
+}
+
+/**
  * Attempts to acquire a distributed lock for exclusive operations.
  * 
  * The lock uses a TTL-based expiry mechanism that's resilient to client
@@ -174,7 +184,7 @@ export interface LockConfig {
  * 
  * Lock acquisition succeeds if:
  * - No lock exists
- * - Existing lock is expired (age > TTL)
+ * - Existing lock is expired (age >= TTL)
  * - Existing lock is owned by us (re-entrant)
  * 
  * @param config - Lock configuration
@@ -193,17 +203,10 @@ export interface LockConfig {
  * ```
  */
 export async function acquireLock(config: LockConfig): Promise<boolean> {
-    const { db, path, uid, lockTTL, cachedClockOffset } = config;
+    const { db, path, uid, lockTTL } = config;
 
     // P0.3 FIX: Use cached offset if provided, otherwise measure (only on first call)
-    let serverOffset = cachedClockOffset ?? 0;
-    if (cachedClockOffset === undefined) {
-        try {
-            serverOffset = await measureClockSkew(db, path, uid);
-        } catch (e) {
-            console.warn("Failed to measure clock skew, defaulting to 0:", e);
-        }
-    }
+    const serverOffset = await resolveClockOffset(config);
 
     // Estimated Server Time
     const serverNow = estimateServerNow(Date.now(), serverOffset);
@@ -291,7 +294,7 @@ export async function checkLockStatus(config: LockConfig): Promise<{
     isExpired?: boolean;
     ageMs?: number;
 }> {
-    const { db, path, uid, lockTTL, cachedClockOffset } = config;
+    const { db, path, lockTTL } = config;
     const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
 
     try {
@@ -305,14 +308,7 @@ export async function checkLockStatus(config: LockConfig): Promise<{
         const createdAt = readLockCreatedAt(data.createdAt);
 
         // P1.1 FIX: Use cached clock offset for accurate age calculation
-        let serverOffset = cachedClockOffset ?? 0;
-        if (cachedClockOffset === undefined) {
-            try {
-                serverOffset = await measureClockSkew(db, path, uid);
-            } catch (e) {
-                console.warn("Failed to measure clock skew, defaulting to 0:", e);
-            }
-        }
+        const serverOffset = await resolveClockOffset(config);
 
         const ageMs = estimateServerNow(Date.now(), serverOffset) - createdAt;
 

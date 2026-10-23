@@ -39,9 +39,11 @@ export async function waitFor<T>(
     const interval = options.interval ?? DEFAULT_INTERVAL;
     const start = Date.now();
     let lastValue: T | undefined;
-    let lastError: any;
+    let lastError: unknown;
 
-    while (Date.now() - start < timeout) {
+    // Poll at least once, and once more at the deadline, so a condition that
+    // becomes true during the final sleep is not reported as a timeout.
+    for (;;) {
         try {
             lastValue = await getter();
             if (predicate(lastValue)) {
@@ -50,7 +52,9 @@ export async function waitFor<T>(
         } catch (e) {
             lastError = e;
         }
-        await new Promise(r => setTimeout(r, interval));
+        const remaining = timeout - (Date.now() - start);
+        if (remaining <= 0) break;
+        await new Promise(r => setTimeout(r, Math.min(interval, remaining)));
     }
 
     // Prepare detailed error message
@@ -67,7 +71,7 @@ export async function waitFor<T>(
             details = `\nLast value: [Unable to stringify]`;
         }
     } else if (lastError) {
-        details = `\nLast error: ${lastError.message}`;
+        details = `\nLast error: ${lastError instanceof Error ? lastError.message : String(lastError)}`;
     }
 
     if (options.onFailure) {

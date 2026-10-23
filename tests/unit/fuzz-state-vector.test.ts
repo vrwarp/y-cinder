@@ -72,6 +72,48 @@ describe('Fuzz: State Vector Operations', () => {
         });
     });
 
+    describe('writeStateVector round-trip', () => {
+        it('should decode back to the exact map that was encoded', () => {
+            const rng = new SeededRandom(SEED);
+
+            for (let i = 0; i < FUZZ_ITERATIONS; i++) {
+                const numClients = rng.int(0, 10);
+                const sv = new Map<number, number>();
+                for (let j = 0; j < numClients; j++) {
+                    sv.set(rng.int(0, 1000000), rng.int(0, 100000));
+                }
+
+                const decoded = Y.decodeStateVector(writeStateVector(sv));
+
+                expect(decoded).toEqual(sv);
+            }
+        });
+
+        it('should match the encoding Yjs produces for a real document', () => {
+            const doc = new Y.Doc();
+            doc.getText('test').insert(0, 'hello');
+            doc.getMap('map').set('k', 'v');
+
+            const sv = Y.decodeStateVector(Y.encodeStateVector(doc));
+
+            expect(sv.size).toBeGreaterThan(0);
+            expect(Y.decodeStateVector(writeStateVector(sv))).toEqual(sv);
+            doc.destroy();
+        });
+
+        it('should round-trip the empty and extreme-valued vectors', () => {
+            const cases: Array<Map<number, number>> = [
+                new Map(),
+                new Map([[Number.MAX_SAFE_INTEGER - 1000, 100]]),
+                new Map([[100, Number.MAX_SAFE_INTEGER - 1000]]),
+            ];
+
+            for (const sv of cases) {
+                expect(Y.decodeStateVector(writeStateVector(sv))).toEqual(sv);
+            }
+        });
+    });
+
     describe('edge cases', () => {
         it('should handle empty state vector', () => {
             const sv = new Map<number, number>();

@@ -54,7 +54,7 @@ import {
     limit,
 } from "@firebase/firestore";
 import { ref, deleteObject, getBytes, FirebaseStorage } from "@firebase/storage";
-import { toBase64, fromBase64 } from "lib0/buffer";
+import { toBase64 } from "lib0/buffer";
 import * as Y from "yjs";
 import { DEFAULTS, FIRESTORE_PATHS } from "./types";
 import { acquireLock, releaseLock } from "./locking";
@@ -440,6 +440,14 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
         // blob, and compaction deletes it unread.
         if (result.success) {
             await reclaimUpdateBlobs(ctx, deletedBlobs.map(blobPath => ({ path: blobPath })));
+        }
+
+        // The transaction committed nothing (the live doc changed after the
+        // clone), so nothing references the snapshot uploaded above.
+        if (!result.success) {
+            try {
+                await deleteObject(ref(storage, storagePath));
+            } catch { /* orphaned blob is harmless */ }
         }
 
         // Best-effort cleanup of the previous epoch's blobs

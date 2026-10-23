@@ -3,6 +3,8 @@ Design Document: Tiered Recursive Architecture
 
 **Status:** Final Specification **Objective:** Infinite Nesting & Large Document Support **Target:** `src/provider.ts`
 
+> **Historical document.** This is the original design, written for `y-fire`. The implementation has since diverged: the base snapshot is stored in Cloud Storage and referenced by `snapshotStoragePath` (the inline `content` field is only read for legacy documents), and the root path is whatever `path` the caller passes to `FireProvider`. See `README.md` and `docs/performance.md` for current behavior.
+
 1\. Executive Summary
 ---------------------
 

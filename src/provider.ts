@@ -32,7 +32,6 @@ import { ObservableV2 } from "lib0/observable";
 import {
   FireProviderConfig,
   DEFAULTS,
-  FIREBASE_ORIGINS,
   FIRESTORE_PATHS,
 } from "./types";
 import { generateSessionId, calculateBackoff } from "./utils";

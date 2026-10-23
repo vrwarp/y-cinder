@@ -146,14 +146,14 @@ describe('main-thread fallback (no Worker in the environment)', () => {
         const mod = await loadModule();
 
         await expect(mod.mergeUpdatesAsync([makeUpdate(1, 1), new Uint8Array([255, 255, 255, 255])]))
-            .rejects.toBeDefined();
+            .rejects.toBeInstanceOf(Error);
     });
 
     it('rejects a corrupt single update on the metadata path compaction uses', async () => {
         const mod = await loadModule();
 
         await expect(mod.mergeUpdatesWithMetaAsync([new Uint8Array([255, 255, 255, 255])]))
-            .rejects.toBeDefined();
+            .rejects.toBeInstanceOf(Error);
     });
 
     it('diffs an update against a state vector on the main thread', async () => {
@@ -171,7 +171,7 @@ describe('main-thread fallback (no Worker in the environment)', () => {
         const mod = await loadModule();
 
         await expect(mod.diffUpdateAsync(new Uint8Array([255, 255, 255, 255]), new Uint8Array([0])))
-            .rejects.toBeDefined();
+            .rejects.toBeInstanceOf(Error);
     });
 
     it('derives merge metadata on the main thread', async () => {
@@ -180,7 +180,7 @@ describe('main-thread fallback (no Worker in the environment)', () => {
 
         expect(meta.result.byteLength).toBeGreaterThan(0);
         expect(meta.stateVector.byteLength).toBeGreaterThan(0);
-        expect(meta.dsUpdate).toBeDefined();
+        expect(meta.dsUpdate).toBeInstanceOf(Uint8Array);
     });
 });
 
@@ -248,7 +248,7 @@ describe('worker path', () => {
         const meta = await promise;
 
         expect(meta.stateVector.byteLength).toBeGreaterThan(0);
-        expect(meta.dsUpdate).toBeDefined();
+        expect(meta.dsUpdate).toBeInstanceOf(Uint8Array);
     });
 
     it('routes an upload gzip through the worker; a worker error means upload raw', async () => {
@@ -397,6 +397,47 @@ describe('worker path', () => {
 
         await expect(promise).rejects.toThrow('Merge worker terminated');
         expect(worker.terminated).toBe(true);
+    });
+
+    it('revokes the worker object URL on termination, once', async () => {
+        const revoke = vi.fn();
+        g.URL.revokeObjectURL = revoke;
+        const mod = await loadModule();
+
+        expect(mod.isWorkerMergeAvailable()).toBe(true);
+        expect(revoke).not.toHaveBeenCalled();
+        mod.terminateMergeWorker();
+        mod.terminateMergeWorker();
+
+        expect(revoke).toHaveBeenCalledTimes(1);
+        expect(revoke).toHaveBeenCalledWith('blob:fake');
+    });
+
+    it('terminates the crashed worker and revokes its object URL', async () => {
+        const revoke = vi.fn();
+        g.URL.revokeObjectURL = revoke;
+        const mod = await loadModule();
+        const promise = mod.mergeUpdatesAsync([makeUpdate(1, 1)]);
+
+        await vi.waitFor(() => { expect(FakeWorker.latest().posted).toHaveLength(1); });
+
+        const worker = FakeWorker.latest();
+
+        worker.onerror?.({ message: 'boom' });
+
+        await expect(promise).rejects.toThrow('Worker crashed');
+        expect(worker.terminated).toBe(true);
+        expect(revoke).toHaveBeenCalledWith('blob:fake');
+    });
+
+    it('rejects, rather than hanging, when the worker answers without a result', async () => {
+        const mod = await loadModule();
+        const promise = mod.mergeUpdatesAsync([makeUpdate(1, 1)]);
+
+        await vi.waitFor(() => { expect(FakeWorker.latest().posted).toHaveLength(1); });
+        FakeWorker.latest().respond({});
+
+        await expect(promise).rejects.toThrow('Worker responded without a result');
     });
 
     it('can restart after termination', async () => {

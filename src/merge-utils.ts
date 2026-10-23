@@ -43,6 +43,8 @@ interface WorkerResponse {
 
 // Worker instance (lazily initialized, singleton)
 let mergeWorker: Worker | null = null;
+// Object URL the worker was created from; revoked once the worker is gone
+let workerUrl: string | null = null;
 let workerInitialized = false;
 let workerSupported = true; // Assume supported until proven otherwise
 
@@ -75,6 +77,20 @@ function generateRequestId(): string {
     return `merge-${requestIdCounter++}-${Date.now()}`;
 }
 
+/** Releases the object URL the worker script was loaded from. */
+function revokeWorkerUrl(): void {
+    if (workerUrl === null) {
+        return;
+    }
+    const url = workerUrl;
+    workerUrl = null;
+    try {
+        URL.revokeObjectURL(url);
+    } catch {
+        // Nothing to release if the environment cannot revoke it
+    }
+}
+
 /**
  * Initialize the merge worker (lazy, singleton pattern).
  * Returns true if worker is available, false otherwise.
@@ -96,7 +112,7 @@ function initWorker(): boolean {
     try {
         // Create worker from pre-bundled code (no external network requests)
         const blob = new Blob([MERGE_WORKER_CODE], { type: 'application/javascript' });
-        const workerUrl = URL.createObjectURL(blob);
+        workerUrl = URL.createObjectURL(blob);
         mergeWorker = new Worker(workerUrl);
 
         // Handle worker messages
@@ -121,6 +137,10 @@ function initWorker(): boolean {
                 pending.reject(new Error(error));
             } else if (result) {
                 pending.resolve({ result, stateVector, dsUpdate });
+            } else {
+                // Already removed from pendingRequests with its timer cleared,
+                // so without this the caller would wait forever.
+                pending.reject(new Error('Worker responded without a result'));
             }
         };
 
@@ -136,13 +156,17 @@ function initWorker(): boolean {
 
             // Disable worker and fall back to main thread
             workerSupported = false;
+            mergeWorker?.terminate();
             mergeWorker = null;
+            revokeWorkerUrl();
         };
 
         return true;
     } catch (err) {
         console.debug('Failed to create merge worker, using main thread:', err);
         workerSupported = false;
+        mergeWorker = null;
+        revokeWorkerUrl();
         return false;
     }
 }
@@ -344,6 +368,7 @@ export function terminateMergeWorker(): void {
         mergeWorker.terminate();
         mergeWorker = null;
     }
+    revokeWorkerUrl();
     pendingRequests.forEach((pending) => {
         clearTimeout(pending.timer);
         pending.reject(new Error('Merge worker terminated'));

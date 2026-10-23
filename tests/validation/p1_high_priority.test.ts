@@ -44,13 +44,20 @@ describe('P1 High Priority Issue Validation', () => {
     let app: any;
     let db: any;
 
+    // Every provider is destroyed in afterEach, so one that a failing
+    // assertion or timed-out wait never reached destroy() on cannot keep its
+    // listeners and timers alive into later tests.
+    const providers: FireProvider[] = [];
+
     const createProvider = (ydoc: Y.Doc, path: string, config: any = {}) => {
-        return new FireProvider({
+        const provider = new FireProvider({
             firebaseApp: app,
             ydoc,
             path,
             ...config,
         });
+        providers.push(provider);
+        return provider;
     };
 
     beforeEach(async () => {
@@ -61,7 +68,10 @@ describe('P1 High Priority Issue Validation', () => {
         await clearFirestore(db);
     });
 
-    afterEach(() => {
+    afterEach(async () => {
+        for (const p of providers.splice(0)) {
+            await p.destroy().catch(() => { /* already destroyed */ });
+        }
         vi.restoreAllMocks();
     });
 

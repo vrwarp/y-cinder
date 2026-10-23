@@ -20,7 +20,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FireProvider } from '../../src/provider';
 import * as Y from 'yjs';
 import { setupEmulator, clearFirestore } from '../utils/emulator';
-import { waitForConditionGreaterThan, waitForConditionTruthy } from '../utils/wait';
+import { waitForConditionEquals, waitForConditionGreaterThan, waitForConditionTruthy } from '../utils/wait';
 import {
     collection,
     addDoc,
@@ -41,13 +41,20 @@ describe('P0 Critical Issue Validation', () => {
     let app: any;
     let db: any;
 
+    // Every provider is destroyed in afterEach, so one that a failing
+    // assertion or timed-out wait never reached destroy() on cannot keep its
+    // listeners and timers alive into later tests.
+    const providers: FireProvider[] = [];
+
     const createProvider = (ydoc: Y.Doc, path: string, config: any = {}) => {
-        return new FireProvider({
+        const provider = new FireProvider({
             firebaseApp: app,
             ydoc,
             path,
             ...config,
         });
+        providers.push(provider);
+        return provider;
     };
 
     beforeEach(async () => {
@@ -57,7 +64,10 @@ describe('P0 Critical Issue Validation', () => {
         await clearFirestore(db);
     });
 
-    afterEach(() => {
+    afterEach(async () => {
+        for (const p of providers.splice(0)) {
+            await p.destroy().catch(() => { /* already destroyed */ });
+        }
         vi.restoreAllMocks();
     });
 
@@ -92,22 +102,18 @@ describe('P0 Critical Issue Validation', () => {
                 });
             }
 
-            // Track memory/calls during sync
-            let getDocsCalls = 0;
-            let maxDocsPerCall = 0;
-
-            const originalGetDocs = getDocs;
-            // Note: This spy pattern may not work perfectly with Firebase SDK
-            // A proper test would instrument the sync module directly
-
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path);
 
-            // Wait for sync to complete
-            await waitForConditionGreaterThan(
+            // Each update came from its own doc (own clientID), so a complete
+            // sync holds every inserted string. Waiting for the first one only
+            // would pass on a partial load.
+            const expectedLength = Array.from({ length: numUpdates }, (_, i) => `update-${i}`.length)
+                .reduce((a, b) => a + b, 0);
+            await waitForConditionEquals(
                 () => ydoc.getText('x').toString().length,
-                0,
-                { timeout: 30000, message: 'Sync should complete' }
+                expectedLength,
+                { timeout: 30000, message: 'Sync should load every update' }
             );
 
             await provider.destroy();
@@ -117,8 +123,8 @@ describe('P0 Critical Issue Validation', () => {
             // This test documents expectations - adjust assertions based on fix
             console.log(`P0.1: Synced ${numUpdates} updates`);
 
-            // For now, just verify sync works - pagination assertion added after fix
-            expect(ydoc.getText('x').toString().length).toBeGreaterThan(0);
+            // For now, just verify sync loads everything - pagination assertion added after fix
+            expect(ydoc.getText('x').toString().length).toBe(expectedLength);
         });
 
         it('should handle thousands of history segments without OOM', async () => {
@@ -141,15 +147,18 @@ describe('P0 Critical Issue Validation', () => {
             const ydoc = new Y.Doc();
             const provider = createProvider(ydoc, path);
 
-            await waitForConditionTruthy(
-                () => ydoc.getText('x').toString().includes('seg-'),
-                { timeout: 30000, message: 'History sync should complete' }
+            const expectedLength = Array.from({ length: numSegments }, (_, i) => `seg-${i}`.length)
+                .reduce((a, b) => a + b, 0);
+            await waitForConditionEquals(
+                () => ydoc.getText('x').toString().length,
+                expectedLength,
+                { timeout: 30000, message: 'History sync should load every segment' }
             );
 
             await provider.destroy();
 
             // Document expectation: with pagination, memory stays bounded
-            expect(ydoc.getText('x').toString()).toContain('seg-');
+            expect(ydoc.getText('x').toString().length).toBe(expectedLength);
         });
     });
 

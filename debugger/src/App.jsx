@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { initializeApp, getApps, getApp, deleteApp } from 'firebase/app';
+import { initializeApp, getApps, deleteApp } from 'firebase/app';
 import { getFirestore, doc, getDoc, collection, getDocs, connectFirestoreEmulator } from 'firebase/firestore';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 import { getStorage, connectStorageEmulator, ref as storageRef, getBytes } from 'firebase/storage';
 import * as Y from 'yjs';
-import { mergeUpdatesAsync } from 'y-cinder';
 
 import { extractYDocState, getUint8Array, validateBlob, formatDataForDisplay } from './utils/yjs-utils';
 import { parseFirebaseConfig } from './utils/config-parser';
@@ -92,6 +91,7 @@ function App() {
 
       setDb(firestore);
       setStorage(storageInstance);
+      setError(null);
 
       if (!useEmulator) {
         const auth = getAuth(app);
@@ -106,8 +106,6 @@ function App() {
         setAuthInstance(null);
         setUser(null);
       }
-
-      setError(null);
     } catch (err) {
       console.error("Firebase init error:", err);
       setError(`Failed to initialize Firebase: ${err.message}`);
@@ -380,23 +378,24 @@ function App() {
             </label>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>Project ID</label>
-              <input style={inputStyle} value={projectId} onChange={e => setProjectId(e.target.value)} />
+              <label htmlFor="project-id" style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>Project ID</label>
+              <input id="project-id" style={inputStyle} value={projectId} onChange={e => setProjectId(e.target.value)} />
 
               {!useEmulator && (
                 <>
-                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>API Key</label>
-                  <input style={inputStyle} value={apiKey} onChange={e => setApiKey(e.target.value)} />
+                  <label htmlFor="api-key" style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>API Key</label>
+                  <input id="api-key" style={inputStyle} value={apiKey} onChange={e => setApiKey(e.target.value)} />
 
-                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>App ID</label>
-                  <input style={inputStyle} value={appId} onChange={e => setAppId(e.target.value)} />
+                  <label htmlFor="app-id" style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>App ID</label>
+                  <input id="app-id" style={inputStyle} value={appId} onChange={e => setAppId(e.target.value)} />
 
-                  <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>Auth Domain</label>
-                  <input style={inputStyle} value={authDomain} onChange={e => setAuthDomain(e.target.value)} />
+                  <label htmlFor="auth-domain" style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted }}>Auth Domain</label>
+                  <input id="auth-domain" style={inputStyle} value={authDomain} onChange={e => setAuthDomain(e.target.value)} />
 
                   <div style={{ marginTop: '12px', borderTop: `1px solid ${theme.border}`, paddingTop: '12px' }}>
-                    <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, display: 'block', marginBottom: '4px' }}>Paste Config Object</label>
+                    <label htmlFor="pasted-config" style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, display: 'block', marginBottom: '4px' }}>Paste Config Object</label>
                     <textarea
+                      id="pasted-config"
                       value={pastedConfig}
                       onChange={e => setPastedConfig(e.target.value)}
                       placeholder={`const firebaseConfig = {\n  apiKey: "...",\n  ...\n};`}
@@ -428,8 +427,9 @@ function App() {
 
           <div style={panelStyle}>
             <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '16px', borderBottom: `1px solid ${theme.border}`, paddingBottom: '8px' }}>Document Loader</h3>
-            <label style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, display: 'block', marginBottom: '4px' }}>Firestore Document Path</label>
+            <label htmlFor="doc-path" style={{ fontSize: '12px', fontWeight: 'bold', color: theme.textMuted, display: 'block', marginBottom: '4px' }}>Firestore Document Path</label>
             <input
+              id="doc-path"
               style={inputStyle}
               value={docPath}
               onChange={e => setDocPath(e.target.value)}

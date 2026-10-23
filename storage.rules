@@ -1,10 +1,13 @@
 rules_version = '2';
+// Emulator-only rules (see firebase.json). The test prefixes below are open
+// to everyone, so do NOT deploy this file to a production project: replace
+// the placeholder path with the document paths you sync and drop the rest.
 service firebase.storage {
   match /b/{bucket}/o {
     match /path/to/your/document/{allPaths=**} {
       allow read, write: if request.auth != null;
     }
-    // Emulator test path fallback (safe for testing)
+    // Emulator test paths used by the test suite (open on purpose)
     match /tests/{allPaths=**} {
       allow read, write: if true;
     }

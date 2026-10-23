@@ -82,8 +82,8 @@ describe('FireProvider Advanced Integration (Emulator)', () => {
             { timeout: 15000, interval: 100, message: 'Subdoc content should sync to Client 2' }
         );
 
-        provider1.destroy();
-        provider2.destroy();
+        await provider1.destroy();
+        await provider2.destroy();
     }, 40000);
 
     it('should handle concurrent edits from multiple clients', async () => {

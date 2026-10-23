@@ -188,8 +188,8 @@ describe('FireProvider Comprehensive Integration (Emulator)', () => {
 
         expect(grandChild2!.getText('deep').toString()).toBe('Deep Secret');
 
-        provider1.destroy();
-        provider2.destroy();
+        await provider1.destroy();
+        await provider2.destroy();
     }, 60000);
 
     it('should handle large payloads gracefully (reject or error)', async () => {

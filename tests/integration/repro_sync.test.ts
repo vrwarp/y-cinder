@@ -56,7 +56,7 @@ describe('FireProvider Sync Reproduction', () => {
         );
         expect(doc2.getText('content').toString()).toBe('Initial Content');
 
-        provider1.destroy();
-        provider2.destroy();
+        await provider1.destroy();
+        await provider2.destroy();
     });
 });

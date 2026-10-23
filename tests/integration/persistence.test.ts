@@ -26,6 +26,18 @@ vi.mock('@firebase/storage', async (importOriginal) => {
 describe('FireProvider Persistence', () => {
     let mockApp: any;
     let doc: Y.Doc;
+    const providers: FireProvider[] = [];
+
+    const createProvider = (config: Record<string, unknown> = {}) => {
+        const provider = new FireProvider({
+            firebaseApp: mockApp,
+            ydoc: doc,
+            path: 'test/doc',
+            ...config,
+        });
+        providers.push(provider);
+        return provider;
+    };
 
     beforeEach(() => {
         mockApp = { name: '[DEFAULT]' };
@@ -33,24 +45,23 @@ describe('FireProvider Persistence', () => {
         vi.clearAllMocks();
     });
 
+    // The constructor starts an initial sync against the mock db; stop it so
+    // its retry timers do not outlive the test.
+    afterEach(async () => {
+        for (const p of providers.splice(0)) {
+            await p.destroy().catch(() => { /* sync never started */ });
+        }
+    });
+
     it('should use getFirestore by default (persistence disabled)', () => {
-        new FireProvider({
-            firebaseApp: mockApp,
-            ydoc: doc,
-            path: 'test/doc'
-        });
+        createProvider();
 
         expect(firestore.getFirestore).toHaveBeenCalledWith(mockApp);
         expect(firestore.initializeFirestore).not.toHaveBeenCalled();
     });
 
     it('should use initializeFirestore when persistence is enabled', () => {
-        new FireProvider({
-            firebaseApp: mockApp,
-            ydoc: doc,
-            path: 'test/doc',
-            persistence: { enabled: true }
-        });
+        createProvider({ persistence: { enabled: true } });
 
         expect(firestore.initializeFirestore).toHaveBeenCalledWith(mockApp, expect.objectContaining({
             localCache: expect.objectContaining({ type: 'persistent-cache' })
@@ -66,12 +77,7 @@ describe('FireProvider Persistence', () => {
             throw err;
         });
 
-        new FireProvider({
-            firebaseApp: mockApp,
-            ydoc: doc,
-            path: 'test/doc',
-            persistence: { enabled: true }
-        });
+        createProvider({ persistence: { enabled: true } });
 
         expect(firestore.initializeFirestore).toHaveBeenCalled();
         expect(firestore.getFirestore).toHaveBeenCalledWith(mockApp);
@@ -84,12 +90,7 @@ describe('FireProvider Persistence', () => {
         });
 
         expect(() => {
-            new FireProvider({
-                firebaseApp: mockApp,
-                ydoc: doc,
-                path: 'test/doc',
-                persistence: { enabled: true }
-            });
+            createProvider({ persistence: { enabled: true } });
         }).toThrow('Unknown error');
     });
 });

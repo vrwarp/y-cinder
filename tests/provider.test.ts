@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { FireProvider } from '../src/provider';
 import * as Y from 'yjs';
 import * as firestore from '@firebase/firestore';
@@ -46,9 +46,23 @@ describe('FireProvider', () => {
     let firebaseApp: any = {};
     const path = 'test-collection/doc-id';
 
+    const providers: FireProvider[] = [];
+    const createProvider = (config: Record<string, unknown> = {}) => {
+        const provider = new FireProvider({ firebaseApp, ydoc, path, ...config });
+        providers.push(provider);
+        return provider;
+    };
+
     beforeEach(() => {
         ydoc = new Y.Doc();
         vi.clearAllMocks();
+    });
+
+    // Runs even when an assertion throws, so a failing test cannot leak fake
+    // timers or a live provider into the next one.
+    afterEach(async () => {
+        vi.useRealTimers();
+        await Promise.all(providers.splice(0).map(p => p.destroy()));
     });
 
     /**
@@ -61,23 +75,21 @@ describe('FireProvider', () => {
         new Promise<void>(resolve => provider.on('sync', () => resolve()));
 
     it('should initialize and start sync', async () => {
-        const provider = new FireProvider({ firebaseApp, ydoc, path });
+        const provider = createProvider();
 
-        // Sync is async in constructor. Wait for microtasks and clock skew measurement.
-        await new Promise(resolve => setTimeout(resolve, 50));
+        // Sync runs asynchronously after construction (includes clock skew measurement).
+        await initialSync(provider);
 
         expect(firestore.getFirestore).toHaveBeenCalledWith(firebaseApp);
         // Sync should trigger getDoc (base) and getDocs (history) and onSnapshot (updates)
         expect(firestore.getDoc).toHaveBeenCalled();
         expect(firestore.getDocs).toHaveBeenCalled();
         expect(firestore.onSnapshot).toHaveBeenCalled();
-
-        provider.destroy();
     });
 
     it('should debounce updates and save to firestore', async () => {
         vi.useFakeTimers();
-        const provider = new FireProvider({ firebaseApp, ydoc, path, maxWaitTime: 100 });
+        const provider = createProvider({ maxWaitTime: 100 });
         await initialSync(provider);
 
         // Mock addDoc
@@ -94,14 +106,11 @@ describe('FireProvider', () => {
         vi.advanceTimersByTime(110);
 
         expect(addDocSpy).toHaveBeenCalled();
-
-        vi.useRealTimers();
-        provider.destroy();
     });
 
     it("should emit 'saved' with the commit time after a successful save", async () => {
         vi.useFakeTimers();
-        const provider = new FireProvider({ firebaseApp, ydoc, path, maxWaitTime: 100 });
+        const provider = createProvider({ maxWaitTime: 100 });
         await initialSync(provider);
         (firestore.addDoc as any).mockResolvedValue({ id: 'doc-id' });
 
@@ -118,14 +127,11 @@ describe('FireProvider', () => {
         expect(firestore.addDoc).toHaveBeenCalledTimes(1);
         expect(savedAts).toHaveLength(1);
         expect(savedAts[0]).toBeGreaterThanOrEqual(before);
-
-        vi.useRealTimers();
-        await provider.destroy();
     });
 
     it("should NOT emit 'saved' when the save fails", async () => {
         vi.useFakeTimers();
-        const provider = new FireProvider({ firebaseApp, ydoc, path, maxWaitTime: 100 });
+        const provider = createProvider({ maxWaitTime: 100 });
         await initialSync(provider);
         (firestore.addDoc as any).mockRejectedValue(new Error('transient network failure'));
 
@@ -140,17 +146,14 @@ describe('FireProvider', () => {
 
         expect(firestore.addDoc).toHaveBeenCalled();
         expect(savedAts).toHaveLength(0);
-
-        vi.useRealTimers();
-        await provider.destroy();
     });
 
     it('should trigger compaction when updates exceed threshold', async () => {
-        const provider = new FireProvider({ firebaseApp, ydoc, path, maxUpdatesThreshold: 5 });
+        const provider = createProvider({ maxUpdatesThreshold: 5 });
         const compactSpy = vi.spyOn(provider, 'compact');
 
-        // Wait for sync to reach onSnapshot subscribe (includes clock skew measurement)
-        await new Promise(resolve => setTimeout(resolve, 50));
+        // Initial sync subscribes to onSnapshot before it completes
+        await initialSync(provider);
 
         // Mock onSnapshot callback
         const onSnapshotMock = firestore.onSnapshot as any;
@@ -168,7 +171,5 @@ describe('FireProvider', () => {
         await callback(mockSnapshot);
 
         expect(compactSpy).toHaveBeenCalled();
-
-        provider.destroy();
     });
 });

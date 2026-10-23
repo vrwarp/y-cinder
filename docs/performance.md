@@ -388,7 +388,7 @@ ever wrote — and versicle mints a new client every page load).
 | fingerprint re-apply per snapshot delivery | 0.4 ms | 12 ms | +1.0 ms |
 
 Every row is linear in age with no plateau. The same document measured
-through y-idb (its own `benchmarks/aging.mjs`, fake-indexeddb): hydration
+through y-idb (that repo's own `benchmarks/aging.mjs`, fake-indexeddb): hydration
 on every boot grew 37 ms → 1,004 ms, and the trim's full-document
 re-encode drove write amplification from 1.8× to 9.1× and climbing.
 

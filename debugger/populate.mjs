@@ -36,4 +36,7 @@ async function populate() {
     process.exit(0);
 }
 
-populate().catch(console.error);
+populate().catch((err) => {
+    console.error(err);
+    process.exit(1);
+});

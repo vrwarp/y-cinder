@@ -188,7 +188,7 @@ export function shouldFoldWithoutUpdates(params: {
     maxHistory?: number;
 }): boolean {
     const { hasBase, historyCount, historyTruncated, historyFoldThreshold, maxHistory = DEFAULTS.MAX_COMPACTION_HISTORY } = params;
-    const foldThreshold = Math.min(historyFoldThreshold, maxHistory + 1);
+    const foldThreshold = effectiveFoldThreshold(historyFoldThreshold, maxHistory);
 
     return historyCount > 0
         && (!hasBase || historyTruncated || historyCount + 1 >= foldThreshold);
@@ -230,7 +230,7 @@ export function shouldDeferCompaction(params: {
     hardCap?: number;
 }): boolean {
     const { minUpdates, updateCount, updateLimit, historyCount, historyFoldThreshold, maxHistory = DEFAULTS.MAX_COMPACTION_HISTORY, hardCap = DEFAULTS.REALTIME_LIMIT } = params;
-    const foldThreshold = Math.min(historyFoldThreshold, maxHistory + 1);
+    const foldThreshold = effectiveFoldThreshold(historyFoldThreshold, maxHistory);
 
     return updateCount < Math.min(minUpdates, updateLimit, hardCap)
         && historyCount + 1 < foldThreshold;

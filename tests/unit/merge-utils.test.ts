@@ -146,14 +146,14 @@ describe('main-thread fallback (no Worker in the environment)', () => {
         const mod = await loadModule();
 
         await expect(mod.mergeUpdatesAsync([makeUpdate(1, 1), new Uint8Array([255, 255, 255, 255])]))
-            .rejects.toBeDefined();
+            .rejects.toBeInstanceOf(Error);
     });
 
     it('rejects a corrupt single update on the metadata path compaction uses', async () => {
         const mod = await loadModule();
 
         await expect(mod.mergeUpdatesWithMetaAsync([new Uint8Array([255, 255, 255, 255])]))
-            .rejects.toBeDefined();
+            .rejects.toBeInstanceOf(Error);
     });
 
     it('diffs an update against a state vector on the main thread', async () => {
@@ -171,7 +171,7 @@ describe('main-thread fallback (no Worker in the environment)', () => {
         const mod = await loadModule();
 
         await expect(mod.diffUpdateAsync(new Uint8Array([255, 255, 255, 255]), new Uint8Array([0])))
-            .rejects.toBeDefined();
+            .rejects.toBeInstanceOf(Error);
     });
 
     it('derives merge metadata on the main thread', async () => {
@@ -180,7 +180,7 @@ describe('main-thread fallback (no Worker in the environment)', () => {
 
         expect(meta.result.byteLength).toBeGreaterThan(0);
         expect(meta.stateVector.byteLength).toBeGreaterThan(0);
-        expect(meta.dsUpdate).toBeDefined();
+        expect(meta.dsUpdate).toBeInstanceOf(Uint8Array);
     });
 });
 
@@ -248,7 +248,7 @@ describe('worker path', () => {
         const meta = await promise;
 
         expect(meta.stateVector.byteLength).toBeGreaterThan(0);
-        expect(meta.dsUpdate).toBeDefined();
+        expect(meta.dsUpdate).toBeInstanceOf(Uint8Array);
     });
 
     it('routes an upload gzip through the worker; a worker error means upload raw', async () => {

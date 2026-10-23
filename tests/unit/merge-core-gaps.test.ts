@@ -107,7 +107,7 @@ describe('mergeUpdatesWithMeta with gc on an update that has gaps', () => {
 
         expect(hasPending(meta.result)).toBe(true);
         expect(meta.stateVector.byteLength).toBeGreaterThan(0);
-        expect(meta.dsUpdate).toBeDefined();
+        expect(meta.dsUpdate).toBeInstanceOf(Uint8Array);
     });
 
     it('derives metadata from the rebuilt doc when there are no gaps', () => {

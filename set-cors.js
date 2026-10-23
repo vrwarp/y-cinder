@@ -1,5 +1,3 @@
-// removed unused firebase imports
-
 async function setCors() {
     const url = `http://127.0.0.1:9199/v1/b/demo-y-cinder.appspot.com`;
     console.log("Setting CORS on", url);
@@ -21,8 +19,10 @@ async function setCors() {
             })
         });
         console.log(response.status, await response.text());
+        if (!response.ok) process.exitCode = 1;
     } catch (e) {
         console.error(e);
+        process.exitCode = 1;
     }
 }
 setCors();

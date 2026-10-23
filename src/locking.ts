@@ -294,7 +294,7 @@ export async function checkLockStatus(config: LockConfig): Promise<{
     isExpired?: boolean;
     ageMs?: number;
 }> {
-    const { db, path, uid, lockTTL } = config;
+    const { db, path, lockTTL } = config;
     const lockRef = doc(db, path, FIRESTORE_PATHS.LOCK_COMPACTION);
 
     try {

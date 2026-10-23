@@ -63,24 +63,73 @@ describe('utils', () => {
 
             expect(receivedValue).toBe('third');
         });
+
+        describe('timing', () => {
+            beforeEach(() => { vi.useFakeTimers(); });
+            afterEach(() => { vi.useRealTimers(); });
+
+            it('should not invoke the function before the delay elapses', () => {
+                const func = vi.fn();
+                const fn = debounce(func, 50);
+
+                fn();
+                vi.advanceTimersByTime(49);
+                expect(func).not.toHaveBeenCalled();
+
+                vi.advanceTimersByTime(1);
+                expect(func).toHaveBeenCalledTimes(1);
+            });
+
+            it('should restart the delay on every call', () => {
+                const func = vi.fn();
+                const fn = debounce(func, 50);
+
+                fn();
+                vi.advanceTimersByTime(40);
+                fn();
+                vi.advanceTimersByTime(40);
+                expect(func).not.toHaveBeenCalled();
+
+                vi.advanceTimersByTime(10);
+                expect(func).toHaveBeenCalledTimes(1);
+            });
+
+            it('should fire again for calls separated by more than the delay', () => {
+                const func = vi.fn();
+                const fn = debounce(func, 50);
+
+                fn('first');
+                vi.advanceTimersByTime(50);
+                fn('second');
+                vi.advanceTimersByTime(50);
+
+                expect(func.mock.calls).toEqual([['first'], ['second']]);
+            });
+        });
     });
 
     describe('wait', () => {
-        it('should resolve after the specified delay', async () => {
-            const start = Date.now();
-            await wait(100);
-            const elapsed = Date.now() - start;
+        beforeEach(() => { vi.useFakeTimers(); });
+        afterEach(() => { vi.useRealTimers(); });
 
-            expect(elapsed).toBeGreaterThanOrEqual(95); // Allow some tolerance
-            expect(elapsed).toBeLessThan(200);
+        it('should resolve only once the specified delay has elapsed', async () => {
+            let resolved = false;
+            void wait(100).then(() => { resolved = true; });
+
+            await vi.advanceTimersByTimeAsync(99);
+            expect(resolved).toBe(false);
+
+            await vi.advanceTimersByTimeAsync(1);
+            expect(resolved).toBe(true);
         });
 
-        it('should resolve immediately for 0ms', async () => {
-            const start = Date.now();
-            await wait(0);
-            const elapsed = Date.now() - start;
+        it('should resolve on the next timer tick for 0ms', async () => {
+            let resolved = false;
+            void wait(0).then(() => { resolved = true; });
 
-            expect(elapsed).toBeLessThan(50);
+            expect(resolved).toBe(false);
+            await vi.advanceTimersByTimeAsync(0);
+            expect(resolved).toBe(true);
         });
     });
 
@@ -195,8 +244,10 @@ describe('utils', () => {
             const min = Math.min(...samples);
             const max = Math.max(...samples);
 
+            // attempt 1 -> 2 * 100 = 200 base, plus [0, 100) jitter
             expect(min).toBeGreaterThanOrEqual(200);
-            expect(max).toBeLessThan(400);
+            expect(max).toBeLessThan(300);
+            expect(new Set(samples).size).toBeGreaterThan(1);
         });
     });
 });

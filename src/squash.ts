@@ -442,6 +442,14 @@ export async function squashDocument(ctx: SquashContext): Promise<SquashResult> 
             await reclaimUpdateBlobs(ctx, deletedBlobs.map(blobPath => ({ path: blobPath })));
         }
 
+        // The transaction committed nothing (the live doc changed after the
+        // clone), so nothing references the snapshot uploaded above.
+        if (!result.success) {
+            try {
+                await deleteObject(ref(storage, storagePath));
+            } catch { /* orphaned blob is harmless */ }
+        }
+
         // Best-effort cleanup of the previous epoch's blobs
         if (result.success && typeof mainData?.snapshotStoragePath === 'string') {
             try {
